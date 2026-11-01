@@ -1,0 +1,87 @@
+# lib/web (la parte de URLs) contra urllib.parse: lo corre pruebas/test_web_python.py. Lee
+# "casos.json" (en la carpeta donde corre) con las listas "urls" (textos), "joins" (pares
+# base, ref), "consultas" (textos) y "pares" (listas de [nombre, valor]) y escribe una línea
+# "ETIQUETA k valor" por resultado. Los textos salen en hexadecimal UTF-8 para que ningún
+# carácter raro rompa la línea.
+
+use "json"
+use "codigos"
+use "web"
+
+fn h(t: str) -> str {
+    return codigos.hex(codigos.de_texto(t))
+}
+
+fn sal(etiqueta: str, k: i32, valor: str) {
+    print(etiqueta + " " + a_texto(k) + " " + valor)
+}
+
+fn caso_url(d: json.Doc, k: i32) {
+    let t = json.texto(d, "urls." + a_texto(k))
+    match web.analizar(t) {
+        Err(e) => {
+            sal("ANA", k, "ERR")
+        }
+        Ok(u) => {
+            sal("ANA", k, h(u.esquema) + "," + h(u.autoridad) + "," + h(u.ruta) + "," + h(u.consulta) + "," + h(u.fragmento))
+            sal("HOST", k, h(web.host(u)))
+            sal("PUERTO", k, a_texto(web.puerto(u)))
+            sal("USUARIO", k, h(web.usuario(u)))
+            sal("CLAVE", k, h(web.clave(u)))
+            sal("ARMAR", k, h(web.armar(u)))
+        }
+    }
+}
+
+fn caso_join(d: json.Doc, k: i32) {
+    let base = json.texto(d, "joins." + a_texto(k) + ".0")
+    let ref = json.texto(d, "joins." + a_texto(k) + ".1")
+    sal("UNIR", k, h(web.unir(base, ref)))
+}
+
+fn caso_consulta(d: json.Doc, k: i32) {
+    let t = json.texto(d, "consultas." + a_texto(k))
+    let a = web.consulta_leer(t, true)
+    let mut s = ""
+    for i in 0..web.cantidad(a) {
+        s = s + h(web.nombre_en(a, i)) + ":" + h(web.valor_en(a, i)) + ","
+    }
+    sal("QSV", k, s)
+    let b = web.consulta_leer(t, false)
+    let mut s2 = ""
+    for i in 0..web.cantidad(b) {
+        s2 = s2 + h(web.nombre_en(b, i)) + ":" + h(web.valor_en(b, i)) + ","
+    }
+    sal("QSN", k, s2)
+}
+
+fn caso_pares(d: json.Doc, k: i32) {
+    let p = web.pares()
+    let r = "pares." + a_texto(k)
+    for i in 0..json.largo(d, r) {
+        web.poner(p, json.texto(d, r + "." + a_texto(i) + ".0"), json.texto(d, r + "." + a_texto(i) + ".1"))
+    }
+    sal("QSA", k, h(web.consulta_armar(p)))
+}
+
+fn main() {
+    match json.leer_archivo("casos.json") {
+        Err(e) => {
+            print("ERROR no se pudo leer casos.json")
+        }
+        Ok(d) => {
+            for k in 0..json.largo(d, "urls") {
+                caso_url(d, k)
+            }
+            for k in 0..json.largo(d, "joins") {
+                caso_join(d, k)
+            }
+            for k in 0..json.largo(d, "consultas") {
+                caso_consulta(d, k)
+            }
+            for k in 0..json.largo(d, "pares") {
+                caso_pares(d, k)
+            }
+        }
+    }
+}

@@ -1,0 +1,68 @@
+# lib/imagen contra Pillow: lo corre pruebas/test_imagen_pillow.py, que antes
+# deja en la carpeta arg(0) unos BMP hechos con Pillow (y otros armados a mano:
+# de arriba hacia abajo, con máscaras, con paleta, cortados). Este programa lee
+# cada uno y escribe sus píxeles, y después dibuja una escena con lienzo y la
+# guarda en 24 y 32 bits para que Python la abra con Pillow.
+
+use "lienzo"
+use "imagen"
+
+fn hex(p: i32) -> str {
+    let d = "0123456789abcdef"
+    let mut r = ""
+    for k in 0..8 {
+        r = r + d[(p >> (28 - 4 * k)) & 15]
+    }
+    return r
+}
+
+fn volcar(l: lienzo.Lienzo) -> str {
+    let mut todo = ""
+    for y in 0..lienzo.alto(l) {
+        for x in 0..lienzo.ancho(l) {
+            todo = todo + hex(lienzo.leer(l, x, y))
+        }
+    }
+    return todo
+}
+
+fn main() -> i32 {
+    let mut dir = ""
+    match arg(0) {
+        Some(a) => { dir = a + "" }
+        None => {
+            print("falta la carpeta")
+            return 2
+        }
+    }
+    let nombres = ["rgb_1x1.bmp", "rgb_3x2.bmp", "rgb_5x7.bmp", "rgb_17x9.bmp", "rgba_6x4.bmp",
+                   "abajo_arriba_7x3.bmp", "mascaras_alfa_5x5.bmp", "mascaras_565_4x4.bmp",
+                   "v5_alfa_3x3.bmp", "paleta_4x4.bmp", "cortado.bmp", "texto.bmp", "rle_4x4.bmp"]
+    for i in 0..nombres.len() {
+        let mut nombre = ""
+        match nombres.get(i) {
+            Some(x) => { nombre = x + "" }
+            None => {}
+        }
+        match imagen.leer_bmp(dir + "/" + nombre) {
+            Ok(l) => { print("LEE", nombre, lienzo.ancho(l), lienzo.alto(l), volcar(l)) }
+            Err(e) => { print("ERR", nombre, e) }
+        }
+    }
+
+    let l = lienzo.nuevo(23, 13, lienzo.color_a(0, 0, 0, 0))
+    lienzo.rect_lleno(l, 1, 1, 10, 6, lienzo.color(200, 30, 60))
+    lienzo.circulo_lleno(l, 14, 7, 5, lienzo.color_a(20, 220, 90, 140))
+    lienzo.linea(l, 0, 12, 22, 0, lienzo.blanco())
+    lienzo.texto(l, 2, 4, "Añ", lienzo.color_a(255, 255, 0, 200))
+    match imagen.guardar_bmp(l, dir + "/scar24.bmp") {
+        Ok(n) => { print("GUARDA scar24.bmp", n) }
+        Err(e) => { print("ERR scar24.bmp", e) }
+    }
+    match imagen.guardar_bmp32(l, dir + "/scar32.bmp") {
+        Ok(n) => { print("GUARDA scar32.bmp", n) }
+        Err(e) => { print("ERR scar32.bmp", e) }
+    }
+    print("ESCENA", lienzo.ancho(l), lienzo.alto(l), volcar(l))
+    return 0
+}

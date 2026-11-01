@@ -1,0 +1,110 @@
+# Un juego de plataformas de verdad con lib/juego: un mapa de baldosas que se lee de un texto, un personaje
+# que corre y salta (flechas o A/D, espacio para saltar), una animación de caminata, cámara que lo sigue, y la
+# lógica a 60 pasos por segundo sin importar cuántos cuadros por segundo dé la ventana.
+# Las baldosas y el personaje se dibujan en el programa con lib/lienzo (una hoja de sprites sale de cualquier PNG
+# con juego.hoja_png). Con el guion (gui/305_juego.guion) las teclas las aprieta el guion y el reloj es el de
+# pasos fijos, así que el resultado es siempre el mismo. Con guion cada cuadro da 12 pasos de lógica (no 1):
+# el intérprete tarda más de medio segundo en dibujar un cuadro, y así la partida entera son 16 cuadros.
+# ci-env: SCAR_SDL_GUION=./gui/305_juego.guion
+# ci-env: SCAR_SDL_MAX_FRAMES=16
+
+use "gui"
+use "lienzo"
+use "pantalla"
+use "juego"
+
+extern "C" fn getenv(nombre: str) -> Result<str>
+
+fn mundo() -> juego.Mapa {
+    let m = juego.mapa_texto(16, "#..........................#\n#..........................#\n#..........................#\n#.................bbb......#\n#.............#####........#\n#..........................#\n#.....###.......##.........#\n#..........................#\n#...............###....o...#\n############################")
+    return m
+}
+
+# Cuadros 0 y 1: baldosas (1 piso, 2 adorno); 2 a 5: el personaje caminando; 6: el personaje en el aire.
+fn hoja_de_dibujo() -> juego.Hoja {
+    let img = lienzo.nuevo(112, 16, lienzo.transparente())
+    lienzo.rect_lleno(img, 0, 0, 16, 16, lienzo.color(90, 62, 44))
+    lienzo.rect_lleno(img, 0, 0, 16, 4, lienzo.color(70, 170, 80))
+    lienzo.rect_lleno(img, 0, 8, 16, 1, lienzo.color(70, 48, 34))
+    lienzo.rect_lleno(img, 16, 5, 16, 6, lienzo.color_a(240, 240, 255, 200))
+    for k in 0..5 {
+        let x = 32 + k * 16
+        lienzo.rect_lleno(img, x + 3, 2, 10, 12, lienzo.color(230, 90, 60))
+        lienzo.rect_lleno(img, x + 8, 4, 3, 3, lienzo.blanco())
+        let mut paso = 0
+        if k == 1 {
+            paso = 2
+        }
+        if k == 3 {
+            paso = 0 - 2
+        }
+        lienzo.rect_lleno(img, x + 4 + paso, 13, 3, 3, lienzo.color(40, 30, 30))
+        lienzo.rect_lleno(img, x + 9 - paso, 13, 3, 3, lienzo.color(40, 30, 30))
+    }
+    return juego.hoja(img, 16, 16)
+}
+
+fn main() -> i32 {
+    let fijo = getenv("SCAR_SDL_GUION").is_ok()
+    let ui = gui.ventana("Plataformas con lib/juego", 880, 600)
+    gui.oscuro(ui)
+    let mapa = mundo()
+    let hoja = hoja_de_dibujo()
+    let anda = juego.animacion(2, 4, 110, juego.repetir())
+    let teclas = juego.entrada([79, 80, 7, 4, 44, 82, 26])
+    let mut reloj = juego.reloj(60)
+    let mut por_cuadro = 1
+    if fijo {
+        reloj = juego.reloj_fijo(60)
+        por_cuadro = 12
+    }
+    let yo = juego.cuerpo(40, 100, 10, 14)
+    let cam = juego.camara(260, 170, juego.ancho_mundo(mapa), juego.alto_mundo(mapa))
+    let vista = lienzo.nuevo(260, 170, lienzo.color(24, 30, 52))
+    let mut mira = 1
+    let mut t_anda = 0
+    let mut saltos = 0
+    let mut pasos_dados = 0
+    while gui.abierta(ui) {
+        let n = juego.pasos_ahora(reloj) * por_cuadro
+        for i in 0..n {
+            juego.leer(teclas)
+            let eje = juego.eje(teclas, 80, 79) + juego.eje(teclas, 4, 7)
+            yo.vx = to_f64(max(0 - 1, min(1, eje))) * 1.6
+            if eje != 0 {
+                mira = if eje > 0 { 1 } else { 0 - 1 }
+                t_anda = t_anda + 17
+            } else {
+                t_anda = 0
+            }
+            let salta = juego.apretada(teclas, 44) or juego.apretada(teclas, 82) or juego.apretada(teclas, 26)
+            if salta and juego.sobre_suelo(mapa, yo) {
+                yo.vy = 0.0 - 4.6
+                saltos = saltos + 1
+            }
+            yo.vy = min(6.0, yo.vy + 0.22)
+            juego.mover(mapa, yo, yo.vx, yo.vy)
+            pasos_dados = pasos_dados + 1
+        }
+        juego.suavizar(cam, yo.x + 5, yo.y + 7, 1, 6)
+        lienzo.limpiar(vista, lienzo.color(24, 30, 52))
+        juego.dibujar_mapa(vista, mapa, hoja, cam)
+        let mut cuadro = 6
+        if juego.sobre_suelo(mapa, yo) {
+            cuadro = juego.cuadro(anda, t_anda)
+            if t_anda == 0 {
+                cuadro = 2
+            }
+        }
+        if mira > 0 {
+            juego.dibujar(vista, hoja, cuadro, yo.x - 3 - cam.x, yo.y - 2 - cam.y)
+        } else {
+            juego.dibujar_espejo(vista, hoja, cuadro, yo.x - 3 - cam.x, yo.y - 2 - cam.y)
+        }
+        gui.titulo(ui, "Plataformas")
+        pantalla.mostrar(ui, vista, 3)
+        gui.texto_tenue(ui, "Flechas o A/D: caminar. Espacio: saltar.   x=" + a_texto(yo.x) + " y=" + a_texto(yo.y) + "  saltos=" + a_texto(saltos))
+    }
+    print("posicion " + a_texto(yo.x) + " " + a_texto(yo.y) + " saltos " + a_texto(saltos) + " pasos " + a_texto(pasos_dados) + " camara " + a_texto(cam.x) + " " + a_texto(cam.y))
+    return 0
+}

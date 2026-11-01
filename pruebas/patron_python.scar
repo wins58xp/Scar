@@ -1,0 +1,204 @@
+# lib/patron contra el módulo `re` de Python: lo corre pruebas/test_patron_python.py.
+# Lee "casos.json" (en la carpeta donde corre) con las listas "comp" (patrones a compilar),
+# "busq" (buscar / buscar_desde / al_inicio / completo), "todas" (todas, encontrar, contar),
+# "sub" (reemplazar y reemplazar_texto), "split" (dividir_n) y "escape" (escapar), y escribe
+# cada resultado en una línea "ETIQUETA k valor". Los textos van como puntos de código
+# separados por comas ("_" = texto vacío) para que no los toque ninguna codificación.
+
+use "json"
+use "patron"
+
+fn cps(s: str) -> str {
+    let n = s.len()
+    if n == 0 {
+        return "_"
+    }
+    let mut r = ""
+    for i in 0..n {
+        if i > 0 {
+            r = r + ","
+        }
+        r = r + a_texto(ord(s[i]))
+    }
+    return r
+}
+
+fn sal(etiqueta: str, k: i32, valor: str) {
+    print(etiqueta + " " + a_texto(k) + " " + valor)
+}
+
+fn compilar(d: json.Doc, r: str) -> Result<patron.Patron> {
+    return patron.compilar_con(json.texto(d, r + ".p"), json.texto(d, r + ".f"))
+}
+
+fn describir(p: patron.Patron, m: patron.Coincidencia) -> str {
+    if not patron.hay(m) {
+        return "NO"
+    }
+    let mut r = "OK"
+    for j in 0..(patron.num_grupos(p) + 1) {
+        r = r + " " + a_texto(patron.inicio_grupo(m, j)) + "," + a_texto(patron.fin_grupo(m, j)) + "," + cps(patron.grupo(m, j))
+    }
+    return r
+}
+
+fn caso_comp(d: json.Doc, k: i32) {
+    match compilar(d, "comp." + a_texto(k)) {
+        Ok(p) => {
+            sal("C", k, "OK " + a_texto(patron.num_grupos(p)))
+        }
+        Err(e) => {
+            sal("C", k, "ERR")
+        }
+    }
+}
+
+fn caso_busq(d: json.Doc, k: i32) {
+    let r = "busq." + a_texto(k)
+    let t = json.texto(d, r + ".t")
+    let modo = json.texto(d, r + ".modo")
+    match compilar(d, r) {
+        Ok(p) => {
+            let mut m = patron.buscar(p, t)
+            if modo == "desde" {
+                m = patron.buscar_desde(p, t, to_i32(json.entero(d, r + ".desde")))
+            }
+            if modo == "match" {
+                m = patron.al_inicio(p, t)
+            }
+            if modo == "full" {
+                m = patron.completo(p, t)
+            }
+            let mut linea = describir(p, m)
+            let nn = if patron.hay(m) { json.largo(d, r + ".nombres") } else { 0 }
+            for q in 0..nn {
+                let nombre = json.texto(d, r + ".nombres." + a_texto(q))
+                linea = linea + " @" + nombre + "=" + a_texto(patron.indice_grupo(p, nombre)) + "," + cps(patron.grupo_nombre(p, m, nombre))
+            }
+            sal("B", k, linea)
+        }
+        Err(e) => {
+            sal("B", k, "ERR")
+        }
+    }
+}
+
+fn caso_todas(d: json.Doc, k: i32) {
+    let r = "todas." + a_texto(k)
+    let t = json.texto(d, r + ".t")
+    match compilar(d, r) {
+        Ok(p) => {
+            let v = patron.todas(p, t)
+            let mut linea = a_texto(v.len())
+            for i in 0..v.len() {
+                match v.get(i) {
+                    Some(m) => {
+                        linea = linea + " |" + describir(p, m)
+                    }
+                    None => {
+                        linea = linea + " ?"
+                    }
+                }
+            }
+            sal("T", k, linea)
+            let e = patron.encontrar(p, t)
+            sal("N", k, a_texto(patron.contar(p, t)))
+            let mut partes = ""
+            for i in 0..e.len() {
+                match e.get(i) {
+                    Some(x) => {
+                        partes = partes + cps(x) + " "
+                    }
+                    None => {
+                        partes = partes + "? "
+                    }
+                }
+            }
+            sal("E", k, a_texto(e.len()) + " " + partes)
+        }
+        Err(e) => {
+            sal("T", k, "ERR")
+        }
+    }
+}
+
+fn caso_sub(d: json.Doc, k: i32) {
+    let r = "sub." + a_texto(k)
+    let t = json.texto(d, r + ".t")
+    let cuenta = to_i32(json.entero(d, r + ".n"))
+    let tope = if cuenta == 0 { -1 } else { cuenta }
+    match compilar(d, r) {
+        Ok(p) => {
+            match patron.reemplazar_n(p, t, json.texto(d, r + ".tpl"), tope) {
+                Ok(s) => {
+                    sal("S", k, "OK " + cps(s))
+                }
+                Err(e) => {
+                    sal("S", k, "ERR")
+                }
+            }
+            sal("SL", k, cps(patron.reemplazar_texto_n(p, t, json.texto(d, r + ".lit"), tope)))
+        }
+        Err(e) => {
+            sal("S", k, "CERR")
+        }
+    }
+}
+
+fn caso_split(d: json.Doc, k: i32) {
+    let r = "split." + a_texto(k)
+    let t = json.texto(d, r + ".t")
+    let mx = to_i32(json.entero(d, r + ".n"))
+    match compilar(d, r) {
+        Ok(p) => {
+            let v = patron.dividir_n(p, t, if mx == 0 { -1 } else { mx })
+            let mut linea = a_texto(v.len())
+            for i in 0..v.len() {
+                match v.get(i) {
+                    Some(x) => {
+                        linea = linea + " " + cps(x)
+                    }
+                    None => {
+                        linea = linea + " ?"
+                    }
+                }
+            }
+            sal("P", k, linea)
+        }
+        Err(e) => {
+            sal("P", k, "ERR")
+        }
+    }
+}
+
+fn caso_escape(d: json.Doc, k: i32) {
+    sal("X", k, cps(patron.escapar(json.texto(d, "escape." + a_texto(k)))))
+}
+
+fn main() {
+    match json.leer_archivo("casos.json") {
+        Err(e) => {
+            print("ERROR no se pudo leer casos.json")
+        }
+        Ok(d) => {
+            for k in 0..json.largo(d, "comp") {
+                caso_comp(d, k)
+            }
+            for k in 0..json.largo(d, "busq") {
+                caso_busq(d, k)
+            }
+            for k in 0..json.largo(d, "todas") {
+                caso_todas(d, k)
+            }
+            for k in 0..json.largo(d, "sub") {
+                caso_sub(d, k)
+            }
+            for k in 0..json.largo(d, "split") {
+                caso_split(d, k)
+            }
+            for k in 0..json.largo(d, "escape") {
+                caso_escape(d, k)
+            }
+        }
+    }
+}

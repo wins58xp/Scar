@@ -1,0 +1,246 @@
+# lib/colecciones, probada con
+# lib/prueba.
+#
+# Pila y cola de i32, de str y de un struct; un mapa que cuenta palabras y se
+# recorre en el orden en que entraron (también después de sacar y volver a
+# poner); un mapa con claves i32 que crece de 8 cubetas a más de mil;
+# conjuntos con unión, intersección y diferencia; y ordenar números, textos y
+# structs (estable). La comparación con list, deque, dict y sorted de Python,
+# con miles de operaciones al azar, está en pruebas/test_colecciones_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "colecciones"
+
+struct Tarea {
+    nombre: str
+    prioridad: i32
+}
+
+fn antes(a: Tarea, b: Tarea) -> bool {
+    return a.prioridad < b.prioridad
+}
+
+fn texto_de(o: Option<str>) -> str {
+    let mut r = "(nada)"
+    match o {
+        Some(s) => {
+            r = s + ""
+        }
+        None => {}
+    }
+    return r
+}
+
+fn lista(v: Vec<i32>) -> str {
+    let mut r = ""
+    for i in 0..v.len() {
+        if i > 0 {
+            r = r + " "
+        }
+        r = r + a_texto(v.get(i).unwrap_or(0))
+    }
+    return r
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("colecciones")
+
+    prueba.seccion(t, "pila")
+    let p = colecciones.pila(0)
+    prueba.afirmar(t, colecciones.pila_vacia(p), "empieza vacía")
+    prueba.afirmar(t, colecciones.tope(p).is_none(), "tope de una vacía")
+    for i in 1..6 {
+        colecciones.apilar(p, i * 10)
+    }
+    prueba.afirmar_igual_i32(t, colecciones.tope(p).unwrap_or(0), 50, "tope")
+    prueba.afirmar_igual_i32(t, colecciones.desapilar(p).unwrap_or(0), 50, "sale el último")
+    prueba.afirmar_igual_i32(t, colecciones.desapilar(p).unwrap_or(0), 40, "y después el anterior")
+    prueba.afirmar_igual_i32(t, colecciones.pila_largo(p), 3, "largo")
+    let ps = colecciones.pila("")
+    colecciones.apilar(ps, "uno")
+    colecciones.apilar(ps, "dos" + "!")
+    prueba.afirmar_igual_str(t, texto_de(colecciones.desapilar(ps)), "dos!", "pila de textos")
+    prueba.afirmar_igual_str(t, texto_de(colecciones.tope(ps)), "uno", "tope de textos")
+
+    prueba.seccion(t, "cola")
+    let c = colecciones.cola(Tarea { nombre: "", prioridad: 0 })
+    colecciones.encolar(c, Tarea { nombre: "lavar", prioridad: 2 })
+    colecciones.encolar(c, Tarea { nombre: "cocinar", prioridad: 1 })
+    let mut primera = ""
+    match colecciones.desencolar(c) {
+        Some(x) => {
+            primera = x.nombre + ""
+        }
+        None => {}
+    }
+    prueba.afirmar_igual_str(t, primera, "lavar", "sale el primero que entró")
+    colecciones.encolar(c, Tarea { nombre: "barrer", prioridad: 3 })
+    let mut orden = ""
+    while let Some(x) = colecciones.desencolar(c) {
+        orden = orden + x.nombre + ","
+    }
+    prueba.afirmar_igual_str(t, orden, "cocinar,barrer,", "y en orden, aunque se mezclen encolar y desencolar")
+    prueba.afirmar(t, colecciones.cola_vacia(c), "queda vacía")
+    let ci = colecciones.cola(0)
+    let mut suma = 0
+    for i in 0..1000 {
+        colecciones.encolar(ci, i)
+        if i % 3 == 0 {
+            suma = suma + colecciones.desencolar(ci).unwrap_or(0)
+        }
+    }
+    prueba.afirmar_igual_i32(t, suma, 333 * 334 / 2, "1000 encolados, 334 desencolados: 0+1+...+333")
+    prueba.afirmar_igual_i32(t, colecciones.frente(ci).unwrap_or(0), 334, "frente")
+    prueba.afirmar_igual_i32(t, colecciones.cola_largo(ci), 666, "largo")
+
+    prueba.seccion(t, "mapa (claves str)")
+    let m = colecciones.mapa(0)
+    let palabras = ["el", "sol", "y", "el", "mar", "y", "el", "año", "Sol"]
+    for i in 0..palabras.len() {
+        match palabras.get(i) {
+            Some(w) => colecciones.sumar(m, w + "", 1)
+            None => {}
+        }
+    }
+    prueba.afirmar_igual_i32(t, colecciones.largo(m), 6, "seis palabras distintas")
+    prueba.afirmar_igual_i32(t, colecciones.obtener(m, "el").unwrap_or(0), 3, "'el' tres veces")
+    prueba.afirmar(t, colecciones.obtener(m, "luna").is_none(), "una que no está")
+    prueba.afirmar(t, colecciones.contiene(m, "año"), "contiene, con ñ")
+    prueba.afirmar(t, not colecciones.contiene(m, "ano"), "sin ñ es otra")
+    let mut recorrido = ""
+    for i in 0..colecciones.largo(m) {
+        recorrido = recorrido + colecciones.clave(m, i) + "=" + a_texto(colecciones.valor(m, i).unwrap_or(0)) + " "
+    }
+    prueba.afirmar_igual_str(t, recorrido, "el=3 sol=1 y=2 mar=1 año=1 Sol=1 ", "en el orden en que entraron")
+    prueba.afirmar(t, colecciones.quitar(m, "sol"), "quitar una que está")
+    prueba.afirmar(t, not colecciones.quitar(m, "sol"), "quitarla otra vez")
+    colecciones.poner(m, "el", 0)
+    colecciones.poner(m, "sol", 7)
+    recorrido = ""
+    for i in 0..colecciones.largo(m) {
+        recorrido = recorrido + colecciones.clave(m, i) + "=" + a_texto(colecciones.valor(m, i).unwrap_or(0)) + " "
+    }
+    prueba.afirmar_igual_str(t, recorrido, "el=0 y=2 mar=1 año=1 Sol=1 sol=7 ",
+                             "poner una que está no la mueve; una que se sacó vuelve al final")
+    let ks = colecciones.claves(m)
+    prueba.afirmar_igual_i32(t, ks.len(), 6, "claves()")
+    prueba.afirmar_igual_str(t, texto_de(ks.get(5)), "sol", "claves() en orden")
+    let ms = colecciones.mapa("")
+    colecciones.poner(ms, "es", "hola")
+    colecciones.poner(ms, "en", "hello")
+    colecciones.poner(ms, "es", "buenas")
+    prueba.afirmar_igual_str(t, texto_de(colecciones.obtener(ms, "es")), "buenas", "valores str, sobrescritos")
+
+    prueba.seccion(t, "mapa (claves i32)")
+    let e = colecciones.mapa_ent(0.0)
+    for i in 0..2000 {
+        colecciones.poner_ent(e, i * 7 - 3000, to_f64(i) * 0.5)
+    }
+    prueba.afirmar_igual_i32(t, colecciones.largo_ent(e), 2000, "2000 claves (la tabla crece sola)")
+    prueba.afirmar_igual_f64(t, colecciones.obtener_ent(e, 0 - 3000).unwrap_or(0.0 - 1.0), 0.0, "la primera")
+    prueba.afirmar_igual_f64(t, colecciones.obtener_ent(e, 1999 * 7 - 3000).unwrap_or(0.0 - 1.0), 999.5, "la última")
+    prueba.afirmar(t, not colecciones.contiene_ent(e, 1), "una que no está")
+    for i in 0..1000 {
+        colecciones.quitar_ent(e, i * 14 - 3000)
+    }
+    prueba.afirmar_igual_i32(t, colecciones.largo_ent(e), 1000, "sacar la mitad")
+    prueba.afirmar_igual_i32(t, colecciones.clave_ent(e, 0), 0 - 2993, "la primera que queda")
+    prueba.afirmar_igual_i32(t, colecciones.clave_ent(e, 999), 1999 * 7 - 3000, "la última que queda")
+    colecciones.sumar_ent(e, 0 - 2993, 10.0)
+    prueba.afirmar_igual_f64(t, colecciones.valor_ent(e, 0).unwrap_or(0.0), 10.5, "sumar_ent")
+
+    prueba.seccion(t, "conjuntos")
+    let a = colecciones.conjunto()
+    let b = colecciones.conjunto()
+    let xs = ["rojo", "verde", "azul", "rojo"]
+    let ys = ["azul", "negro", "verde"]
+    for i in 0..xs.len() {
+        match xs.get(i) {
+            Some(s) => colecciones.agregar(a, s + "")
+            None => {}
+        }
+    }
+    for i in 0..ys.len() {
+        match ys.get(i) {
+            Some(s) => colecciones.agregar(b, s + "")
+            None => {}
+        }
+    }
+    prueba.afirmar_igual_i32(t, colecciones.cardinal(a), 3, "un repetido cuenta una vez")
+    let u = colecciones.union(a, b)
+    prueba.afirmar_igual_i32(t, colecciones.cardinal(u), 4, "unión")
+    prueba.afirmar_igual_str(t, colecciones.elemento(u, 3), "negro", "lo nuevo del segundo, al final")
+    let it = colecciones.interseccion(a, b)
+    prueba.afirmar_igual_str(t, colecciones.elemento(it, 0) + "," + colecciones.elemento(it, 1), "verde,azul",
+                             "intersección, en el orden del primero")
+    let d = colecciones.diferencia(a, b)
+    prueba.afirmar_igual_i32(t, colecciones.cardinal(d), 1, "diferencia")
+    prueba.afirmar(t, colecciones.tiene(d, "rojo"), "rojo solo está en el primero")
+    prueba.afirmar(t, colecciones.sacar(a, "rojo"), "sacar")
+    prueba.afirmar(t, not colecciones.tiene(a, "rojo"), "ya no está")
+    let pe = colecciones.conjunto_ent()
+    for i in 0..100 {
+        colecciones.agregar_ent(pe, (i * i) % 17)
+    }
+    prueba.afirmar_igual_i32(t, colecciones.cardinal_ent(pe), 9, "los cuadrados módulo 17 son 9")
+    let otros = colecciones.conjunto_ent()
+    colecciones.agregar_ent(otros, 0)
+    colecciones.agregar_ent(otros, 3)
+    prueba.afirmar_igual_i32(t, colecciones.cardinal_ent(colecciones.interseccion_ent(pe, otros)), 1, "3 no es un cuadrado módulo 17")
+    prueba.afirmar_igual_i32(t, colecciones.cardinal_ent(colecciones.union_ent(pe, otros)), 10, "unión_ent")
+    prueba.afirmar_igual_i32(t, colecciones.cardinal_ent(colecciones.diferencia_ent(pe, otros)), 8, "diferencia_ent")
+
+    prueba.seccion(t, "ordenar")
+    let v = colecciones.ordenar([5, 0 - 2, 9, 0, 5, 3, 0 - 2, 8, 1, 7, 6, 4, 2, 9, 0 - 10, 11])
+    prueba.afirmar_igual_str(t, lista(v), "-10 -2 -2 0 1 2 3 4 5 5 6 7 8 9 9 11", "i32")
+    let grande: Vec<i32> = vec_new()
+    for i in 0..5000 {
+        grande.push((i * 7919) % 5003)
+    }
+    let g = colecciones.ordenar(grande)
+    let mut en_orden = true
+    for i in 1..g.len() {
+        if g.get(i - 1).unwrap_or(0) > g.get(i).unwrap_or(0) {
+            en_orden = false
+        }
+    }
+    prueba.afirmar(t, en_orden and g.len() == 5000, "5000 números")
+    let iguales: Vec<i32> = vec_new()
+    for i in 0..3000 {
+        iguales.push(i % 2)
+    }
+    let ig = colecciones.ordenar(iguales)
+    prueba.afirmar(t, ig.get(1499).unwrap_or(9) == 0 and ig.get(1500).unwrap_or(9) == 1, "3000 de dos valores (partición en tres)")
+    let f = colecciones.ordenar_desc([2.5, 0.0 - 1.0, 3.25, 0.0])
+    prueba.afirmar_igual_f64(t, f.get(0).unwrap_or(0.0), 3.25, "f64 de mayor a menor")
+    prueba.afirmar_igual_f64(t, f.get(3).unwrap_or(0.0), 0.0 - 1.0, "el menor al final")
+    let w = colecciones.ordenar_textos(["pera", "Zorro", "ñandú", "abeja", "ab", "manzana", "Árbol", "zorro"])
+    let mut ws = ""
+    for i in 0..w.len() {
+        ws = ws + texto_de(w.get(i)) + " "
+    }
+    prueba.afirmar_igual_str(t, ws, "Zorro ab abeja manzana pera zorro Árbol ñandú ", "textos por código, como Python")
+    prueba.afirmar_igual_i32(t, colecciones.comparar("ab", "abc"), 0 - 1, "un prefijo va antes")
+    prueba.afirmar_igual_i32(t, colecciones.comparar("ñ", "ñ"), 0, "iguales")
+    let tareas: Vec<Tarea> = vec_new()
+    tareas.push(Tarea { nombre: "a", prioridad: 2 })
+    tareas.push(Tarea { nombre: "b", prioridad: 1 })
+    tareas.push(Tarea { nombre: "c", prioridad: 2 })
+    tareas.push(Tarea { nombre: "d", prioridad: 0 })
+    tareas.push(Tarea { nombre: "e", prioridad: 1 })
+    tareas.push(Tarea { nombre: "f", prioridad: 2 })
+    let o = colecciones.ordenar_por(tareas, antes)
+    let mut os = ""
+    for i in 0..o.len() {
+        match o.get(i) {
+            Some(x) => {
+                os = os + x.nombre
+            }
+            None => {}
+        }
+    }
+    prueba.afirmar_igual_str(t, os, "dbeacf", "ordenar_por es estable: los que empatan quedan en su orden")
+
+    return prueba.terminar(t)
+}

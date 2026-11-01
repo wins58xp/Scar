@@ -1,0 +1,118 @@
+# Capítulo 15: una interfaz gráfica con gui. Necesita SDL2 (ver el capítulo).
+#
+#   scar run ejemplos/15_interfaces.scar
+#
+# Una lista de tareas: se escriben en el campo, se agregan, se marcan como
+# hechas y se borran. Arriba, una barra de progreso; a la derecha, el detalle.
+#
+# Las tareas viven en un struct (Agenda): así las funciones las reciben
+# prestadas, en vez de llevarse la lista (capítulo 8).
+
+use "gui"
+
+struct Tarea {
+    titulo: str
+    hecha: bool
+}
+
+struct Agenda {
+    tareas: Vec<Tarea>
+}
+
+fn hechas(a: Agenda) -> i32 {
+    let mut n = 0
+    for i in 0..a.tareas.len() {
+        match a.tareas.get(i) {
+            Some(t) => {
+                if t.hecha {
+                    n = n + 1
+                }
+            }
+            None => {}
+        }
+    }
+    return n
+}
+
+fn borrar(a: Agenda, k: i32) {
+    let resto: Vec<Tarea> = vec_new()
+    for i in 0..a.tareas.len() {
+        if i != k {
+            match a.tareas.get(i) {
+                Some(t) => resto.push(t)
+                None => {}
+            }
+        }
+    }
+    a.tareas = resto
+}
+
+fn llenar(lista: gui.Lista, a: Agenda) {
+    gui.lista_vaciar(lista)
+    for i in 0..a.tareas.len() {
+        match a.tareas.get(i) {
+            Some(t) => {
+                let marca = if t.hecha { "[x] " } else { "[ ] " }
+                gui.lista_agregar(lista, marca + t.titulo)
+            }
+            None => {}
+        }
+    }
+}
+
+fn main() {
+    let ui = gui.ventana("Tareas", 640, 460)
+    let agenda = Agenda { tareas: vec_new() }
+    agenda.tareas.push(Tarea { titulo: "Instalar SCAR", hecha: true })
+    agenda.tareas.push(Tarea { titulo: "Leer el capítulo 15", hecha: false })
+    let lista = gui.lista_nueva()
+    let mut nueva = ""
+    let mut elegida = -1
+    let mut oscuro = false
+
+    while gui.abierta(ui) {
+        gui.titulo(ui, "Mis tareas")
+        let total = agenda.tareas.len()
+        let listas = hechas(agenda)
+        let fraccion = if total == 0 { 0.0 } else { to_f64(listas) / to_f64(total) }
+        gui.progreso(ui, fraccion)
+        gui.texto_tenue(ui, a_texto(listas) + " de " + a_texto(total) + " hechas")
+
+        llenar(lista, agenda)
+        gui.columna(ui, 360)
+        elegida = gui.lista(ui, lista, elegida, 8)
+        gui.columna(ui, 0)
+        gui.subtitulo(ui, "Tarea")
+        match agenda.tareas.get(elegida) {
+            Some(t) => {
+                gui.parrafo(ui, t.titulo)
+                let accion = if t.hecha { "Marcar pendiente" } else { "Marcar hecha" }
+                if gui.boton(ui, accion) {
+                    agenda.tareas.set(elegida, Tarea { titulo: t.titulo, hecha: not t.hecha })
+                }
+                if gui.boton(ui, "Borrar") {
+                    borrar(agenda, elegida)
+                    elegida = -1
+                }
+            }
+            None => gui.texto_tenue(ui, "Elige una tarea de la lista.")
+        }
+        gui.fin_columnas(ui)
+
+        gui.separador(ui)
+        gui.fila(ui)
+        nueva = gui.campo(ui, "Nueva", nueva)
+        if gui.boton(ui, "Agregar") and len(nueva) > 0 {
+            agenda.tareas.push(Tarea { titulo: nueva, hecha: false })
+            nueva = ""
+        }
+        gui.fin_fila(ui)
+        oscuro = gui.casilla(ui, "Tema oscuro", oscuro)
+        if oscuro {
+            gui.oscuro(ui)
+        } else {
+            gui.claro(ui)
+        }
+    }
+    print("quedaron", agenda.tareas.len(), "tareas")
+}

@@ -1,0 +1,1250 @@
+# lib/json.scar: JSON completo (use "json"): leer a un árbol, buscar por ruta, armar y escribir.
+#
+#   let d = json.analizar_texto("{\"sismos\": [{\"lugar\": \"Calama\", \"mag\": 2.9}]}")?
+#   json.texto(d, "sismos.0.lugar")      # Calama
+#   json.numero(d, "sismos.0.mag")       # 2.9
+#   json.largo(d, "sismos")              # 1
+#
+#   let o = json.nuevo_objeto()
+#   json.poner_texto(o, 0, "lugar", "Calama")
+#   let lista = json.poner_arreglo(o, 0, "mags")
+#   json.agregar_numero(o, lista, 2.9)
+#   json.escribir(o)                     # {"lugar":"Calama","mags":[2.9]}
+#
+# Las rutas separan con "." y un número elige un elemento de un arreglo; para
+# una clave que lleva un punto, json.hijo(d, nodo, clave). json_leer da una
+# lista plana de hojas con su ruta, armada desde el árbol.
+# Probada contra el módulo json de Python.
+
+# ---------- lector de JSON (a una lista plana de rutas y valores) ----------
+#
+# Lee un texto JSON desde sus bytes (UTF-8) y lo deja como una lista de hojas:
+# cada valor que no es un objeto ni un arreglo, con su ruta. Por ejemplo
+#   {"features": [{"properties": {"mag": 4.6, "place": "Calama"}}]}
+# queda como
+#   features.0.properties.mag     4.6
+#   features.0.properties.place   Calama
+# Los str se devuelven ya decodificados (escapes \n, \", \uXXXX con pares
+# sustitutos, UTF-8); los números, true, false y null, como su texto.
+
+struct Json {
+    b: Vec<i32>
+    pos: i32
+    rutas: Vec<str>
+    valores: Vec<str>
+    error: str
+}
+
+fn json_byte(j: Json, i: i32) -> i32 {
+    let mut x = -1
+    let mut o = j.b.get(i)
+    while let Some(e) = o {
+        x = e
+        o = None
+    }
+    return x
+}
+
+fn json_actual(j: Json) -> i32 {
+    return json_byte(j, j.pos)
+}
+
+fn json_espacios(j: Json) {
+    let mut c = json_actual(j)
+    while c == 32 or c == 9 or c == 10 or c == 13 {
+        j.pos = j.pos + 1
+        c = json_actual(j)
+    }
+}
+
+fn json_falla(j: Json, que: str) -> bool {
+    if j.error.len() == 0 {
+        j.error = "JSON: " + que + " en el byte " + a_texto(j.pos)
+    }
+    return false
+}
+
+fn json_hex(c: i32) -> i32 {
+    if c >= 48 and c <= 57 {
+        return c - 48
+    }
+    if c >= 65 and c <= 70 {
+        return c - 55
+    }
+    if c >= 97 and c <= 102 {
+        return c - 87
+    }
+    return -1
+}
+
+# 4 dígitos hex desde j.pos (-1 si no lo son).
+fn json_u16(j: Json) -> i32 {
+    let mut v = 0
+    for k in 0..4 {
+        let d = json_hex(json_byte(j, j.pos + k))
+        if d < 0 {
+            return -1
+        }
+        v = v * 16 + d
+    }
+    j.pos = j.pos + 4
+    return v
+}
+
+# Un str JSON (j.pos en la comilla de apertura). En `j.error` si está mal.
+fn json_cadena(j: Json) -> str {
+    let mut t = ""
+    j.pos = j.pos + 1
+    while true {
+        let c = json_actual(j)
+        if c < 0 {
+            json_falla(j, "str sin cerrar")
+            return t
+        }
+        if c == 34 {
+            j.pos = j.pos + 1
+            return t
+        }
+        if c < 32 {
+            json_falla(j, "carácter de control sin escapar en un str")
+            return t
+        }
+        if c == 92 {
+            let e = json_byte(j, j.pos + 1)
+            j.pos = j.pos + 2
+            if e == 34 or e == 92 or e == 47 {
+                t = t + chr(e)
+            } else {
+                if e == 110 {
+                    t = t + chr(10)
+                } else {
+                    if e == 116 {
+                        t = t + chr(9)
+                    } else {
+                        if e == 114 {
+                            t = t + chr(13)
+                        } else {
+                            if e == 98 {
+                                t = t + chr(8)
+                            } else {
+                                if e == 102 {
+                                    t = t + chr(12)
+                                } else {
+                                    if e == 117 {
+                                        let mut u = json_u16(j)
+                                        if u >= 55296 and u <= 56319 and json_actual(j) == 92 and json_byte(j, j.pos + 1) == 117 {
+                                            # par sustituto UTF-16
+                                            j.pos = j.pos + 2
+                                            let baja = json_u16(j)
+                                            if baja >= 56320 and baja <= 57343 {
+                                                u = 65536 + ((u - 55296) << 10) + (baja - 56320)
+                                            } else {
+                                                u = -1
+                                            }
+                                        }
+                                        if u <= 0 or (u >= 55296 and u <= 57343) {
+                                            json_falla(j, "escape \\u inválido")
+                                            return t
+                                        }
+                                        t = t + chr(u)
+                                    } else {
+                                        json_falla(j, "escape inválido")
+                                        return t
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            # un carácter UTF-8 de 1 a 4 bytes
+            let mut cp = c
+            let mut extra = 0
+            if c >= 240 {
+                cp = c & 7
+                extra = 3
+            } else {
+                if c >= 224 {
+                    cp = c & 15
+                    extra = 2
+                } else {
+                    if c >= 192 {
+                        cp = c & 31
+                        extra = 1
+                    }
+                }
+            }
+            if c >= 128 and extra == 0 {
+                json_falla(j, "UTF-8 inválido")
+                return t
+            }
+            for k in 1..extra + 1 {
+                let s = json_byte(j, j.pos + k)
+                if s < 128 or s >= 192 {
+                    json_falla(j, "UTF-8 inválido")
+                    return t
+                }
+                cp = (cp << 6) | (s & 63)
+            }
+            if cp < 1 or cp > 1114111 or (cp >= 55296 and cp <= 57343) {
+                json_falla(j, "UTF-8 inválido")
+                return t
+            }
+            t = t + chr(cp)
+            j.pos = j.pos + 1 + extra
+        }
+    }
+    return t
+}
+
+fn json_hoja(j: Json, ruta: str, valor: str) {
+    j.rutas.push(ruta)
+    j.valores.push(valor)
+}
+
+fn json_hijo(ruta: str, nombre: str) -> str {
+    if ruta.len() == 0 {
+        return nombre
+    }
+    return ruta + "." + nombre
+}
+
+fn json_es_numero(t: str) -> bool {
+    let n = t.len()
+    let mut i = 0
+    if i < n and t[i] == "-" {
+        i = i + 1
+    }
+    let mut digitos = 0
+    while i < n and ord(t[i]) >= 48 and ord(t[i]) <= 57 {
+        i = i + 1
+        digitos = digitos + 1
+    }
+    if digitos == 0 {
+        return false
+    }
+    if digitos > 1 and (t[0] == "0" or (t[0] == "-" and t[1] == "0")) {
+        return false  # JSON no admite ceros a la izquierda ("01")
+    }
+    if i < n and t[i] == "." {
+        i = i + 1
+        let mut frac = 0
+        while i < n and ord(t[i]) >= 48 and ord(t[i]) <= 57 {
+            i = i + 1
+            frac = frac + 1
+        }
+        if frac == 0 {
+            return false
+        }
+    }
+    if i < n and (t[i] == "e" or t[i] == "E") {
+        i = i + 1
+        if i < n and (t[i] == "+" or t[i] == "-") {
+            i = i + 1
+        }
+        let mut ex = 0
+        while i < n and ord(t[i]) >= 48 and ord(t[i]) <= 57 {
+            i = i + 1
+            ex = ex + 1
+        }
+        if ex == 0 {
+            return false
+        }
+    }
+    return i == n
+}
+
+# Lee el JSON de `bytes` (cada uno 0..255) como una lista plana de hojas, con
+# su ruta. Err con la posición si está mal. (Desde el árbol de analizar().)
+fn json_leer(bytes: Vec<i32>) -> Result<Json> {
+    let d = analizar(bytes)?
+    let rutas: Vec<str> = vec_new()
+    let valores: Vec<str> = vec_new()
+    let vacio: Vec<i32> = vec_new()
+    let j = Json { b: vacio, pos: 0, rutas: rutas, valores: valores, error: "" }
+    json_hojas(d, 0, "", j)
+    return Ok(j)
+}
+
+fn json_hojas(d: Doc, nodo: i32, ruta: str, j: Json) {
+    let t = doc_tipo(d, nodo)
+    if t == 4 or t == 5 {
+        let mut h = doc_campo(d, 0, nodo)
+        let mut k = 0
+        while h >= 0 {
+            let mut nombre = a_texto(k)
+            if t == 5 {
+                nombre = doc_nombre(d, h)
+            }
+            json_hojas(d, h, json_hijo(ruta, nombre), j)
+            h = doc_campo(d, 2, h)
+            k = k + 1
+        }
+    } else {
+        json_hoja(j, ruta, doc_valor(d, nodo))
+    }
+}
+
+fn json_cantidad(j: Json) -> i32 {
+    return j.rutas.len()
+}
+
+# Ruta y valor de la hoja k ("" fuera de rango).
+fn json_ruta(j: Json, k: i32) -> str {
+    let mut s = ""
+    let mut o = j.rutas.get(k)
+    while let Some(e) = o {
+        s = e + ""
+        o = None
+    }
+    return s
+}
+
+fn json_texto(j: Json, k: i32) -> str {
+    let mut s = ""
+    let mut o = j.valores.get(k)
+    while let Some(e) = o {
+        s = e + ""
+        o = None
+    }
+    return s
+}
+
+# El valor de la primera hoja con esa ruta exacta ("" si no está).
+fn json_buscar(j: Json, ruta: str) -> str {
+    for k in 0..j.rutas.len() {
+        if json_ruta(j, k) == ruta {
+            return json_texto(j, k)
+        }
+    }
+    return ""
+}
+
+# Un número JSON como f64 (0.0 si no es un número).
+fn json_numero(t: str) -> f64 {
+    if json_es_numero(t) == false {
+        return 0.0
+    }
+    let n = t.len()
+    let mut i = 0
+    let mut signo = 1.0
+    if t[0] == "-" {
+        signo = -1.0
+        i = 1
+    }
+    let mut v = 0.0
+    while i < n and ord(t[i]) >= 48 and ord(t[i]) <= 57 {
+        v = v * 10.0 + to_f64(ord(t[i]) - 48)
+        i = i + 1
+    }
+    let mut escala = 0
+    if i < n and t[i] == "." {
+        i = i + 1
+        while i < n and ord(t[i]) >= 48 and ord(t[i]) <= 57 {
+            v = v * 10.0 + to_f64(ord(t[i]) - 48)
+            escala = escala - 1
+            i = i + 1
+        }
+    }
+    if i < n {
+        i = i + 1
+        let mut se = 1
+        if t[i] == "-" {
+            se = -1
+            i = i + 1
+        } else {
+            if t[i] == "+" {
+                i = i + 1
+            }
+        }
+        let mut e = 0
+        while i < n {
+            e = e * 10 + (ord(t[i]) - 48)
+            i = i + 1
+        }
+        escala = escala + se * e
+    }
+    if escala < 0 {
+        return signo * v / pow(10.0, to_f64(0 - escala))
+    }
+    return signo * v * pow(10.0, to_f64(escala))
+}
+
+# ---------- el árbol ----------
+#
+# Un documento es un arreglo de nodos (sin punteros, como el tape del
+# autodiff): el nodo 0 es la raíz y cada uno guarda su tipo, el nombre con que
+# cuelga de su objeto, su valor y sus enlaces (primer hijo, último hijo,
+# hermano siguiente y cuántos hijos). Un nodo se nombra por su número.
+#
+# tipo: 0 nulo, 1 booleano, 2 número, 3 texto, 4 arreglo, 5 objeto.
+# valor: el texto ya decodificado de un texto; "true"/"false" de un booleano;
+# el número tal como vino (así 1.50 o 1E5 se escriben igual que se leyeron).
+
+struct Doc {
+    tipo: Vec<i32>
+    nombre: Vec<str>
+    valor: Vec<str>
+    primero: Vec<i32>
+    ultimo: Vec<i32>
+    siguiente: Vec<i32>
+    cuenta: Vec<i32>
+}
+
+fn doc_i32(v: Vec<i32>, i: i32) -> i32 {
+    return v.get(i).unwrap_or(0 - 1)
+}
+
+fn doc_str(v: Vec<str>, i: i32) -> str {
+    let mut s = ""
+    let mut o = v.get(i)
+    while let Some(e) = o {
+        s = e + ""
+        o = None
+    }
+    return s
+}
+
+fn doc_campo(d: Doc, campo: i32, i: i32) -> i32 {
+    if campo == 0 {
+        return d.primero.get(i).unwrap_or(0 - 1)
+    }
+    if campo == 1 {
+        return d.ultimo.get(i).unwrap_or(0 - 1)
+    }
+    if campo == 2 {
+        return d.siguiente.get(i).unwrap_or(0 - 1)
+    }
+    if campo == 3 {
+        return d.cuenta.get(i).unwrap_or(0 - 1)
+    }
+    return d.tipo.get(i).unwrap_or(0 - 1)
+}
+
+fn doc_nombre(d: Doc, i: i32) -> str {
+    let mut s = ""
+    let mut o = d.nombre.get(i)
+    while let Some(e) = o {
+        s = e + ""
+        o = None
+    }
+    return s
+}
+
+fn doc_valor(d: Doc, i: i32) -> str {
+    let mut s = ""
+    let mut o = d.valor.get(i)
+    while let Some(e) = o {
+        s = e + ""
+        o = None
+    }
+    return s
+}
+
+fn doc_tipo(d: Doc, nodo: i32) -> i32 {
+    return d.tipo.get(nodo).unwrap_or(0 - 1)
+}
+
+fn doc_vacio() -> Doc {
+    let t: Vec<i32> = vec_new()
+    let n: Vec<str> = vec_new()
+    let v: Vec<str> = vec_new()
+    let p: Vec<i32> = vec_new()
+    let u: Vec<i32> = vec_new()
+    let s: Vec<i32> = vec_new()
+    let c: Vec<i32> = vec_new()
+    return Doc { tipo: t, nombre: n, valor: v, primero: p, ultimo: u, siguiente: s, cuenta: c }
+}
+
+# Un nodo nuevo, suelto (todavía no cuelga de nadie). Devuelve su número.
+fn doc_nodo(d: Doc, tipo: i32, nombre: str, valor: str) -> i32 {
+    let k = d.tipo.len()
+    d.tipo.push(tipo)
+    d.nombre.push(nombre)
+    d.valor.push(valor)
+    d.primero.push(0 - 1)
+    d.ultimo.push(0 - 1)
+    d.siguiente.push(0 - 1)
+    d.cuenta.push(0)
+    return k
+}
+
+# `hijo` pasa a ser el último hijo de `padre`.
+fn doc_enganchar(d: Doc, padre: i32, hijo: i32) {
+    if doc_campo(d, 3, padre) == 0 {
+        d.primero.set(padre, hijo)
+    } else {
+        d.siguiente.set(doc_campo(d, 1, padre), hijo)
+    }
+    d.ultimo.set(padre, hijo)
+    d.cuenta.set(padre, doc_campo(d, 3, padre) + 1)
+}
+
+# ---------- leer ----------
+
+# Un valor cualquiera en j.pos, colgado de `padre` (-1: es la raíz) con ese nombre.
+fn arbol_valor(j: Json, d: Doc, padre: i32, nombre: str, profundidad: i32) -> bool {
+    if profundidad > 64 {
+        return json_falla(j, "demasiado anidado")
+    }
+    json_espacios(j)
+    let c = json_actual(j)
+    if c == 123 {
+        let nodo = doc_nodo(d, 5, nombre, "")
+        if padre >= 0 {
+            doc_enganchar(d, padre, nodo)
+        }
+        j.pos = j.pos + 1
+        json_espacios(j)
+        if json_actual(j) == 125 {
+            j.pos = j.pos + 1
+            return true
+        }
+        while true {
+            json_espacios(j)
+            if json_actual(j) != 34 {
+                return json_falla(j, "se esperaba el nombre de un campo")
+            }
+            let clave = json_cadena(j)
+            if j.error.len() > 0 {
+                return false
+            }
+            json_espacios(j)
+            if json_actual(j) != 58 {
+                return json_falla(j, "se esperaba ':'")
+            }
+            j.pos = j.pos + 1
+            if arbol_valor(j, d, nodo, clave, profundidad + 1) == false {
+                return false
+            }
+            json_espacios(j)
+            let sep = json_actual(j)
+            j.pos = j.pos + 1
+            if sep == 125 {
+                return true
+            }
+            if sep != 44 {
+                return json_falla(j, "se esperaba ',' o '}'")
+            }
+        }
+    }
+    if c == 91 {
+        let nodo = doc_nodo(d, 4, nombre, "")
+        if padre >= 0 {
+            doc_enganchar(d, padre, nodo)
+        }
+        j.pos = j.pos + 1
+        json_espacios(j)
+        if json_actual(j) == 93 {
+            j.pos = j.pos + 1
+            return true
+        }
+        while true {
+            if arbol_valor(j, d, nodo, "", profundidad + 1) == false {
+                return false
+            }
+            json_espacios(j)
+            let sep = json_actual(j)
+            j.pos = j.pos + 1
+            if sep == 93 {
+                return true
+            }
+            if sep != 44 {
+                return json_falla(j, "se esperaba ',' o ']'")
+            }
+        }
+    }
+    if c == 34 {
+        let s = json_cadena(j)
+        if j.error.len() > 0 {
+            return false
+        }
+        let nodo = doc_nodo(d, 3, nombre, s)
+        if padre >= 0 {
+            doc_enganchar(d, padre, nodo)
+        }
+        return true
+    }
+    # número, true, false o null: el texto tal cual hasta el próximo separador
+    let mut t = ""
+    let mut x = json_actual(j)
+    while x == 45 or x == 43 or x == 46 or (x >= 48 and x <= 57) or (x >= 97 and x <= 122) or x == 69 {
+        t = t + chr(x)
+        j.pos = j.pos + 1
+        x = json_actual(j)
+    }
+    if t.len() == 0 {
+        return json_falla(j, "valor inesperado")
+    }
+    let mut tipo = 2
+    if t == "true" or t == "false" {
+        tipo = 1
+    } else {
+        if t == "null" {
+            tipo = 0
+        } else {
+            if json_es_numero(t) == false {
+                return json_falla(j, "valor inválido '" + t + "'")
+            }
+        }
+    }
+    let nodo = doc_nodo(d, tipo, nombre, t)
+    if padre >= 0 {
+        doc_enganchar(d, padre, nodo)
+    }
+    return true
+}
+
+# Lee el JSON de `bytes` (cada uno 0..255) a un árbol. Err con la posición si está mal.
+fn analizar(bytes: Vec<i32>) -> Result<Doc> {
+    let rutas: Vec<str> = vec_new()
+    let valores: Vec<str> = vec_new()
+    let j = Json { b: bytes, pos: 0, rutas: rutas, valores: valores, error: "" }
+    let d = doc_vacio()
+    if arbol_valor(j, d, 0 - 1, "", 0) == false {
+        return Err(j.error)
+    }
+    json_espacios(j)
+    if j.pos < j.b.len() {
+        return Err("JSON: sobra texto en el byte " + a_texto(j.pos))
+    }
+    return Ok(d)
+}
+
+# Los bytes UTF-8 de un str. (s[i] recorre el texto desde el principio: para
+# un documento grande conviene leer los bytes de un archivo o de la red.)
+fn bytes_de(s: str) -> Vec<i32> {
+    let v: Vec<i32> = vec_new()
+    for i in 0..s.len() {
+        let c = ord(s[i])
+        if c < 128 {
+            v.push(c)
+        } else {
+            if c < 2048 {
+                v.push(192 | (c >> 6))
+                v.push(128 | (c & 63))
+            } else {
+                if c < 65536 {
+                    v.push(224 | (c >> 12))
+                    v.push(128 | ((c >> 6) & 63))
+                    v.push(128 | (c & 63))
+                } else {
+                    v.push(240 | (c >> 18))
+                    v.push(128 | ((c >> 12) & 63))
+                    v.push(128 | ((c >> 6) & 63))
+                    v.push(128 | (c & 63))
+                }
+            }
+        }
+    }
+    return v
+}
+
+fn analizar_texto(s: str) -> Result<Doc> {
+    return analizar(bytes_de(s))
+}
+
+# ---------- buscar por ruta ----------
+
+# El elemento número `i` de un arreglo, o el hijo número `i` de un objeto (-1 si no hay).
+fn elemento(d: Doc, nodo: i32, i: i32) -> i32 {
+    if i < 0 or i >= doc_campo(d, 3, nodo) {
+        return 0 - 1
+    }
+    let mut h = doc_campo(d, 0, nodo)
+    let mut k = 0
+    while k < i and h >= 0 {
+        h = doc_campo(d, 2, h)
+        k = k + 1
+    }
+    return h
+}
+
+# El hijo de un objeto con esa clave (-1 si no hay). Si la clave se repite, el último,
+# como el diccionario de Python.
+fn hijo(d: Doc, nodo: i32, clave: str) -> i32 {
+    if doc_tipo(d, nodo) != 5 {
+        return 0 - 1
+    }
+    let mut r = 0 - 1
+    let mut h = doc_campo(d, 0, nodo)
+    while h >= 0 {
+        if doc_nombre(d, h) == clave {
+            r = h
+        }
+        h = doc_campo(d, 2, h)
+    }
+    return r
+}
+
+# El número de una posición escrita con cifras ("0", "12"); -1 si no lo es.
+fn _posicion(s: str) -> i32 {
+    let n = s.len()
+    if n == 0 or n > 9 {
+        return 0 - 1
+    }
+    if n > 1 and s[0] == "0" {
+        return 0 - 1
+    }
+    let mut v = 0
+    for i in 0..n {
+        let c = ord(s[i])
+        if c < 48 or c > 57 {
+            return 0 - 1
+        }
+        v = v * 10 + (c - 48)
+    }
+    return v
+}
+
+# Un paso de la ruta desde `nodo`: la clave de un objeto o la posición en un arreglo.
+fn _paso(d: Doc, nodo: i32, segmento: str) -> i32 {
+    let t = doc_tipo(d, nodo)
+    if t == 5 {
+        return hijo(d, nodo, segmento)
+    }
+    if t == 4 {
+        return elemento(d, nodo, _posicion(segmento))
+    }
+    return 0 - 1
+}
+
+# El nodo de una ruta como "sismos.0.lugar" (-1 si no existe). "" es la raíz.
+fn nodo(d: Doc, ruta: str) -> i32 {
+    let mut actual = 0
+    if doc_tipo(d, 0) < 0 {
+        return 0 - 1
+    }
+    let n = ruta.len()
+    if n == 0 {
+        return 0
+    }
+    let mut seg = ""
+    for i in 0..n {
+        let c = ruta[i]
+        if c == "." {
+            actual = _paso(d, actual, seg)
+            if actual < 0 {
+                return 0 - 1
+            }
+            seg = ""
+        } else {
+            seg = seg + c
+        }
+    }
+    return _paso(d, actual, seg)
+}
+
+fn existe(d: Doc, ruta: str) -> bool {
+    return nodo(d, ruta) >= 0
+}
+
+# "nulo", "booleano", "numero", "texto", "arreglo" u "objeto" ("" si la ruta no existe).
+fn tipo(d: Doc, ruta: str) -> str {
+    let t = doc_tipo(d, nodo(d, ruta))
+    if t == 0 {
+        return "nulo"
+    }
+    if t == 1 {
+        return "booleano"
+    }
+    if t == 2 {
+        return "numero"
+    }
+    if t == 3 {
+        return "texto"
+    }
+    if t == 4 {
+        return "arreglo"
+    }
+    if t == 5 {
+        return "objeto"
+    }
+    return ""
+}
+
+# El valor de un texto, de un número (tal como vino) o de un booleano; "" si no existe,
+# es nulo o es un arreglo o un objeto.
+fn texto(d: Doc, ruta: str) -> str {
+    let k = nodo(d, ruta)
+    let t = doc_tipo(d, k)
+    if t == 1 or t == 2 or t == 3 {
+        return doc_valor(d, k)
+    }
+    return ""
+}
+
+fn texto_o(d: Doc, ruta: str, defecto: str) -> str {
+    let t = doc_tipo(d, nodo(d, ruta))
+    if t == 1 or t == 2 or t == 3 {
+        return texto(d, ruta)
+    }
+    return defecto
+}
+
+# Un número como f64 (0.0 si no existe o no es un número).
+fn numero(d: Doc, ruta: str) -> f64 {
+    let k = nodo(d, ruta)
+    if doc_tipo(d, k) != 2 {
+        return 0.0
+    }
+    return json_numero(doc_valor(d, k))
+}
+
+fn numero_o(d: Doc, ruta: str, defecto: f64) -> f64 {
+    if doc_tipo(d, nodo(d, ruta)) != 2 {
+        return defecto
+    }
+    return numero(d, ruta)
+}
+
+# Un número entero como i64 (0 si no existe o no es un número). Con fracción o
+# exponente, se trunca hacia cero; más allá de ±9.2e18 queda en el extremo.
+fn entero(d: Doc, ruta: str) -> i64 {
+    let k = nodo(d, ruta)
+    if doc_tipo(d, k) != 2 {
+        return 0
+    }
+    let t = doc_valor(d, k)
+    let n = t.len()
+    let mut solo_cifras = true
+    for i in 0..n {
+        let c = ord(t[i])
+        if (c < 48 or c > 57) and not (i == 0 and c == 45) {
+            solo_cifras = false
+        }
+    }
+    if solo_cifras and n < 19 {
+        let mut v: i64 = 0
+        let mut i = 0
+        if t[0] == "-" {
+            i = 1
+        }
+        while i < n {
+            v = v * 10 + to_i64(ord(t[i]) - 48)
+            i = i + 1
+        }
+        if t[0] == "-" {
+            return 0 - v
+        }
+        return v
+    }
+    let x = json_numero(t)
+    if x >= 9.2e18 {
+        return 9223372036854775807
+    }
+    if x <= 0.0 - 9.2e18 {
+        return 0 - 9223372036854775807
+    }
+    return to_i64(x)
+}
+
+# true solo si es el booleano true.
+fn booleano(d: Doc, ruta: str) -> bool {
+    let k = nodo(d, ruta)
+    return doc_tipo(d, k) == 1 and doc_valor(d, k) == "true"
+}
+
+# Cuántos elementos tiene un arreglo o cuántas claves un objeto (0 en lo demás).
+fn largo(d: Doc, ruta: str) -> i32 {
+    let k = nodo(d, ruta)
+    let t = doc_tipo(d, k)
+    if t == 4 or t == 5 {
+        return doc_campo(d, 3, k)
+    }
+    return 0
+}
+
+# La clave número `i` de un objeto ("" si no hay).
+fn clave(d: Doc, ruta: str, i: i32) -> str {
+    let k = nodo(d, ruta)
+    if doc_tipo(d, k) != 5 {
+        return ""
+    }
+    return doc_nombre(d, elemento(d, k, i))
+}
+
+# ---------- armar ----------
+
+fn nuevo_objeto() -> Doc {
+    let d = doc_vacio()
+    doc_nodo(d, 5, "", "")
+    return d
+}
+
+fn nuevo_arreglo() -> Doc {
+    let d = doc_vacio()
+    doc_nodo(d, 4, "", "")
+    return d
+}
+
+# Cuelga `nuevo` de `padre` en el lugar de la clave `clave` (si el objeto ya la tiene,
+# la reemplaza en el mismo lugar, como un diccionario) o al final (arreglo o clave nueva).
+fn _colgar(d: Doc, padre: i32, clave: str, nuevo: i32) {
+    if doc_tipo(d, padre) == 5 {
+        let mut anterior = 0 - 1
+        let mut h = doc_campo(d, 0, padre)
+        let mut viejo = 0 - 1
+        let mut antes_del_viejo = 0 - 1
+        while h >= 0 {
+            if doc_nombre(d, h) == clave {
+                viejo = h
+                antes_del_viejo = anterior
+            }
+            anterior = h
+            h = doc_campo(d, 2, h)
+        }
+        if viejo >= 0 {
+            d.siguiente.set(nuevo, doc_campo(d, 2, viejo))
+            if antes_del_viejo >= 0 {
+                d.siguiente.set(antes_del_viejo, nuevo)
+            } else {
+                d.primero.set(padre, nuevo)
+            }
+            if doc_campo(d, 1, padre) == viejo {
+                d.ultimo.set(padre, nuevo)
+            }
+            return
+        }
+    }
+    doc_enganchar(d, padre, nuevo)
+}
+
+fn _poner(d: Doc, padre: i32, clave: str, tipo: i32, valor: str) -> i32 {
+    let t = doc_tipo(d, padre)
+    if t != 4 and t != 5 {
+        return 0 - 1
+    }
+    let mut nombre = ""
+    if t == 5 {
+        nombre = clave
+    }
+    let k = doc_nodo(d, tipo, nombre, valor)
+    _colgar(d, padre, nombre, k)
+    return k
+}
+
+# poner_*: en un objeto, con su clave. Devuelven el número del nodo nuevo (-1 si
+# `padre` no es un objeto ni un arreglo).
+fn poner_texto(d: Doc, padre: i32, clave: str, valor: str) -> i32 {
+    return _poner(d, padre, clave, 3, valor)
+}
+
+# Un número finito; NaN e infinito no existen en JSON y quedan como nulo.
+fn _texto_numero(x: f64) -> str {
+    if x != x or x > 1.0e308 * 10.0 or x < 0.0 - 1.0e308 * 10.0 {
+        return ""
+    }
+    return a_texto(x)
+}
+
+fn poner_numero(d: Doc, padre: i32, clave: str, valor: f64) -> i32 {
+    let s = _texto_numero(valor)
+    if s.len() == 0 {
+        return _poner(d, padre, clave, 0, "null")
+    }
+    return _poner(d, padre, clave, 2, s)
+}
+
+fn poner_entero(d: Doc, padre: i32, clave: str, valor: i64) -> i32 {
+    return _poner(d, padre, clave, 2, a_texto(valor))
+}
+
+# Un número ya escrito (por ejemplo 1.50 o 1E5); si no es un número JSON, queda
+# como nulo.
+fn poner_numero_texto(d: Doc, padre: i32, clave: str, valor: str) -> i32 {
+    if json_es_numero(valor) == false {
+        return _poner(d, padre, clave, 0, "null")
+    }
+    return _poner(d, padre, clave, 2, valor)
+}
+
+fn poner_bool(d: Doc, padre: i32, clave: str, valor: bool) -> i32 {
+    if valor {
+        return _poner(d, padre, clave, 1, "true")
+    }
+    return _poner(d, padre, clave, 1, "false")
+}
+
+fn poner_nulo(d: Doc, padre: i32, clave: str) -> i32 {
+    return _poner(d, padre, clave, 0, "null")
+}
+
+fn poner_objeto(d: Doc, padre: i32, clave: str) -> i32 {
+    return _poner(d, padre, clave, 5, "")
+}
+
+fn poner_arreglo(d: Doc, padre: i32, clave: str) -> i32 {
+    return _poner(d, padre, clave, 4, "")
+}
+
+# agregar_*: al final de un arreglo.
+fn agregar_texto(d: Doc, padre: i32, valor: str) -> i32 {
+    return _poner(d, padre, "", 3, valor)
+}
+
+fn agregar_numero(d: Doc, padre: i32, valor: f64) -> i32 {
+    return poner_numero(d, padre, "", valor)
+}
+
+fn agregar_entero(d: Doc, padre: i32, valor: i64) -> i32 {
+    return _poner(d, padre, "", 2, a_texto(valor))
+}
+
+fn agregar_numero_texto(d: Doc, padre: i32, valor: str) -> i32 {
+    return poner_numero_texto(d, padre, "", valor)
+}
+
+fn agregar_bool(d: Doc, padre: i32, valor: bool) -> i32 {
+    return poner_bool(d, padre, "", valor)
+}
+
+fn agregar_nulo(d: Doc, padre: i32) -> i32 {
+    return _poner(d, padre, "", 0, "null")
+}
+
+fn agregar_objeto(d: Doc, padre: i32) -> i32 {
+    return _poner(d, padre, "", 5, "")
+}
+
+fn agregar_arreglo(d: Doc, padre: i32) -> i32 {
+    return _poner(d, padre, "", 4, "")
+}
+
+# ---------- escribir ----------
+
+# Las partes del texto que se va armando (se juntan al final de a pares).
+struct Salida {
+    partes: Vec<str>
+    ascii: bool
+}
+
+fn _hex4(n: i32) -> str {
+    let digitos = "0123456789abcdef"
+    return digitos[(n >> 12) & 15] + digitos[(n >> 8) & 15] + digitos[(n >> 4) & 15] + digitos[n & 15]
+}
+
+# Un str entre comillas, con los escapes de JSON. Con `ascii`, todo lo que no es ASCII
+# sale como \uXXXX (los de más de 16 bits, como par sustituto).
+fn entrecomillar(s: str) -> str {
+    return _comillas(s, false)
+}
+
+fn entrecomillar_ascii(s: str) -> str {
+    return _comillas(s, true)
+}
+
+fn _comillas(s: str, ascii: bool) -> str {
+    let partes: Vec<str> = vec_new()
+    partes.push("\"")
+    let n = s.len()
+    let mut tramo = ""
+    for i in 0..n {
+        let c = s[i]
+        let o = ord(c)
+        if o == 34 {
+            tramo = tramo + "\\\""
+        } else {
+            if o == 92 {
+                tramo = tramo + "\\\\"
+            } else {
+                if o == 10 {
+                    tramo = tramo + "\\n"
+                } else {
+                    if o == 13 {
+                        tramo = tramo + "\\r"
+                    } else {
+                        if o == 9 {
+                            tramo = tramo + "\\t"
+                        } else {
+                            if o == 8 {
+                                tramo = tramo + "\\b"
+                            } else {
+                                if o == 12 {
+                                    tramo = tramo + "\\f"
+                                } else {
+                                    if o < 32 {
+                                        tramo = tramo + "\\u" + _hex4(o)
+                                    } else {
+                                        if o > 127 and ascii {
+                                            if o >= 65536 {
+                                                let v = o - 65536
+                                                tramo = tramo + "\\u" + _hex4(55296 + (v >> 10)) + "\\u" + _hex4(56320 + (v & 1023))
+                                            } else {
+                                                tramo = tramo + "\\u" + _hex4(o)
+                                            }
+                                        } else {
+                                            tramo = tramo + c
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if tramo.len() > 200 {
+            partes.push(tramo)
+            tramo = ""
+        }
+    }
+    partes.push(tramo)
+    partes.push("\"")
+    return _juntar_partes(partes)
+}
+
+# Junta las partes de a pares (así no se copia el texto entero por cada parte).
+fn _juntar_partes(partes: Vec<str>) -> str {
+    let mut actual = partes
+    while actual.len() > 1 {
+        let sig: Vec<str> = vec_new()
+        let n = actual.len()
+        let mut i = 0
+        while i < n {
+            let mut t = ""
+            let mut a = actual.get(i)
+            while let Some(e) = a {
+                t = e + ""
+                a = None
+            }
+            if i + 1 < n {
+                let mut b = actual.get(i + 1)
+                while let Some(e) = b {
+                    t = t + e
+                    b = None
+                }
+            }
+            sig.push(t)
+            i = i + 2
+        }
+        actual = sig
+    }
+    let mut r = ""
+    let mut a = actual.get(0)
+    while let Some(e) = a {
+        r = e + ""
+        a = None
+    }
+    return r
+}
+
+fn _sangrar(nivel: i32, sangria: i32) -> str {
+    let mut t = "\n"
+    for i in 0..nivel * sangria {
+        t = t + " "
+    }
+    return t
+}
+
+# Escribe el nodo. sangria 0: todo en una línea y sin espacios; sangria n: n espacios por
+# nivel, un elemento por línea y ": " tras la clave (como json.dumps(indent=n)).
+fn _escribir_nodo(d: Doc, nodo: i32, o: Salida, sangria: i32, nivel: i32) {
+    let t = doc_tipo(d, nodo)
+    if t == 4 or t == 5 {
+        let mut abre = "["
+        let mut cierra = "]"
+        if t == 5 {
+            abre = "{"
+            cierra = "}"
+        }
+        if doc_campo(d, 3, nodo) == 0 {
+            o.partes.push(abre + cierra)
+            return
+        }
+        o.partes.push(abre)
+        let mut h = doc_campo(d, 0, nodo)
+        let mut primero = true
+        while h >= 0 {
+            if primero == false {
+                o.partes.push(",")
+            }
+            primero = false
+            if sangria > 0 {
+                o.partes.push(_sangrar(nivel + 1, sangria))
+            }
+            if t == 5 {
+                o.partes.push(_comillas(doc_nombre(d, h), o.ascii))
+                if sangria > 0 {
+                    o.partes.push(": ")
+                } else {
+                    o.partes.push(":")
+                }
+            }
+            let sig = doc_campo(d, 2, h)
+            _escribir_nodo(d, h, o, sangria, nivel + 1)
+            h = sig
+        }
+        if sangria > 0 {
+            o.partes.push(_sangrar(nivel, sangria))
+        }
+        o.partes.push(cierra)
+        return
+    }
+    if t == 3 {
+        o.partes.push(_comillas(doc_valor(d, nodo), o.ascii))
+        return
+    }
+    o.partes.push(doc_valor(d, nodo))
+}
+
+fn _escribir(d: Doc, nodo: i32, sangria: i32, ascii: bool) -> str {
+    if doc_tipo(d, nodo) < 0 {
+        return ""
+    }
+    let partes: Vec<str> = vec_new()
+    let o = Salida { partes: partes, ascii: ascii }
+    _escribir_nodo(d, nodo, o, sangria, 0)
+    return _juntar_partes(o.partes)
+}
+
+# El documento en una línea, sin espacios: {"a":[1,2]}. Los str salen en UTF-8.
+fn escribir(d: Doc) -> str {
+    return _escribir(d, 0, 0, false)
+}
+
+# Lo mismo con todo lo que no es ASCII como \uXXXX (json.dumps por omisión).
+fn escribir_ascii(d: Doc) -> str {
+    return _escribir(d, 0, 0, true)
+}
+
+# Con sangría de `espacios` por nivel (json.dumps(doc, indent=espacios, ensure_ascii=False)).
+fn escribir_bonito(d: Doc, espacios: i32) -> str {
+    return _escribir(d, 0, max(espacios, 1), false)
+}
+
+# Solo el nodo de esa ruta ("" si no existe).
+fn escribir_nodo(d: Doc, ruta: str) -> str {
+    return _escribir(d, nodo(d, ruta), 0, false)
+}
+
+# ---------- archivos ----------
+
+fn bytes_de_archivo(ruta: str) -> Result<Vec<i32>> {
+    let f = file_open(ruta, "r")?
+    let todo: Vec<i32> = vec_new(4096)
+    let mut seguir = true
+    while seguir {
+        let trozo = f.read_bytes(4096)?
+        if trozo.len() == 0 {
+            seguir = false
+        }
+        let mut i = 0
+        while i < trozo.len() {
+            let mut o = trozo.get(i)
+            while let Some(x) = o {
+                todo.push(x)
+                o = None
+            }
+            i = i + 1
+        }
+    }
+    f.close()
+    return Ok(todo)
+}
+
+# Lee un archivo JSON a un árbol.
+fn leer_archivo(ruta: str) -> Result<Doc> {
+    return analizar(bytes_de_archivo(ruta)?)
+}

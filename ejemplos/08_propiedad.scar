@@ -1,0 +1,47 @@
+# Capítulo 8: propiedad. Cada valor tiene un solo dueño; nada se libera a mano.
+#
+#   scar run ejemplos/08_propiedad.scar
+
+struct Pedido {
+    numero: i32
+    cliente: str
+}
+
+# devolver entrega la propiedad a quien llama
+fn nuevo_pedido(n: i32, cliente: str) -> Pedido {
+    return Pedido { numero: n, cliente: cliente }
+}
+
+# recibir prestado: el pedido sigue siendo de quien llama
+fn describir(p: Pedido) -> str {
+    return "#" + a_texto(p.numero) + " para " + p.cliente
+}
+
+# un Vec se entrega a la función (se mueve); para seguir usándolo, la función
+# lo devuelve. El pedido también se queda en la cola: en quien llama, se movió.
+fn encolar(cola: Vec<Pedido>, p: Pedido) -> Vec<Pedido> {
+    cola.push(p)
+    return cola
+}
+
+fn main() {
+    let mut cola: Vec<Pedido> = vec_new()
+
+    let p = nuevo_pedido(1, "Ana")
+    print("creado:", describir(p))     # prestado: p sigue siendo nuestro
+    cola = encolar(cola, p)             # desde acá, el dueño es la cola
+    # print(describir(p))               # error: p ya se movió
+
+    # un pedido nuevo en cada vuelta: nada se mueve dos veces
+    for i in 2..5 {
+        let q = nuevo_pedido(i, "cliente " + a_texto(i))
+        cola = encolar(cola, q)
+    }
+    print("en la cola:", cola.len())
+
+    # sacar sin copiar: replace devuelve el que estaba, y desde ahí es nuestro
+    let primero = cola.replace(0, nuevo_pedido(0, "(vacío)"))
+    print("atiendo:", describir(primero))
+
+    # al terminar main, la cola y todo lo que guarda se liberan solos
+}

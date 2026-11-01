@@ -1,0 +1,165 @@
+# lib/autodiff: cada operación, y una cuenta que las usa todas, contra la
+# derivada numérica (diferencias centradas).
+use "autodiff"
+use "prueba"
+
+# f(x, y) con la operación `cual` (0 = todas juntas). Devuelve el resultado.
+fn armar(c: autodiff.Cinta, x: i32, y: i32, cual: i32) -> i32 {
+    if cual == 1 {
+        return autodiff.suma(c, x, y)
+    }
+    if cual == 2 {
+        return autodiff.resta(c, x, y)
+    }
+    if cual == 3 {
+        return autodiff.mul(c, x, y)
+    }
+    if cual == 4 {
+        return autodiff.div(c, x, y)
+    }
+    if cual == 5 {
+        return autodiff.neg(c, x)
+    }
+    if cual == 6 {
+        return autodiff.escalar(c, x, 3.5)
+    }
+    if cual == 7 {
+        return autodiff.cuadrado(c, x)
+    }
+    if cual == 8 {
+        return autodiff.exponencial(c, x)
+    }
+    if cual == 9 {
+        return autodiff.logaritmo(c, y)
+    }
+    if cual == 10 {
+        return autodiff.tanh(c, x)
+    }
+    if cual == 11 {
+        return autodiff.sigmoide(c, x)
+    }
+    if cual == 12 {
+        return autodiff.relu(c, x)
+    }
+    # todas juntas: sigmoide(x*y) + tanh(x - y) + exp(x) / (y*y + 1)
+    #               + ln(y*y + 1) + relu(x) - 3*y + x*x
+    let uno = autodiff.constante(c, 1.0)
+    let yy1 = autodiff.suma(c, autodiff.cuadrado(c, y), uno)
+    let a = autodiff.sigmoide(c, autodiff.mul(c, x, y))
+    let b = autodiff.tanh(c, autodiff.resta(c, x, y))
+    let d = autodiff.div(c, autodiff.exponencial(c, x), yy1)
+    let e = autodiff.logaritmo(c, yy1)
+    let f = autodiff.relu(c, x)
+    let g = autodiff.escalar(c, autodiff.neg(c, y), 3.0)
+    let h = autodiff.cuadrado(c, x)
+    let s1 = autodiff.suma(c, a, b)
+    let s2 = autodiff.suma(c, s1, d)
+    let s3 = autodiff.suma(c, s2, e)
+    let s4 = autodiff.suma(c, s3, f)
+    let s5 = autodiff.suma(c, s4, g)
+    return autodiff.suma(c, s5, h)
+}
+
+fn nombre_de(k: i32) -> str {
+    let nombres = ["suma", "resta", "mul", "div", "neg", "escalar", "cuadrado", "exponencial", "logaritmo", "tanh", "sigmoide", "relu"]
+    let mut i = 1
+    while let Some(n) = nombres.pop() {
+        if 13 - i == k {
+            return n
+        }
+        i = i + 1
+    }
+    return "?"
+}
+
+fn evaluar(x: f64, y: f64, cual: i32) -> f64 {
+    let c = autodiff.cinta()
+    let vx = autodiff.variable(c, x)
+    let vy = autodiff.variable(c, y)
+    return autodiff.valor(c, armar(c, vx, vy, cual))
+}
+
+fn probar(t: prueba.Prueba, x: f64, y: f64, cual: i32, nombre: str) {
+    let c = autodiff.cinta()
+    let vx = autodiff.variable(c, x)
+    let vy = autodiff.variable(c, y)
+    let r = armar(c, vx, vy, cual)
+    autodiff.derivar(c, r)
+    let h = 0.000001
+    let dx = (evaluar(x + h, y, cual) - evaluar(x - h, y, cual)) / (2.0 * h)
+    let dy = (evaluar(x, y + h, cual) - evaluar(x, y - h, cual)) / (2.0 * h)
+    let tol = 0.000001 * (1.0 + abs(dx) + abs(dy))
+    prueba.afirmar_cerca(t, autodiff.gradiente(c, vx), dx, tol, nombre + " d/dx en (" + a_texto(x) + ", " + a_texto(y) + ")")
+    prueba.afirmar_cerca(t, autodiff.gradiente(c, vy), dy, tol, nombre + " d/dy en (" + a_texto(x) + ", " + a_texto(y) + ")")
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("autodiff")
+
+    prueba.seccion(t, "valores")
+    let c = autodiff.cinta()
+    let x = autodiff.variable(c, 3.0)
+    let y = autodiff.mul(c, x, x)
+    autodiff.derivar(c, y)
+    prueba.afirmar_igual_f64(t, autodiff.valor(c, y), 9.0, "x*x con x = 3")
+    prueba.afirmar_igual_f64(t, autodiff.gradiente(c, x), 6.0, "d(x*x)/dx con x = 3")
+    prueba.afirmar_igual_i32(t, autodiff.largo(c), 2, "la cinta tiene dos valores")
+    autodiff.derivar(c, y)
+    prueba.afirmar_igual_f64(t, autodiff.gradiente(c, x), 6.0, "derivar dos veces no acumula")
+    autodiff.limpiar(c)
+    prueba.afirmar_igual_i32(t, autodiff.largo(c), 0, "limpiar vacía la cinta")
+
+    prueba.seccion(t, "cada operación contra la derivada numérica")
+    let puntos_x = [0.7, -1.3, 2.1]
+    let puntos_y = [1.9, 0.6, -2.4]
+    let mut k = 1
+    while k <= 12 {
+        let mut j = 0
+        while j < 3 {
+            let px = puntos_x.get(j).unwrap_or(0.0)
+            let py = puntos_y.get(j).unwrap_or(1.0)
+            let nombre = nombre_de(k)
+            # logaritmo usa y: que sea positivo
+            let mut yy = py
+            if k == 9 and yy < 0.0 {
+                yy = 0.0 - yy
+            }
+            probar(t, px, yy, k, nombre)
+            j = j + 1
+        }
+        k = k + 1
+    }
+
+    prueba.seccion(t, "una cuenta con todas")
+    probar(t, 0.7, 1.9, 0, "todas")
+    probar(t, 1.3, -0.4, 0, "todas")
+    probar(t, 2.5, 3.0, 0, "todas")
+
+    prueba.seccion(t, "aprender una recta (y = 2x + 1)")
+    let c2 = autodiff.cinta()
+    let mut w = 0.0
+    let mut b = 0.0
+    let mut paso = 0
+    while paso < 300 {
+        let mut i = 0
+        while i < 5 {
+            let xi = to_f64(i) - 2.0
+            autodiff.limpiar(c2)
+            let vw = autodiff.variable(c2, w)
+            let vb = autodiff.variable(c2, b)
+            let vx = autodiff.constante(c2, xi)
+            let pred = autodiff.suma(c2, autodiff.mul(c2, vw, vx), vb)
+            let err = autodiff.resta(c2, pred, autodiff.constante(c2, 2.0 * xi + 1.0))
+            let perdida = autodiff.cuadrado(c2, err)
+            autodiff.derivar(c2, perdida)
+            w = w - 0.05 * autodiff.gradiente(c2, vw)
+            b = b - 0.05 * autodiff.gradiente(c2, vb)
+            i = i + 1
+        }
+        paso = paso + 1
+    }
+    prueba.afirmar_cerca(t, w, 2.0, 0.0001, "w llega a 2")
+    prueba.afirmar_cerca(t, b, 1.0, 0.0001, "b llega a 1")
+
+    return prueba.terminar(t)
+}

@@ -1,0 +1,2054 @@
+# lib/gui.scar -- la librería gráfica de SCAR.
+#
+# Una interfaz "inmediata": en cada cuadro el programa dice qué hay en la
+# ventana, y cada pieza contesta en el momento qué hizo la persona. Sin
+# coordenadas (las piezas se acomodan solas, una debajo de otra, o en fila),
+# sin callbacks:
+#
+#     use "gui"
+#
+#     fn main() {
+#         let ui = gui.ventana("Contador", 360, 200)
+#         let mut n = 0
+#         while gui.abierta(ui) {
+#             gui.titulo(ui, "Contador")
+#             gui.texto(ui, "Vas en " + a_texto(n))
+#             if gui.boton(ui, "Sumar uno") {
+#                 n = n + 1
+#             }
+#         }
+#     }
+#
+# Piezas: titulo, texto, texto_tenue, texto_color, etiqueta, parrafo, boton,
+# casilla, campo, deslizador, opciones, pestanas, lista (de una gui.Lista),
+# tabla (de una gui.Tabla), progreso, separador, espacio, los gráficos barras
+# y lineas (de una gui.Serie), onda (una señal larga, de una gui.Onda) y eje
+# (las marcas de tiempo o de valores debajo de un gráfico). gui.fila / gui.fin_fila ponen piezas lado a lado; gui.columna /
+# gui.fin_columnas, grupos de piezas lado a lado. gui.lienzo reserva un
+# rectángulo para dibujar a mano (gui.pintar, gui.trazo, gui.rotular). Tema
+# claro por defecto; gui.oscuro(ui) cambia al oscuro. La ventana se puede
+# agrandar con el borde: ui.ancho y ui.alto dicen cuánto mide en cada cuadro.
+#
+# Dibuja con native/scarsdl.c (SDL2): el texto usa una fuente propia ya
+# rasterizada, no hace falta nada más instalado. Sin pantalla (la CI):
+# SDL_VIDEODRIVER=dummy, SCAR_SDL_MAX_FRAMES=N y SCAR_SDL_GUION=archivo con los
+# clics y lo que se escribe en cada cuadro (ver scarsdl.c).
+#
+# Lo que empieza con `_` es interno del módulo.
+
+extern lib "scarsdl" en_proceso
+
+extern "C" fn scar_sdl_abrir(ancho: i32, alto: i32, titulo: str) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_cerrar() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_eventos() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_clear() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_set_clear_color(r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_present() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_delay(ms: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_draw_rect_color(x: i32, y: i32, w: i32, h: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_borde(x: i32, y: i32, w: i32, h: i32, grosor: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_linea(x1: i32, y1: i32, x2: i32, y2: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_circulo(x: i32, y: i32, radio: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_texto(x: i32, y: i32, s: str, tam: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_texto_ancho(s: str, tam: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_texto_alto(tam: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_raton_x() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_raton_y() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_raton_abajo() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_raton_clic() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_raton_soltado() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_tecla(scancode: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_escrito() -> str from "scarsdl"
+extern "C" fn scar_sdl_rueda() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_recorte(x: i32, y: i32, w: i32, h: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_sin_recorte() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_ancho() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_alto() -> i32 from "scarsdl"
+
+# El estado de la interfaz: lo crea gui.ventana y se pasa a cada pieza.
+struct Ui {
+    ancho: i32
+    alto: i32
+    abierta_ya: bool
+    cuadro: i32
+    # dónde va la próxima pieza
+    x: i32
+    y: i32
+    en_fila: bool
+    fila_x: i32
+    fila_alto: i32
+    # columnas (gui.columna): dónde empieza la actual, su ancho, y hasta
+    # dónde bajaron las anteriores
+    en_columna: bool
+    col_x: i32
+    col_ancho: i32
+    col_y0: i32
+    col_fondo: i32
+    # un gui.lienzo dejó el dibujo recortado a su rectángulo
+    recortado: bool
+    # la última pieza ubicada (_lugar)
+    px: i32
+    py: i32
+    # cada pieza tiene un número en el cuadro (el orden en que aparece)
+    id: i32
+    activo: i32
+    pestana_cerrada: i32
+    # true mientras hay una lista de menú abierta: las demás piezas no reciben clics ni teclas
+    modal: bool
+    foco: i32
+    # el margen alrededor de la ventana (16 de entrada; gui.margen lo cambia)
+    margen: i32
+    # con gui.preguntar_al_cerrar: la X no cierra, avisa con cierre_pedido
+    preguntar_cierre: bool
+    cierre_pedido: bool
+    # tema: colores como 0xRRGGBB
+    c_fondo: i32
+    c_panel: i32
+    c_texto: i32
+    c_tenue: i32
+    c_acento: i32
+    c_sobre_acento: i32
+    c_borde: i32
+    # para avisos: bien (verde), cuidado (ámbar), mal (rojo)
+    c_bien: i32
+    c_aviso: i32
+    c_mal: i32
+}
+
+# Una serie de números para gui.barras / gui.lineas.
+struct Serie {
+    valores: Vec<f64>
+}
+
+# Las filas de una gui.lista, y desde cuál se ven (cambia con la rueda y con la barra).
+struct Lista {
+    items: Vec<str>
+    desde: i32
+    arrastrando: bool
+}
+
+# Una señal larga para gui.onda: las últimas `cap` muestras (un anillo: al
+# llenarse, la nueva reemplaza a la más vieja), cada una con una marca (lo
+# marcado se pinta de otro color: un disparo, una alarma).
+#   centrada = true:  alrededor de cero, con la escala del mayor |valor| visible
+#                     (una onda sísmica, un audio). Con `maximo` > 0, la
+#                     escala queda fija en ese valor (para que una onda que
+#                     se va llenando no cambie de tamaño).
+#   centrada = false: barras desde abajo, de 0 a `maximo` (lo de arriba se
+#                     recorta); `umbral` > 0 dibuja una línea en ese valor y lo
+#                     que la pasa va en rojo (un nivel, una razón STA/LTA).
+struct Onda {
+    cap: i32
+    valores: Vec<f64>
+    marcas: Vec<i32>
+    n: i32
+    centrada: bool
+    maximo: f64
+    umbral: f64
+}
+
+# Cuánto se acercó una gui.onda_zoom y qué parte se ve. Lo comparten
+# las ondas que van juntas (tres estaciones, su STA/LTA) y su eje: acercarse
+# en una acerca todas. La rueda sobre una onda acerca (hacia arriba) o aleja,
+# dejando quieto lo que está bajo el puntero; arrastrar con el botón apretado
+# la corre hacia los lados.
+#   factor: 1 = se ve todo; 4 = la cuarta parte.
+#   centro: el medio de lo que se ve, de 0 (el principio) a 1 (el final).
+#   maximo: el factor más grande (0: el que deja unas 16 muestras a la vista).
+struct Zoom {
+    factor: f64
+    centro: f64
+    maximo: f64
+    arrastrando: bool
+    ultimo_x: i32
+    # el último cuadro en que se atendió la rueda o el arrastre (si varias
+    # ondas lo comparten, se atiende una vez por cuadro)
+    cuadro: i32
+}
+
+# Las celdas de una gui.tabla: los títulos de las columnas y, fila por fila,
+# el texto y el color de cada celda (-1: el del tema).
+struct Tabla {
+    titulos: str
+    columnas: i32
+    celdas: Vec<str>
+    colores: Vec<i32>
+}
+
+# El rectángulo que reservó gui.lienzo, en píxeles de la ventana.
+struct Lienzo {
+    x: i32
+    y: i32
+    ancho: i32
+    alto: i32
+}
+
+# ---- tamaños -------------------------------------------------------------------
+fn _margen() -> i32 {
+    return 16
+}
+
+fn _espacio() -> i32 {
+    return 10
+}
+
+fn _tam() -> i32 {
+    return 16
+}
+
+fn _tam_titulo() -> i32 {
+    return 28
+}
+
+fn _tam_chico() -> i32 {
+    return 13
+}
+
+fn _alto_pieza() -> i32 {
+    return scar_sdl_texto_alto(_tam()) + 14
+}
+
+# ---- colores -------------------------------------------------------------------
+fn _r(c: i32) -> i32 {
+    return (c >> 16) & 255
+}
+
+fn _g(c: i32) -> i32 {
+    return (c >> 8) & 255
+}
+
+fn _b(c: i32) -> i32 {
+    return c & 255
+}
+
+# c mezclado con blanco (t > 0) o con negro (t < 0), t en centésimos
+fn _aclarar(c: i32, t: i32) -> i32 {
+    let mut r = _r(c)
+    let mut g = _g(c)
+    let mut b = _b(c)
+    if t >= 0 {
+        r = r + (255 - r) * t / 100
+        g = g + (255 - g) * t / 100
+        b = b + (255 - b) * t / 100
+    } else {
+        r = r * (100 + t) / 100
+        g = g * (100 + t) / 100
+        b = b * (100 + t) / 100
+    }
+    return (r << 16) | (g << 8) | b
+}
+
+# gui.color(r, g, b) -> i32: un color para gui.texto_color, gui.pintar...
+fn color(r: i32, g: i32, b: i32) -> i32 {
+    return ((r & 255) << 16) | ((g & 255) << 8) | (b & 255)
+}
+
+# gui.aclarar(c, t) -> i32: c mezclado con blanco (t de 1 a 100) o con negro
+# (t de -1 a -100).
+fn aclarar(c: i32, t: i32) -> i32 {
+    return _aclarar(c, max(-100, min(100, t)))
+}
+
+# a mezclado con b: t centésimos de b
+fn _mezclar(a: i32, b: i32, t: i32) -> i32 {
+    let r = _r(a) + (_r(b) - _r(a)) * t / 100
+    let g = _g(a) + (_g(b) - _g(a)) * t / 100
+    let bl = _b(a) + (_b(b) - _b(a)) * t / 100
+    return (r << 16) | (g << 8) | bl
+}
+
+fn _rect(x: i32, y: i32, w: i32, h: i32, c: i32) {
+    scar_sdl_draw_rect_color(x, y, w, h, _r(c), _g(c), _b(c), 255)
+}
+
+fn _borde(x: i32, y: i32, w: i32, h: i32, grosor: i32, c: i32) {
+    scar_sdl_borde(x, y, w, h, grosor, _r(c), _g(c), _b(c), 255)
+}
+
+fn _escribir(x: i32, y: i32, s: str, tam: i32, c: i32) -> i32 {
+    return scar_sdl_texto(x, y, s, tam, _r(c), _g(c), _b(c), 255)
+}
+
+# ---- ventana y cuadros ---------------------------------------------------------
+
+# gui.ventana(titulo, ancho, alto): abre la ventana. Si no se puede (no hay
+# pantalla ni SDL2), es un panic con el motivo.
+fn ventana(titulo: str, ancho: i32, alto: i32) -> Ui {
+    if scar_sdl_abrir(ancho, alto, titulo) != 0 {
+        panic("gui.ventana: no se pudo abrir la ventana (¿hay SDL2 y una pantalla?)")
+    }
+    let ui = Ui {
+        ancho: ancho, alto: alto, abierta_ya: true, cuadro: 0,
+        x: _margen(), y: _margen(), en_fila: false, fila_x: 0, fila_alto: 0,
+        en_columna: false, col_x: 0, col_ancho: 0, col_y0: 0, col_fondo: 0, recortado: false,
+        px: 0, py: 0, id: 0, activo: -1, pestana_cerrada: -1, modal: false, foco: -1, margen: _margen(), preguntar_cierre: false, cierre_pedido: false,
+        c_fondo: 0, c_panel: 0, c_texto: 0, c_tenue: 0, c_acento: 0, c_sobre_acento: 0, c_borde: 0,
+        c_bien: 0, c_aviso: 0, c_mal: 0
+    }
+    claro(ui)
+    return ui
+}
+
+# gui.claro(ui) / gui.oscuro(ui): el tema de colores.
+fn claro(ui: Ui) {
+    ui.c_fondo = 16250871
+    ui.c_panel = 16777215
+    ui.c_texto = 2105386
+    ui.c_tenue = 7303037
+    ui.c_acento = 2192081
+    ui.c_sobre_acento = 16777215
+    ui.c_borde = 13093848
+    ui.c_bien = color(30, 140, 70)
+    ui.c_aviso = color(190, 120, 0)
+    ui.c_mal = color(200, 40, 40)
+}
+
+fn oscuro(ui: Ui) {
+    ui.c_fondo = 1973282
+    ui.c_panel = 2895160
+    ui.c_texto = 15198183
+    ui.c_tenue = 10329762
+    ui.c_acento = 5940479
+    ui.c_sobre_acento = 1315860
+    ui.c_borde = 4605510
+    ui.c_bien = color(110, 210, 120)
+    ui.c_aviso = color(240, 180, 70)
+    ui.c_mal = color(250, 100, 90)
+}
+
+# gui.acento(ui, r, g, b): el color de los botones y lo marcado.
+fn acento(ui: Ui, r: i32, g: i32, b: i32) {
+    ui.c_acento = (r << 16) | (g << 8) | b
+}
+
+# gui.abierta(ui): muestra el cuadro anterior, lee lo que pasó (clics, teclas)
+# y empieza uno nuevo. false cuando la persona cierra la ventana: ahí la
+# ventana ya quedó cerrada.
+fn abierta(ui: Ui) -> bool {
+    if not ui.abierta_ya {
+        return false
+    }
+    if ui.cuadro > 0 {
+        scar_sdl_present()
+        scar_sdl_delay(16)
+    }
+    # el botón se soltó en el cuadro que termina: ninguna pieza lo tiene
+    # apretado. Va antes de leer lo nuevo: si se borrara después, un clic
+    # de verdad (apretar en un cuadro y soltar en otro) se perdía, porque al
+    # empezar el cuadro del soltar la pieza ya no figuraba como apretada.
+    if scar_sdl_raton_soltado() == 1 {
+        ui.activo = -1
+    }
+    let ev = scar_sdl_eventos()
+    if ev == 2 and ui.preguntar_cierre {
+        # la persona apretó la X: el programa decide (gui.pidio_cerrar, gui.cerrar)
+        ui.cierre_pedido = true
+    } else {
+        if ev != 0 {
+            scar_sdl_cerrar()
+            ui.abierta_ya = false
+            return false
+        }
+    }
+    ui.cuadro = ui.cuadro + 1
+    ui.modal = false
+    # la persona pudo haber agrandado o achicado la ventana
+    let w = scar_sdl_ancho()
+    let h = scar_sdl_alto()
+    if w > 0 and h > 0 {
+        ui.ancho = w
+        ui.alto = h
+    }
+    if ui.recortado {
+        scar_sdl_sin_recorte()
+        ui.recortado = false
+    }
+    scar_sdl_set_clear_color(_r(ui.c_fondo), _g(ui.c_fondo), _b(ui.c_fondo), 255)
+    scar_sdl_clear()
+    ui.x = ui.margen
+    ui.y = ui.margen
+    ui.en_fila = false
+    ui.en_columna = false
+    ui.id = 0
+    return true
+}
+
+# gui.cerrar(ui): cierra la ventana antes de que la cierre la persona.
+# gui.margen(ui, px): el margen alrededor de la ventana (16 de entrada; 0 para que las piezas lleguen
+# al borde, como en un IDE). Vale desde el próximo cuadro.
+fn margen(ui: Ui, px: i32) {
+    ui.margen = max(px, 0)
+}
+
+# gui.preguntar_al_cerrar(ui, si): con true, la X de la ventana no la cierra: gui.pidio_cerrar(ui)
+# pasa a dar true y el programa decide (por ejemplo preguntar si guardar) y cierra con gui.cerrar.
+# Un cierre forzado (SCAR_SDL_MAX_FRAMES en las pruebas) cierra igual.
+fn preguntar_al_cerrar(ui: Ui, si: bool) {
+    ui.preguntar_cierre = si
+}
+
+# gui.pidio_cerrar(ui) -> bool: la persona apretó la X (con preguntar_al_cerrar). Queda en true
+# hasta gui.olvidar_cierre(ui) o gui.cerrar(ui).
+fn pidio_cerrar(ui: Ui) -> bool {
+    return ui.cierre_pedido
+}
+
+fn olvidar_cierre(ui: Ui) {
+    ui.cierre_pedido = false
+}
+
+fn cerrar(ui: Ui) {
+    if ui.abierta_ya {
+        scar_sdl_present()
+        scar_sdl_cerrar()
+        ui.abierta_ya = false
+    }
+}
+
+# ---- acomodo -------------------------------------------------------------------
+
+# Ubica una pieza de w x h: deja su esquina en ui.px / ui.py y corre el cursor.
+fn _lugar(ui: Ui, w: i32, h: i32) {
+    if ui.recortado {
+        scar_sdl_sin_recorte()
+        ui.recortado = false
+    }
+    if ui.en_fila {
+        ui.px = ui.fila_x
+        ui.py = ui.y
+        ui.fila_x = ui.fila_x + w + _espacio()
+        ui.fila_alto = max(ui.fila_alto, h)
+    } else {
+        ui.px = ui.x
+        ui.py = ui.y
+        ui.y = ui.y + h + _espacio()
+    }
+}
+
+fn _nuevo_id(ui: Ui) -> i32 {
+    ui.id = ui.id + 1
+    return ui.id
+}
+
+fn _encima(x: i32, y: i32, w: i32, h: i32) -> bool {
+    let mx = scar_sdl_raton_x()
+    let my = scar_sdl_raton_y()
+    return mx >= x and mx < x + w and my >= y and my < y + h
+}
+
+# Clic completo sobre la pieza: se apretó encima y se soltó encima.
+fn _clic(ui: Ui, id: i32, x: i32, y: i32, w: i32, h: i32) -> bool {
+    if ui.modal {
+        return false
+    }
+    let encima = _encima(x, y, w, h)
+    if scar_sdl_raton_clic() == 1 and encima {
+        ui.activo = id
+    }
+    if scar_sdl_raton_soltado() == 1 and ui.activo == id {
+        ui.activo = -1
+        return encima
+    }
+    return false
+}
+
+# gui.fila(ui) ... gui.fin_fila(ui): lo de adentro va lado a lado.
+fn fila(ui: Ui) {
+    ui.en_fila = true
+    ui.fila_x = ui.x
+    ui.fila_alto = 0
+}
+
+fn fin_fila(ui: Ui) {
+    if ui.en_fila {
+        ui.en_fila = false
+        ui.y = ui.y + ui.fila_alto + _espacio()
+    }
+}
+
+# El borde derecho de donde van las piezas: el de la columna, o el de la
+# ventana menos el margen.
+fn _borde_derecho(ui: Ui) -> i32 {
+    if ui.en_columna {
+        return ui.col_x + ui.col_ancho
+    }
+    return ui.ancho - ui.margen
+}
+
+# El ancho que queda para la próxima pieza (lo que sobra de la fila, o el de
+# la columna o la ventana).
+fn _ancho_libre(ui: Ui) -> i32 {
+    if ui.en_fila {
+        return max(_borde_derecho(ui) - ui.fila_x, 0)
+    }
+    return max(_borde_derecho(ui) - ui.x, 0)
+}
+
+# gui.ancho_libre(ui) -> i32: cuánto ancho queda para la próxima pieza.
+fn ancho_libre(ui: Ui) -> i32 {
+    return _ancho_libre(ui)
+}
+
+# gui.columna(ui, ancho): lo que sigue va en una columna de ese ancho (0 o
+# menos: todo lo que queda a la derecha). Otra gui.columna empieza la
+# siguiente, a la derecha de esta y a la misma altura; gui.fin_columnas(ui)
+# vuelve a usar todo el ancho, debajo de la columna más larga.
+fn columna(ui: Ui, ancho: i32) {
+    fin_fila(ui)
+    if ui.en_columna {
+        ui.col_fondo = max(ui.col_fondo, ui.y)
+        ui.x = ui.col_x + ui.col_ancho + 2 * _espacio()
+        ui.y = ui.col_y0
+    } else {
+        ui.en_columna = true
+        ui.col_y0 = ui.y
+        ui.col_fondo = ui.y
+    }
+    ui.col_x = ui.x
+    let libre = max(ui.ancho - ui.margen - ui.x, 0)
+    if ancho <= 0 {
+        ui.col_ancho = libre
+    } else {
+        ui.col_ancho = min(ancho, libre)
+    }
+}
+
+fn fin_columnas(ui: Ui) {
+    fin_fila(ui)
+    if ui.en_columna {
+        ui.en_columna = false
+        ui.y = max(ui.col_fondo, ui.y)
+        ui.x = ui.margen
+    }
+}
+
+# gui.espacio(ui, px): un hueco vertical (o horizontal, en una fila).
+fn espacio(ui: Ui, px: i32) {
+    _lugar(ui, px, px - _espacio())
+}
+
+# gui.separador(ui): una línea de lado a lado.
+fn separador(ui: Ui) {
+    let w = _ancho_libre(ui)
+    _lugar(ui, w, 1)
+    _rect(ui.px, ui.py, w, 1, ui.c_borde)
+}
+
+# ---- texto ---------------------------------------------------------------------
+
+fn texto(ui: Ui, s: str) {
+    _lugar(ui, scar_sdl_texto_ancho(s, _tam()), scar_sdl_texto_alto(_tam()))
+    _escribir(ui.px, ui.py, s, _tam(), ui.c_texto)
+}
+
+fn texto_tenue(ui: Ui, s: str) {
+    _lugar(ui, scar_sdl_texto_ancho(s, _tam_chico()), scar_sdl_texto_alto(_tam_chico()))
+    _escribir(ui.px, ui.py, s, _tam_chico(), ui.c_tenue)
+}
+
+fn titulo(ui: Ui, s: str) {
+    _lugar(ui, scar_sdl_texto_ancho(s, _tam_titulo()), scar_sdl_texto_alto(_tam_titulo()))
+    _escribir(ui.px, ui.py, s, _tam_titulo(), ui.c_texto)
+}
+
+# gui.subtitulo(ui, s): un texto más grande que el normal, más chico que el título.
+fn subtitulo(ui: Ui, s: str) {
+    _lugar(ui, scar_sdl_texto_ancho(s, 20), scar_sdl_texto_alto(20))
+    _escribir(ui.px, ui.py, s, 20, ui.c_texto)
+}
+
+# gui.texto_color(ui, s, color): un texto de otro color (gui.color(r, g, b),
+# o uno del tema: ui.c_bien, ui.c_aviso, ui.c_mal, ui.c_acento...).
+fn texto_color(ui: Ui, s: str, c: i32) {
+    _lugar(ui, scar_sdl_texto_ancho(s, _tam()), scar_sdl_texto_alto(_tam()))
+    _escribir(ui.px, ui.py, s, _tam(), c)
+}
+
+# gui.etiqueta(ui, s, color): el texto sobre un rectángulo de ese color (un
+# estado: "EN CALMA", "DISPARADO").
+fn etiqueta(ui: Ui, s: str, c: i32) {
+    let w = scar_sdl_texto_ancho(s, _tam_chico()) + 16
+    let h = scar_sdl_texto_alto(_tam_chico()) + 8
+    _lugar(ui, w, h)
+    _rect(ui.px, ui.py, w, h, c)
+    _escribir(ui.px + 8, ui.py + 4, s, _tam_chico(), _sobre(c))
+}
+
+# El texto que se lee sobre un fondo c: negro sobre lo claro, blanco sobre lo oscuro.
+fn _sobre(c: i32) -> i32 {
+    if _r(c) * 299 + _g(c) * 587 + _b(c) * 114 > 150000 {
+        return 1315860
+    }
+    return 16777215
+}
+
+# gui.parrafo(ui, s): un texto largo, partido en líneas para que quepa en el
+# ancho que queda (entre palabras; "\n" corta la línea).
+fn parrafo(ui: Ui, s: str) {
+    let w = max(_ancho_libre(ui), 40)
+    let lineas: Vec<str> = vec_new()
+    let mut linea = ""
+    let mut palabra = ""
+    let n = s.len()
+    for i in 0..n + 1 {
+        let mut c = "\n"
+        if i < n {
+            c = s[i]
+        }
+        if c == " " or c == "\n" {
+            if palabra.len() > 0 {
+                let mut prueba = palabra
+                if linea.len() > 0 {
+                    prueba = linea + " " + palabra
+                }
+                if linea.len() > 0 and scar_sdl_texto_ancho(prueba, _tam()) > w {
+                    lineas.push(linea)
+                    linea = palabra
+                } else {
+                    linea = prueba
+                }
+                palabra = ""
+            }
+            if c == "\n" and (linea.len() > 0 or i < n) {
+                lineas.push(linea)
+                linea = ""
+            }
+        } else {
+            palabra = palabra + c
+        }
+    }
+    let alto_linea = scar_sdl_texto_alto(_tam()) + 2
+    _lugar(ui, w, max(lineas.len(), 1) * alto_linea)
+    for k in 0..lineas.len() {
+        let mut o = lineas.get(k)
+        while let Some(t) = o {
+            _escribir(ui.px, ui.py + k * alto_linea, t, _tam(), ui.c_texto)
+            o = None
+        }
+    }
+}
+
+# ---- piezas --------------------------------------------------------------------
+
+# gui.boton(ui, s) -> bool: true en el cuadro en que se le hizo clic.
+fn boton(ui: Ui, s: str) -> bool {
+    let id = _nuevo_id(ui)
+    let w = scar_sdl_texto_ancho(s, _tam()) + 32
+    let h = _alto_pieza()
+    _lugar(ui, w, h)
+    let x = ui.px
+    let y = ui.py
+    let hecho = _clic(ui, id, x, y, w, h)
+    let mut c = ui.c_acento
+    if ui.activo == id {
+        c = _aclarar(c, -20)
+    } else {
+        if _encima(x, y, w, h) {
+            c = _aclarar(c, 15)
+        }
+    }
+    _rect(x, y, w, h, c)
+    _escribir(x + 16, y + 7, s, _tam(), ui.c_sobre_acento)
+    return hecho
+}
+
+# gui.casilla(ui, s, marcada) -> bool: la casilla con su texto; devuelve si
+# queda marcada (cambia con un clic en la casilla o en el texto).
+fn casilla(ui: Ui, s: str, marcada: bool) -> bool {
+    let id = _nuevo_id(ui)
+    let lado = scar_sdl_texto_alto(_tam())
+    let w = lado + 8 + scar_sdl_texto_ancho(s, _tam())
+    _lugar(ui, w, lado)
+    let x = ui.px
+    let y = ui.py
+    let mut valor = marcada
+    if _clic(ui, id, x, y, w, lado) {
+        valor = not valor
+    }
+    if valor {
+        _rect(x, y, lado, lado, ui.c_acento)
+        _rect(x + 5, y + 5, lado - 10, lado - 10, ui.c_sobre_acento)
+    } else {
+        _rect(x, y, lado, lado, ui.c_panel)
+        _borde(x, y, lado, lado, 2, ui.c_borde)
+    }
+    _escribir(x + lado + 8, y, s, _tam(), ui.c_texto)
+    return valor
+}
+
+# gui.campo(ui, etiqueta, valor) -> str: un campo de texto de una línea. Un
+# clic adentro lo activa; lo que se escribe se agrega, Borrar quita la última
+# letra, Enter o Esc lo sueltan (también un clic afuera). Devuelve el texto.
+fn campo(ui: Ui, etiqueta: str, valor: str) -> str {
+    let id = _nuevo_id(ui)
+    let ancho_etiqueta = scar_sdl_texto_ancho(etiqueta, _tam())
+    let w = ancho_etiqueta + 12 + 220
+    let h = _alto_pieza()
+    _lugar(ui, w, h)
+    let x = ui.px
+    let y = ui.py
+    let cx = x + ancho_etiqueta + 12
+    if scar_sdl_raton_clic() == 1 {
+        if _encima(cx, y, 220, h) {
+            ui.foco = id
+        } else {
+            if ui.foco == id {
+                ui.foco = -1
+            }
+        }
+    }
+    let mut t = valor
+    if ui.foco == id {
+        t = t + scar_sdl_escrito()
+        if scar_sdl_tecla(42) == 1 {
+            t = _sin_ultima(t)
+        }
+        if scar_sdl_tecla(40) == 1 or scar_sdl_tecla(41) == 1 {
+            ui.foco = -1
+        }
+    }
+    _escribir(x, y + 7, etiqueta, _tam(), ui.c_texto)
+    _rect(cx, y, 220, h, ui.c_panel)
+    let mut c_borde = ui.c_borde
+    if ui.foco == id {
+        c_borde = ui.c_acento
+    }
+    _borde(cx, y, 220, h, 2, c_borde)
+    let usado = _escribir(cx + 8, y + 7, t, _tam(), ui.c_texto)
+    if ui.foco == id {
+        _rect(cx + 9 + usado, y + 6, 2, h - 12, ui.c_acento)
+    }
+    return t
+}
+
+# gui.campo_largo(ui, etiqueta, valor, ancho) -> str: un campo de texto del ancho pedido (0: todo el
+# que queda; la etiqueta puede ser ""). Como gui.campo, pero si el texto no cabe se ve el final, y la
+# tecla Enter no le saca el foco (se la deja al programa: `ui.foco == ui.id` justo después de
+# llamarlo dice que tiene el foco, y gui.tecla_pulsada(ui, 40) que se apretó Enter).
+fn campo_largo(ui: Ui, etiqueta: str, valor: str, ancho: i32) -> str {
+    let id = _nuevo_id(ui)
+    let mut ae = 0
+    if len(etiqueta) > 0 {
+        ae = scar_sdl_texto_ancho(etiqueta, _tam()) + 12
+    }
+    let mut w = ancho
+    if w <= 0 {
+        w = _ancho_libre(ui)
+    }
+    let h = _alto_pieza()
+    _lugar(ui, w, h)
+    let x = ui.px
+    let y = ui.py
+    let cx = x + ae
+    let cw = max(w - ae, 40)
+    if scar_sdl_raton_clic() == 1 {
+        if _encima(cx, y, cw, h) {
+            ui.foco = id
+        } else {
+            if ui.foco == id {
+                ui.foco = -1
+            }
+        }
+    }
+    let mut t = valor + ""
+    if ui.foco == id {
+        t = t + scar_sdl_escrito()
+        if scar_sdl_tecla(42) == 1 {
+            t = _sin_ultima(t)
+        }
+        if scar_sdl_tecla(41) == 1 {
+            ui.foco = -1
+        }
+    }
+    if len(etiqueta) > 0 {
+        _escribir(x, y + 7, etiqueta, _tam(), ui.c_texto)
+    }
+    _rect(cx, y, cw, h, ui.c_panel)
+    let mut c_borde = ui.c_borde
+    if ui.foco == id {
+        c_borde = ui.c_acento
+    }
+    _borde(cx, y, cw, h, 2, c_borde)
+    # lo que cabe: el final del texto
+    let n = len(t)
+    let mut visible = ""
+    let mut i = n - 1
+    while i >= 0 and scar_sdl_texto_ancho(visible, _tam()) < cw - 28 {
+        visible = t[i] + visible
+        i = i - 1
+    }
+    let usado = _escribir(cx + 8, y + 7, visible, _tam(), ui.c_texto)
+    if ui.foco == id {
+        _rect(cx + 9 + usado, y + 6, 2, h - 12, ui.c_acento)
+    }
+    return t
+}
+
+fn _sin_ultima(s: str) -> str {
+    let mut r = ""
+    let n = s.len()
+    for i in 0..n - 1 {
+        r = r + s[i]
+    }
+    return r
+}
+
+# gui.deslizador(ui, etiqueta, valor, min, max) -> f64: arrastrando la
+# perilla (o con un clic en la barra) el valor va de min a max.
+fn deslizador(ui: Ui, etiqueta: str, valor: f64, min_v: f64, max_v: f64) -> f64 {
+    let id = _nuevo_id(ui)
+    let ancho_etiqueta = scar_sdl_texto_ancho(etiqueta, _tam())
+    let barra = 220
+    let h = _alto_pieza()
+    _lugar(ui, ancho_etiqueta + 12 + barra, h)
+    let x = ui.px
+    let y = ui.py
+    let bx = x + ancho_etiqueta + 12
+    if scar_sdl_raton_clic() == 1 and _encima(bx - 6, y, barra + 12, h) {
+        ui.activo = id
+    }
+    let mut v = valor
+    if ui.activo == id and (scar_sdl_raton_abajo() == 1 or scar_sdl_raton_soltado() == 1) {
+        let f = to_f64(min(max(scar_sdl_raton_x() - bx, 0), barra)) / to_f64(barra)
+        v = min_v + f * (max_v - min_v)
+    }
+    if ui.activo == id and scar_sdl_raton_soltado() == 1 {
+        ui.activo = -1
+    }
+    let mut f = 0.0
+    if max_v > min_v {
+        f = max(0.0, min(1.0, (v - min_v) / (max_v - min_v)))
+    }
+    _escribir(x, y + 7, etiqueta, _tam(), ui.c_texto)
+    let medio = y + h / 2
+    _rect(bx, medio - 3, barra, 6, ui.c_borde)
+    let px = bx + to_i32(f * to_f64(barra))
+    _rect(bx, medio - 3, px - bx, 6, ui.c_acento)
+    scar_sdl_circulo(px, medio, 9, _r(ui.c_acento), _g(ui.c_acento), _b(ui.c_acento), 255)
+    return v
+}
+
+# gui.opciones(ui, "Rojo|Verde|Azul", elegida) -> i32: una de varias, lado a
+# lado; devuelve la elegida (0 la primera).
+fn opciones(ui: Ui, lista: str, elegida: i32) -> i32 {
+    let mut nueva = elegida
+    let n = _partes(lista)
+    let mut alto = _alto_pieza()
+    let mut ancho = 0
+    for k in 0..n {
+        ancho = ancho + scar_sdl_texto_ancho(_parte(lista, k), _tam()) + 24
+    }
+    _lugar(ui, ancho, alto)
+    let y = ui.py
+    # primero los clics, después el dibujo: así se ve marcada solo la nueva
+    let primero = ui.id + 1
+    let mut x = ui.px
+    for k in 0..n {
+        let id = _nuevo_id(ui)
+        let w = scar_sdl_texto_ancho(_parte(lista, k), _tam()) + 24
+        if _clic(ui, id, x, y, w, alto) {
+            nueva = k
+        }
+        x = x + w
+    }
+    x = ui.px
+    for k in 0..n {
+        let s = _parte(lista, k)
+        let w = scar_sdl_texto_ancho(s, _tam()) + 24
+        if k == nueva {
+            _rect(x, y, w, alto, ui.c_acento)
+            _escribir(x + 12, y + 7, s, _tam(), ui.c_sobre_acento)
+        } else {
+            _rect(x, y, w, alto, ui.c_panel)
+            _borde(x, y, w, alto, 1, ui.c_borde)
+            _escribir(x + 12, y + 7, s, _tam(), ui.c_texto)
+        }
+        x = x + w
+    }
+    return nueva
+}
+
+# gui.pestanas(ui, "Uno|Dos|Tres", elegida) -> i32: una barra de pestañas de
+# lado a lado; devuelve la elegida (0 la primera). Lo que se muestra debajo lo
+# decide el programa según ese número.
+fn pestanas(ui: Ui, lista: str, elegida: i32) -> i32 {
+    return _pestanas(ui, lista, elegida, false)
+}
+
+# gui.pestanas_cerrables(ui, "Uno|Dos|Tres", elegida) -> i32: lo mismo, pero cada pestaña
+# trae una "x" a la derecha. Si se hace clic en una x, no cambia la elegida: se avisa con
+# gui.pestana_cerrada(ui), que da el número de la pestaña (o -1 si no se cerró ninguna en
+# este cuadro). Quitarla de la lista es cosa del programa.
+fn pestanas_cerrables(ui: Ui, lista: str, elegida: i32) -> i32 {
+    return _pestanas(ui, lista, elegida, true)
+}
+
+fn pestana_cerrada(ui: Ui) -> i32 {
+    return ui.pestana_cerrada
+}
+
+fn _pestanas(ui: Ui, lista: str, elegida: i32, cerrable: bool) -> i32 {
+    let mut nueva = elegida
+    ui.pestana_cerrada = -1
+    let n = _partes(lista)
+    let w_total = _ancho_libre(ui)
+    let alto = _alto_pieza() + 4
+    _lugar(ui, w_total, alto)
+    let y = ui.py
+    let mut x = ui.px
+    let mut extra = 0
+    if cerrable {
+        extra = 24
+    }
+    for k in 0..n {
+        let id = _nuevo_id(ui)
+        let w = scar_sdl_texto_ancho(_parte(lista, k), _tam()) + 32 + extra
+        if cerrable {
+            let idx = _nuevo_id(ui)
+            if _clic(ui, idx, x + w - 26, y, 26, alto) {
+                ui.pestana_cerrada = k
+            }
+            if _clic(ui, id, x, y, w - 26, alto) {
+                nueva = k
+            }
+        } else {
+            if _clic(ui, id, x, y, w, alto) {
+                nueva = k
+            }
+        }
+        x = x + w
+    }
+    _rect(ui.px, y + alto - 1, w_total, 1, ui.c_borde)
+    x = ui.px
+    for k in 0..n {
+        let s = _parte(lista, k)
+        let w = scar_sdl_texto_ancho(s, _tam()) + 32 + extra
+        if k == nueva {
+            _rect(x, y, w, alto, ui.c_panel)
+            _rect(x, y + alto - 3, w, 3, ui.c_acento)
+            _escribir(x + 16, y + 9, s, _tam(), ui.c_acento)
+        } else {
+            let mut c = ui.c_tenue
+            if _encima(x, y, w, alto) {
+                c = ui.c_texto
+            }
+            _escribir(x + 16, y + 9, s, _tam(), c)
+        }
+        if cerrable {
+            let mut cx = ui.c_tenue
+            if _encima(x + w - 26, y, 26, alto) {
+                cx = ui.c_acento
+                _rect(x + w - 24, y + 6, 20, alto - 12, ui.c_borde)
+            }
+            _escribir(x + w - 20, y + 9, "x", _tam(), cx)
+        }
+        x = x + w
+    }
+    return nueva
+}
+
+# ---- barra de menús ---------------------------------------------------------------------------------
+#
+#   let menu = gui.menu_nuevo()
+#   gui.menu_agregar(menu, "Archivo", "Nuevo~Ctrl+N|Abrir~Ctrl+O|-|Salir")
+#   gui.menu_agregar(menu, "Editar", "Copiar~Ctrl+C|Pegar~Ctrl+V")
+#   while gui.abierta(ui) {
+#       gui.menu_barra(ui, menu)                 # primero: la barra, arriba de todo
+#       ...                                      # el resto de las piezas
+#       let k = gui.menu_desplegable(ui, menu)   # al final: la lista abierta, encima de todo
+#       if k >= 0 {
+#           if gui.menu_de(k) == 0 and gui.item_de(k) == 0 { ... }   # Archivo > Nuevo
+#       }
+#   }
+#
+# Cada menú es un título y sus opciones separadas por '|'. Una opción puede llevar un atajo después de
+# '~' (solo se muestra: lo que hace el atajo lo programa quien usa la pieza) y '-' es una línea
+# separadora. Un clic en un título abre la lista; con una abierta, pasar el ratón por otro título la
+# cambia; un clic en una opción la elige; un clic afuera o Esc la cierra. Mientras hay una lista
+# abierta las demás piezas no reciben clics ni teclas. menu_desplegable devuelve menu * 1000 + opción
+# (contando las líneas separadoras) o -1 si no se eligió nada.
+struct Menu {
+    titulos: Vec<str>
+    items: Vec<str>
+    abierto: i32
+    tx: Vec<i32>
+    tw: Vec<i32>
+    base: i32
+}
+
+fn menu_nuevo() -> Menu {
+    return Menu { titulos: vec_new(), items: vec_new(), abierto: -1, tx: vec_new(), tw: vec_new(), base: 0 }
+}
+
+fn menu_agregar(m: Menu, titulo: str, opciones: str) {
+    m.titulos.push(titulo)
+    m.items.push(opciones)
+    m.tx.push(0)
+    m.tw.push(0)
+}
+
+fn menu_de(codigo: i32) -> i32 {
+    return codigo / 1000
+}
+
+fn item_de(codigo: i32) -> i32 {
+    return codigo % 1000
+}
+
+fn menu_cerrar(m: Menu) {
+    m.abierto = -1
+}
+
+fn _menu_titulo(m: Menu, k: i32) -> str {
+    let mut r = ""
+    let mut o = m.titulos.get(k)
+    while let Some(e) = o {
+        r = e + ""
+        o = None
+    }
+    return r
+}
+
+fn _menu_opciones(m: Menu, k: i32) -> str {
+    let mut r = ""
+    let mut o = m.items.get(k)
+    while let Some(e) = o {
+        r = e + ""
+        o = None
+    }
+    return r
+}
+
+fn _pos_tilde(s: str) -> i32 {
+    for i in 0..s.len() {
+        if s[i] == "~" {
+            return i
+        }
+    }
+    return 0 - 1
+}
+
+fn _tramo(s: str, desde: i32, hasta: i32) -> str {
+    let mut r = ""
+    for i in desde..hasta {
+        r = r + s[i]
+    }
+    return r
+}
+
+fn _opcion_texto(s: str) -> str {
+    let p = _pos_tilde(s)
+    if p < 0 {
+        return s + ""
+    }
+    return _tramo(s, 0, p)
+}
+
+fn _opcion_atajo(s: str) -> str {
+    let p = _pos_tilde(s)
+    if p < 0 {
+        return ""
+    }
+    return _tramo(s, p + 1, s.len())
+}
+
+# La barra: una tira del ancho de la ventana con los títulos. Va antes que las demás piezas.
+fn menu_barra(ui: Ui, m: Menu) {
+    let n = m.titulos.len()
+    let w_total = _ancho_libre(ui)
+    let alto = _alto_pieza() + 4
+    _lugar(ui, w_total, alto)
+    let y = ui.py
+    let x0 = ui.px
+    _rect(x0, y, w_total, alto, _aclarar(ui.c_panel, 0 - 4))
+    _rect(x0, y + alto - 1, w_total, 1, ui.c_borde)
+    let clic = scar_sdl_raton_clic() == 1
+    let mut x = x0
+    let mut sobre_titulo = false
+    for k in 0..n {
+        let w = scar_sdl_texto_ancho(_menu_titulo(m, k), _tam()) + 26
+        m.tx.set(k, x)
+        m.tw.set(k, w)
+        if _encima(x, y, w, alto) {
+            sobre_titulo = true
+            if clic {
+                if m.abierto == k {
+                    m.abierto = 0 - 1
+                } else {
+                    m.abierto = k
+                }
+            } else {
+                if m.abierto >= 0 {
+                    m.abierto = k
+                }
+            }
+        }
+        x = x + w
+    }
+    if clic and not sobre_titulo and _encima(x0, y, w_total, alto) {
+        m.abierto = 0 - 1
+    }
+    x = x0
+    for k in 0..n {
+        let t = _menu_titulo(m, k)
+        let w = m.tw.get(k).unwrap_or(0)
+        if m.abierto == k {
+            _rect(x, y, w, alto, ui.c_acento)
+            _escribir(x + 13, y + 9, t, _tam(), ui.c_sobre_acento)
+        } else {
+            if _encima(x, y, w, alto) {
+                _rect(x, y, w, alto, _aclarar(ui.c_panel, 10))
+            }
+            _escribir(x + 13, y + 9, t, _tam(), ui.c_texto)
+        }
+        x = x + w
+    }
+    m.base = y + alto
+    ui.modal = m.abierto >= 0
+}
+
+# La lista abierta, dibujada encima de todo (se llama al final del cuadro). Devuelve
+# menu * 1000 + opción si se eligió una, y -1 si no.
+fn menu_desplegable(ui: Ui, m: Menu) -> i32 {
+    if m.abierto < 0 {
+        return 0 - 1
+    }
+    if scar_sdl_tecla(41) == 1 {
+        m.abierto = 0 - 1
+        return 0 - 1
+    }
+    scar_sdl_sin_recorte()
+    ui.recortado = false
+    let k = m.abierto
+    let opc = _menu_opciones(m, k)
+    let n = _partes(opc)
+    let fh = scar_sdl_texto_alto(_tam()) + 10
+    let alto_sep = 11
+    let mut wt = 0
+    let mut wa = 0
+    let mut alto = 8
+    for i in 0..n {
+        let p = _parte(opc, i)
+        if p == "-" {
+            alto = alto + alto_sep
+        } else {
+            wt = max(wt, scar_sdl_texto_ancho(_opcion_texto(p), _tam()))
+            wa = max(wa, scar_sdl_texto_ancho(_opcion_atajo(p), _tam()))
+            alto = alto + fh
+        }
+    }
+    let mut w = wt + 36
+    if wa > 0 {
+        w = w + wa + 28
+    }
+    w = max(w, 150)
+    let x = max(0, min(m.tx.get(k).unwrap_or(0), ui.ancho - w))
+    let y = m.base
+    _rect(x + 3, y + 3, w, alto, _aclarar(ui.c_fondo, 0 - 40))
+    _rect(x, y, w, alto, _aclarar(ui.c_panel, 6))
+    _borde(x, y, w, alto, 1, ui.c_borde)
+    let mx = scar_sdl_raton_x()
+    let my = scar_sdl_raton_y()
+    let clic = scar_sdl_raton_clic() == 1
+    let adentro = _encima(x, y, w, alto)
+    let mut elegido = 0 - 1
+    let mut fy = y + 4
+    for i in 0..n {
+        let p = _parte(opc, i)
+        if p == "-" {
+            _rect(x + 8, fy + 5, w - 16, 1, ui.c_borde)
+            fy = fy + alto_sep
+        } else {
+            let mut ct = ui.c_texto
+            let mut ca = ui.c_tenue
+            if mx >= x and mx < x + w and my >= fy and my < fy + fh {
+                _rect(x + 3, fy, w - 6, fh, ui.c_acento)
+                ct = ui.c_sobre_acento
+                ca = ui.c_sobre_acento
+                if clic {
+                    elegido = k * 1000 + i
+                }
+            }
+            _escribir(x + 16, fy + 5, _opcion_texto(p), _tam(), ct)
+            let at = _opcion_atajo(p)
+            if at.len() > 0 {
+                _escribir(x + w - 14 - scar_sdl_texto_ancho(at, _tam()), fy + 5, at, _tam(), ca)
+            }
+            fy = fy + fh
+        }
+    }
+    if elegido >= 0 {
+        m.abierto = 0 - 1
+        return elegido
+    }
+    if clic and not adentro and my >= m.base {
+        m.abierto = 0 - 1
+    }
+    return 0 - 1
+}
+
+# gui.lista_nueva() -> Lista, gui.lista_agregar(lista, s), gui.lista_vaciar(lista):
+# las filas de una gui.lista.
+fn lista_nueva() -> Lista {
+    return Lista { items: vec_new(), desde: 0, arrastrando: false }
+}
+
+fn lista_agregar(l: Lista, s: str) {
+    l.items.push(s)
+}
+
+fn lista_vaciar(l: Lista) {
+    l.items = vec_new()
+}
+
+# gui.lista(ui, lista, elegida, filas) -> i32: una lista de `filas` de alto
+# donde se elige una con un clic; devuelve la elegida (-1: ninguna). Si hay
+# más de las que caben, se recorre con la rueda del ratón o con la barra de la
+# derecha (un clic o arrastrándola).
+fn lista(ui: Ui, l: Lista, elegida: i32, filas: i32) -> i32 {
+    let n = l.items.len()
+    let w = _ancho_libre(ui)
+    let fh = scar_sdl_texto_alto(_tam()) + 10
+    let visibles = max(filas, 1)
+    let h = visibles * fh
+    _lugar(ui, w, h)
+    let x = ui.px
+    let y = ui.py
+    if _encima(x, y, w, h) {
+        l.desde = l.desde - 3 * scar_sdl_rueda()
+    }
+    # la barra: una columna de 12 píxeles a la derecha; un clic o arrastrarla lleva la vista hasta ahí
+    let mut ancho_filas = w
+    if n > visibles {
+        ancho_filas = w - 12
+        let bh = max(h * visibles / n, 24)
+        if scar_sdl_raton_clic() == 1 and _encima(x + w - 12, y, 12, h) {
+            l.arrastrando = true
+        }
+        if l.arrastrando and scar_sdl_raton_abajo() == 1 {
+            let recorrido = max(h - bh, 1)
+            let pos = max(0, min(scar_sdl_raton_y() - y - bh / 2, recorrido))
+            l.desde = (pos * (n - visibles) + recorrido / 2) / recorrido
+        }
+    }
+    if scar_sdl_raton_abajo() == 0 {
+        l.arrastrando = false
+    }
+    l.desde = max(0, min(l.desde, n - visibles))
+    let mut nueva = elegida
+    if nueva >= n {
+        nueva = -1
+    }
+    for r in 0..visibles {
+        let id = _nuevo_id(ui)
+        let k = l.desde + r
+        if k < n and _clic(ui, id, x, y + r * fh, ancho_filas, fh) {
+            nueva = k
+        }
+    }
+    _rect(x, y, w, h, ui.c_panel)
+    scar_sdl_recorte(x, y, w, h)
+    for r in 0..visibles {
+        let k = l.desde + r
+        if k < n {
+            let fy = y + r * fh
+            let mut c = ui.c_texto
+            if k == nueva {
+                _rect(x, fy, ancho_filas, fh, ui.c_acento)
+                c = ui.c_sobre_acento
+            } else {
+                if _encima(x, fy, ancho_filas, fh) {
+                    _rect(x, fy, ancho_filas, fh, _aclarar(ui.c_panel, -6))
+                }
+            }
+            let mut o = l.items.get(k)
+            while let Some(t) = o {
+                _escribir(x + 10, fy + 5, t, _tam(), c)
+                o = None
+            }
+        }
+    }
+    scar_sdl_sin_recorte()
+    if n > visibles {
+        # la barra de desplazamiento: dónde está lo visible en el total
+        let bh = max(h * visibles / n, 24)
+        let by = y + (h - bh) * l.desde / max(n - visibles, 1)
+        _rect(x + w - 12, y, 12, h, _aclarar(ui.c_panel, -8))
+        let mut cb = ui.c_borde
+        if l.arrastrando or _encima(x + w - 12, y, 12, h) {
+            cb = ui.c_tenue
+        }
+        _rect(x + w - 10, by + 1, 8, bh - 2, cb)
+    }
+    _borde(x, y, w, h, 1, ui.c_borde)
+    return nueva
+}
+
+# cuántas partes separadas por '|' tiene s
+fn _partes(s: str) -> i32 {
+    let mut n = 1
+    for i in 0..s.len() {
+        if s[i] == "|" {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+# la parte k (desde 0) de s separada por '|'
+fn _parte(s: str, k: i32) -> str {
+    let mut actual = 0
+    let mut r = ""
+    for i in 0..s.len() {
+        let c = s[i]
+        if c == "|" {
+            actual = actual + 1
+        } else {
+            if actual == k {
+                r = r + c
+            }
+        }
+    }
+    return r
+}
+
+# gui.progreso(ui, fraccion): una barra llena de 0.0 a 1.0.
+fn progreso(ui: Ui, fraccion: f64) {
+    let w = _ancho_libre(ui)
+    _lugar(ui, w, 12)
+    let f = max(0.0, min(1.0, fraccion))
+    _rect(ui.px, ui.py, w, 12, ui.c_borde)
+    _rect(ui.px, ui.py, to_i32(f * to_f64(w)), 12, ui.c_acento)
+}
+
+# ---- números como texto ----------------------------------------------------------
+
+# gui.decimales(x, n) -> str: x con n decimales, redondeado ("3.14" para pi y 2).
+# Para mostrar un f64 sin todos sus dígitos (a_texto(x) los muestra todos).
+fn decimales(x: f64, n: i32) -> str {
+    let mut escala = 1.0
+    for i in 0..n {
+        escala = escala * 10.0
+    }
+    let mut v = x
+    let mut signo = ""
+    if v < 0.0 {
+        signo = "-"
+        v = 0.0 - v
+    }
+    let entero = to_i64(floor(v * escala + 0.5))
+    if entero == 0 {
+        signo = ""          # -0.001 con 2 decimales es "0.00", no "-0.00"
+    }
+    if n <= 0 {
+        return signo + a_texto(entero)
+    }
+    let pot = to_i64(escala)
+    let mut frac = a_texto(entero % pot)
+    while frac.len() < n {
+        frac = "0" + frac
+    }
+    return signo + a_texto(entero / pot) + "." + frac
+}
+
+# ---- gráficos ------------------------------------------------------------------
+
+# gui.serie() -> Serie y gui.agregar(serie, valor): los datos de un gráfico.
+fn serie() -> Serie {
+    return Serie { valores: vec_new() }
+}
+
+fn agregar(s: Serie, v: f64) {
+    s.valores.push(v)
+}
+
+fn _maximo(s: Serie) -> f64 {
+    let mut m = 0.0
+    for i in 0..s.valores.len() {
+        m = max(m, s.valores.get(i).unwrap_or(0.0))
+    }
+    return m
+}
+
+# gui.barras(ui, serie, alto): una barra por valor (los negativos cuentan como 0).
+fn barras(ui: Ui, s: Serie, alto: i32) {
+    let w = _ancho_libre(ui)
+    _lugar(ui, w, alto)
+    let x = ui.px
+    let y = ui.py
+    _rect(x, y, w, alto, ui.c_panel)
+    _borde(x, y, w, alto, 1, ui.c_borde)
+    let n = s.valores.len()
+    let m = _maximo(s)
+    if n == 0 or m <= 0.0 {
+        return
+    }
+    let paso = (w - 8) / n
+    for i in 0..n {
+        let v = max(0.0, s.valores.get(i).unwrap_or(0.0))
+        let hb = to_i32(v / m * to_f64(alto - 8))
+        _rect(x + 4 + i * paso + 1, y + alto - 4 - hb, max(paso - 2, 1), hb, ui.c_acento)
+    }
+}
+
+# gui.lineas(ui, serie, alto): los valores unidos por líneas.
+fn lineas(ui: Ui, s: Serie, alto: i32) {
+    let w = _ancho_libre(ui)
+    _lugar(ui, w, alto)
+    let x = ui.px
+    let y = ui.py
+    _rect(x, y, w, alto, ui.c_panel)
+    _borde(x, y, w, alto, 1, ui.c_borde)
+    let n = s.valores.len()
+    if n < 2 {
+        return
+    }
+    let mut lo = s.valores.get(0).unwrap_or(0.0)
+    let mut hi = lo
+    for i in 0..n {
+        let v = s.valores.get(i).unwrap_or(0.0)
+        lo = min(lo, v)
+        hi = max(hi, v)
+    }
+    if hi <= lo {
+        hi = lo + 1.0
+    }
+    let c = ui.c_acento
+    let mut ax = 0
+    let mut ay = 0
+    for i in 0..n {
+        let v = s.valores.get(i).unwrap_or(0.0)
+        let px = x + 4 + i * (w - 8) / (n - 1)
+        let py = y + alto - 4 - to_i32((v - lo) / (hi - lo) * to_f64(alto - 8))
+        if i > 0 {
+            scar_sdl_linea(ax, ay, px, py, _r(c), _g(c), _b(c), 255)
+        }
+        scar_sdl_circulo(px, py, 3, _r(c), _g(c), _b(c), 255)
+        ax = px
+        ay = py
+    }
+}
+
+# ---- lienzo: dibujar a mano -----------------------------------------------------
+
+# gui.lienzo(ui, alto) -> Lienzo: reserva un rectángulo de ese alto y todo el
+# ancho que queda, con el fondo del panel. Hasta la próxima pieza, lo que se
+# dibuja con gui.pintar, gui.trazo y gui.rotular queda recortado adentro.
+# Las coordenadas son de la ventana: el rectángulo empieza en (l.x, l.y) y
+# mide l.ancho x l.alto.
+fn lienzo(ui: Ui, alto: i32) -> Lienzo {
+    let w = _ancho_libre(ui)
+    _lugar(ui, w, alto)
+    _rect(ui.px, ui.py, w, alto, ui.c_panel)
+    _borde(ui.px, ui.py, w, alto, 1, ui.c_borde)
+    scar_sdl_recorte(ui.px, ui.py, w, alto)
+    ui.recortado = true
+    return Lienzo { x: ui.px, y: ui.py, ancho: w, alto: alto }
+}
+
+# gui.pintar(ui, x, y, ancho, alto, color): un rectángulo lleno.
+fn pintar(ui: Ui, x: i32, y: i32, w: i32, h: i32, c: i32) {
+    if w > 0 and h > 0 {
+        _rect(x, y, w, h, c)
+    }
+}
+
+# gui.trazo(ui, x1, y1, x2, y2, color): una línea.
+fn trazo(ui: Ui, x1: i32, y1: i32, x2: i32, y2: i32, c: i32) {
+    scar_sdl_linea(x1, y1, x2, y2, _r(c), _g(c), _b(c), 255)
+}
+
+# gui.rotular(ui, x, y, s, tam, color) -> i32: un texto con la esquina de
+# arriba a la izquierda en (x, y); tam es la altura de la letra (13, 16, 20
+# o 28: se usa el más cercano). Devuelve el ancho que ocupó.
+fn rotular(ui: Ui, x: i32, y: i32, s: str, tam: i32, c: i32) -> i32 {
+    return _escribir(x, y, s, tam, c)
+}
+
+# gui.reservar(ui, ancho, alto) -> Lienzo: deja un hueco de ese tamaño donde iría la
+# próxima pieza (en una fila, a la derecha de la anterior) y no pinta nada: es para armar
+# piezas propias, como las de lib/tablero.
+fn reservar(ui: Ui, w: i32, h: i32) -> Lienzo {
+    _lugar(ui, w, h)
+    return Lienzo { x: ui.px, y: ui.py, ancho: w, alto: h }
+}
+
+# gui.circulo(ui, x, y, radio, color): un círculo lleno con el centro en (x, y).
+fn circulo(ui: Ui, x: i32, y: i32, radio: i32, c: i32) {
+    scar_sdl_circulo(x, y, radio, _r(c), _g(c), _b(c), 255)
+}
+
+# gui.marco(ui, x, y, ancho, alto, grosor, color): el borde de un rectángulo.
+fn marco(ui: Ui, x: i32, y: i32, w: i32, h: i32, grosor: i32, c: i32) {
+    if w > 0 and h > 0 {
+        _borde(x, y, w, h, grosor, c)
+    }
+}
+
+# gui.alto_texto(tam) -> i32: cuánto mide de alto una línea escrita con esa letra.
+fn alto_texto(tam: i32) -> i32 {
+    return scar_sdl_texto_alto(tam)
+}
+
+# gui.ancho_texto(s, tam) -> i32: cuánto mide s escrito con esa letra.
+fn ancho_texto(s: str, tam: i32) -> i32 {
+    return scar_sdl_texto_ancho(s, tam)
+}
+
+# gui.encima(ui, x, y, ancho, alto) -> bool: el ratón está sobre ese rectángulo.
+fn encima(ui: Ui, x: i32, y: i32, w: i32, h: i32) -> bool {
+    return _encima(x, y, w, h)
+}
+
+# gui.apretado_en(ui, x, y, ancho, alto) -> bool: en este cuadro se apretó el botón del ratón
+# adentro de ese rectángulo (no espera a que se suelte: para piezas que arrastran o ponen un
+# cursor, como lib/editor).
+fn apretado_en(ui: Ui, x: i32, y: i32, w: i32, h: i32) -> bool {
+    return scar_sdl_raton_clic() == 1 and _encima(x, y, w, h) and not ui.modal
+}
+
+# gui.soltado(ui) -> bool: en este cuadro se soltó el botón del ratón.
+fn soltado(ui: Ui) -> bool {
+    return scar_sdl_raton_soltado() == 1
+}
+
+# gui.escrito(ui) -> str: el texto que escribió la persona en este cuadro ("" si nada).
+fn escrito(ui: Ui) -> str {
+    if ui.modal {
+        return ""
+    }
+    return scar_sdl_escrito()
+}
+
+# gui.pieza_id(ui) -> i32: un número propio para una pieza hecha a mano (para ui.foco y ui.activo).
+fn pieza_id(ui: Ui) -> i32 {
+    return _nuevo_id(ui)
+}
+
+# gui.recortar(ui, x, y, ancho, alto): lo que se dibuje después queda adentro de ese rectángulo,
+# hasta la próxima pieza.
+fn recortar(ui: Ui, x: i32, y: i32, w: i32, h: i32) {
+    scar_sdl_recorte(x, y, w, h)
+    ui.recortado = true
+}
+
+# gui.sin_recortar(ui): vuelve a dibujar en toda la ventana.
+fn sin_recortar(ui: Ui) {
+    scar_sdl_sin_recorte()
+    ui.recortado = false
+}
+
+# gui.rueda(ui) -> i32: cuánto se movió la rueda del ratón en este cuadro
+# (positivo: hacia arriba, lejos de la persona; 0: no se movió). Junto con
+# gui.encima, para que una pieza hecha a mano responda a la rueda.
+fn rueda(ui: Ui) -> i32 {
+    return scar_sdl_rueda()
+}
+
+# gui.raton_x(ui), gui.raton_y(ui) -> i32: dónde está el ratón, en píxeles de la
+# ventana; gui.raton_abajo(ui) -> bool: el botón está apretado ahora (para
+# piezas hechas a mano que se arrastran, como el mapa del sismógrafo).
+fn raton_x(ui: Ui) -> i32 {
+    return scar_sdl_raton_x()
+}
+
+fn raton_y(ui: Ui) -> i32 {
+    return scar_sdl_raton_y()
+}
+
+fn raton_abajo(ui: Ui) -> bool {
+    return scar_sdl_raton_abajo() == 1
+}
+
+# gui.tecla(ui, codigo) -> bool: se pulsó esa tecla en este cuadro (el
+# código es el scancode de SDL: Espacio=44, Enter=40, Esc=41, Tab=43,
+# flechas: der=79 izq=80 abajo=81 arriba=82, A=4 ... Z=29, 1=30 ... 0=39).
+# Mientras un campo de texto tiene el foco, las teclas son para el campo.
+fn tecla(ui: Ui, codigo: i32) -> bool {
+    return ui.foco < 0 and scar_sdl_tecla(codigo) == 1 and not ui.modal
+}
+
+# gui.tecla_pulsada(ui, codigo) -> bool: como gui.tecla, pero sin importar quién tiene el foco: para
+# una pieza que toma el teclado ella misma (lib/editor).
+fn tecla_pulsada(ui: Ui, codigo: i32) -> bool {
+    return scar_sdl_tecla(codigo) == 1 and not ui.modal
+}
+
+# gui.clic_en(ui, x, y, ancho, alto) -> bool: se hizo clic en ese rectángulo
+# (se apretó y se soltó adentro), como un botón invisible.
+fn clic_en(ui: Ui, x: i32, y: i32, w: i32, h: i32) -> bool {
+    let id = _nuevo_id(ui)
+    return _clic(ui, id, x, y, w, h)
+}
+
+# ---- señales largas: gui.onda -----------------------------------------------------
+
+# gui.onda_nueva(cap) -> Onda: una onda centrada en cero de `cap` muestras;
+# gui.onda_nivel(cap, maximo) -> Onda: barras de 0 a `maximo`.
+fn onda_nueva(cap: i32) -> Onda {
+    return _onda(cap, true, 0.0)
+}
+
+fn onda_nivel(cap: i32, maximo: f64) -> Onda {
+    return _onda(cap, false, maximo)
+}
+
+fn _onda(cap: i32, centrada: bool, maximo: f64) -> Onda {
+    let c = max(cap, 1)
+    let valores: Vec<f64> = vec_new(c)
+    let marcas: Vec<i32> = vec_new(c)
+    for i in 0..c {
+        valores.push(0.0)
+        marcas.push(0)
+    }
+    return Onda { cap: c, valores: valores, marcas: marcas, n: 0, centrada: centrada, maximo: maximo, umbral: 0.0 }
+}
+
+# gui.onda_agregar(onda, valor, marcada): una muestra más.
+fn onda_agregar(o: Onda, v: f64, marcada: bool) {
+    let lugar = o.n % o.cap
+    o.valores.set(lugar, v)
+    if marcada {
+        o.marcas.set(lugar, 1)
+    } else {
+        o.marcas.set(lugar, 0)
+    }
+    o.n = o.n + 1
+}
+
+# gui.onda_valor(onda, k) -> f64 y gui.onda_marcada(onda, k) -> bool: la
+# muestra número k (contando desde la primera que se agregó; las visibles son
+# de onda.n - onda.cap a onda.n - 1). Fuera de eso, 0 y false.
+fn onda_valor(o: Onda, k: i32) -> f64 {
+    if k < 0 or k >= o.n or k < o.n - o.cap {
+        return 0.0
+    }
+    return o.valores.get(k % o.cap).unwrap_or(0.0)
+}
+
+fn onda_marcada(o: Onda, k: i32) -> bool {
+    if k < 0 or k >= o.n or k < o.n - o.cap {
+        return false
+    }
+    return o.marcas.get(k % o.cap).unwrap_or(0) != 0
+}
+
+# gui.onda_pico(onda) -> f64: el mayor |valor| visible (1.0 si todo es 0): la
+# escala de una onda centrada.
+fn onda_pico(o: Onda) -> f64 {
+    let mut m = 0.0
+    for k in max(o.n - o.cap, 0)..o.n {
+        m = max(m, abs(onda_valor(o, k)))
+    }
+    if m == 0.0 {
+        return 1.0
+    }
+    return m
+}
+
+# gui.onda(ui, onda, alto, izquierda, derecha): la dibuja de todo el ancho que
+# queda, con un rótulo arriba a cada lado ("" para ninguno). Cada columna de
+# píxeles muestra el mínimo y el máximo de las muestras que le tocan, así no
+# se pierde un pico entre dos píxeles aunque haya miles de muestras.
+fn onda(ui: Ui, o: Onda, alto: i32, izquierda: str, derecha: str) {
+    let w = _ancho_libre(ui)
+    _lugar(ui, w, alto)
+    _onda_dibujar(ui, o, ui.px, ui.py, w, alto, izquierda, derecha, 0.0, 1.0)
+}
+
+# ---- acercarse: gui.Zoom y gui.onda_zoom -----------------------------------------
+
+# gui.zoom_nuevo() -> Zoom: sin acercar (se ve todo).
+fn zoom_nuevo() -> Zoom {
+    return Zoom { factor: 1.0, centro: 0.5, maximo: 0.0, arrastrando: false, ultimo_x: 0, cuadro: -1 }
+}
+
+# gui.zoom_reiniciar(zoom): vuelve a verse todo.
+fn zoom_reiniciar(z: Zoom) {
+    z.factor = 1.0
+    z.centro = 0.5
+    z.arrastrando = false
+}
+
+# gui.zoom_activo(zoom) -> bool: está acercado.
+fn zoom_activo(z: Zoom) -> bool {
+    return z.factor > 1.0
+}
+
+# gui.zoom_desde(zoom) / gui.zoom_hasta(zoom) -> f64: lo que se ve, como
+# fracción del total (de 0 a 1).
+fn zoom_desde(z: Zoom) -> f64 {
+    return z.centro - 0.5 / z.factor
+}
+
+fn zoom_hasta(z: Zoom) -> f64 {
+    return z.centro + 0.5 / z.factor
+}
+
+# gui.zoom_inicio(zoom, inicio, fin) / gui.zoom_fin(zoom, inicio, fin) -> f64:
+# si todo va de `inicio` a `fin` (una hora, un número de muestra), de dónde a
+# dónde va lo que se ve. Para el gui.eje de abajo de las ondas.
+fn zoom_inicio(z: Zoom, inicio: f64, fin: f64) -> f64 {
+    return inicio + zoom_desde(z) * (fin - inicio)
+}
+
+fn zoom_fin(z: Zoom, inicio: f64, fin: f64) -> f64 {
+    return inicio + zoom_hasta(z) * (fin - inicio)
+}
+
+# Que lo que se ve no se salga del total.
+fn _zoom_limitar(z: Zoom) {
+    z.factor = max(z.factor, 1.0)
+    let media = 0.5 / z.factor
+    z.centro = max(media, min(z.centro, 1.0 - media))
+}
+
+# La rueda y el arrastre sobre el rectángulo de una onda de `cap` muestras.
+fn _zoom_atender(ui: Ui, z: Zoom, x: i32, y: i32, w: i32, h: i32, cap: i32) {
+    if z.cuadro == ui.cuadro or w < 2 {
+        return
+    }
+    let mx = scar_sdl_raton_x()
+    if z.arrastrando {
+        if scar_sdl_raton_abajo() == 0 {
+            z.arrastrando = false
+            return
+        }
+        z.centro = z.centro - to_f64(mx - z.ultimo_x) / to_f64(w) / z.factor
+        z.ultimo_x = mx
+        _zoom_limitar(z)
+        z.cuadro = ui.cuadro
+        return
+    }
+    if not _encima(x, y, w, h) {
+        return
+    }
+    if scar_sdl_raton_clic() == 1 and z.factor > 1.0 {
+        z.arrastrando = true
+        z.ultimo_x = mx
+        z.cuadro = ui.cuadro
+        return
+    }
+    let r = scar_sdl_rueda()
+    if r == 0 {
+        return
+    }
+    # lo que está bajo el puntero (fracción del total) queda bajo el puntero
+    let f = max(0.0, min(to_f64(mx - x) / to_f64(w - 1), 1.0))
+    let punto = zoom_desde(z) + f / z.factor
+    let mut tope = z.maximo
+    if tope <= 0.0 {
+        tope = max(1.0, to_f64(cap) / 16.0)
+    }
+    let mut nuevo = z.factor
+    for i in 0..min(abs(r), 20) {
+        if r > 0 {
+            nuevo = nuevo * 1.25
+        } else {
+            nuevo = nuevo / 1.25
+        }
+    }
+    nuevo = max(1.0, min(nuevo, tope))
+    z.factor = nuevo
+    z.centro = punto - f / nuevo + 0.5 / nuevo
+    _zoom_limitar(z)
+    z.cuadro = ui.cuadro
+}
+
+# gui.onda_zoom(ui, onda, alto, izquierda, derecha, zoom): como gui.onda, pero
+# muestra la parte que dice `zoom`, y la rueda y el arrastre sobre ella lo
+# cambian. Una onda centrada sin escala fija se escala con lo que se ve: al
+# acercarse a algo chico, se ve grande.
+fn onda_zoom(ui: Ui, o: Onda, alto: i32, izquierda: str, derecha: str, z: Zoom) {
+    let w = _ancho_libre(ui)
+    _lugar(ui, w, alto)
+    _zoom_atender(ui, z, ui.px, ui.py, w, alto, o.cap)
+    _onda_dibujar(ui, o, ui.px, ui.py, w, alto, izquierda, derecha, zoom_desde(z), zoom_hasta(z))
+}
+
+# El valor en la posición `u` (en muestras desde la primera visible del
+# anillo, con decimales): entre dos muestras, la recta que las une.
+fn _onda_en(o: Onda, base: i32, u: f64) -> f64 {
+    let k = to_i32(floor(u))
+    let t = u - floor(u)
+    let a = onda_valor(o, base + k)
+    if t <= 0.0 or base + k + 1 >= o.n {
+        return a
+    }
+    return a + (onda_valor(o, base + k + 1) - a) * t
+}
+
+# La onda en el rectángulo (x0, y0, w, alto), mostrando de la fracción `a` a
+# la `b` de sus `cap` muestras.
+fn _onda_dibujar(ui: Ui, o: Onda, x0: i32, y0: i32, w: i32, alto: i32, izquierda: str, derecha: str, a: f64, b: f64) {
+    let fondo = ui.c_fondo
+    _rect(x0, y0, w, alto, fondo)
+    _borde(x0, y0, w, alto, 1, ui.c_borde)
+    scar_sdl_recorte(x0, y0, w, alto)
+    ui.recortado = true
+    let ancho = w - 2
+    let h = alto - 2
+    let x = x0 + 1
+    let y = y0 + 1
+    if ancho < 2 or h < 4 {
+        return
+    }
+    let tinte = _mezclar(fondo, ui.c_mal, 25)
+    let base = o.n - o.cap
+    let y_centro = y + h / 2
+    let media = max(h / 2 - 2, 1)
+    # lo que se ve: de la muestra `primera` (con decimales) a `primera + span`
+    let primera = a * to_f64(o.cap)
+    let span = max((b - a) * to_f64(o.cap), 1.0)
+    let mut pico = 0.0
+    for k in max(base + to_i32(floor(primera)), max(o.n - o.cap, 0))..min(base + to_i32(floor(primera + span)) + 1, o.n) {
+        pico = max(pico, abs(onda_valor(o, k)))
+    }
+    if pico == 0.0 {
+        pico = 1.0
+    }
+    if o.centrada and o.maximo > 0.0 {
+        pico = o.maximo
+    }
+    if o.centrada {
+        _rect(x, y_centro, ancho, 1, _mezclar(fondo, ui.c_borde, 70))
+    }
+    let mut tope = o.maximo
+    if tope <= 0.0 {
+        tope = pico
+    }
+    # muy de cerca (menos muestras que píxeles): la recta entre muestras
+    let de_cerca = span < to_f64(ancho)
+    for col in 0..ancho {
+        let k0 = base + to_i32(floor(primera + to_f64(col) * span / to_f64(ancho)))
+        let k1 = base + to_i32(floor(primera + to_f64(col + 1) * span / to_f64(ancho)))
+        if k1 > 0 and k0 < o.n {
+            let desde = max(k0, 0)
+            let hasta = max(min(k1, o.n), desde + 1)
+            let mut vmin = onda_valor(o, desde)
+            let mut vmax = vmin
+            let mut marcada = false
+            if de_cerca {
+                let u = primera + (to_f64(col) + 0.5) * span / to_f64(ancho)
+                vmin = _onda_en(o, base, u)
+                vmax = vmin
+                if col > 0 and o.centrada {
+                    let previo = _onda_en(o, base, u - span / to_f64(ancho))
+                    vmin = min(vmin, previo)
+                    vmax = max(vmax, previo)
+                }
+                marcada = onda_marcada(o, base + to_i32(floor(u + 0.5)))
+            } else {
+                # la columna arranca donde terminó la anterior: con ~1
+                # muestra por píxel, sin esto una onda son puntos sueltos, no
+                # una línea
+                if o.centrada and desde > 0 and desde - 1 >= base {
+                    let previo = onda_valor(o, desde - 1)
+                    vmin = min(vmin, previo)
+                    vmax = max(vmax, previo)
+                }
+                for k in desde..hasta {
+                    let v = onda_valor(o, k)
+                    vmin = min(vmin, v)
+                    vmax = max(vmax, v)
+                    marcada = marcada or onda_marcada(o, k)
+                }
+            }
+            if marcada {
+                _rect(x + col, y, 1, h, tinte)
+            }
+            if o.centrada {
+                let ya = max(y, min(y_centro - to_i32(vmax * to_f64(media) / pico), y + h - 1))
+                let yb = max(y, min(y_centro - to_i32(vmin * to_f64(media) / pico), y + h - 1))
+                let mut c = ui.c_acento
+                if marcada {
+                    c = ui.c_mal
+                }
+                _rect(x + col, ya, 1, yb - ya + 1, c)
+            } else {
+                let hb = to_i32(max(0.0, min(vmax, tope)) * to_f64(h - 1) / tope)
+                if hb > 0 {
+                    let mut c = ui.c_aviso
+                    if o.umbral > 0.0 and vmax >= o.umbral {
+                        c = ui.c_mal
+                    }
+                    _rect(x + col, y + h - hb, 1, hb, c)
+                }
+            }
+        }
+    }
+    if not o.centrada and o.umbral > 0.0 {
+        let yu = y + h - 1 - to_i32(min(o.umbral, tope) * to_f64(h - 1) / tope)
+        _rect(x, yu, ancho, 1, _mezclar(fondo, ui.c_mal, 60))
+    }
+    _rotulo_sobre(ui, x + 3, y + 2, izquierda, fondo, false)
+    _rotulo_sobre(ui, x + ancho - 3, y + 2, derecha, fondo, true)
+}
+
+# Un texto chico sobre un fondo (para que se lea encima de la onda); a la
+# derecha de x si `al_final` es false, o terminando en x si es true.
+fn _rotulo_sobre(ui: Ui, x: i32, y: i32, s: str, fondo: i32, al_final: bool) {
+    if s.len() == 0 {
+        return
+    }
+    let w = scar_sdl_texto_ancho(s, _tam_chico())
+    let mut x1 = x
+    if al_final {
+        x1 = x - w - 6
+    }
+    _rect(x1, y, w + 6, scar_sdl_texto_alto(_tam_chico()) + 2, fondo)
+    _escribir(x1 + 3, y + 1, s, _tam_chico(), ui.c_tenue)
+}
+
+# ---- ejes: gui.eje -----------------------------------------------------------------
+
+# gui.eje(ui, inicio, fin, cada, rotulo): una regla de todo el ancho que queda,
+# que va de `inicio` (a la izquierda) a `fin` (a la derecha), con una marca y
+# su texto en cada múltiplo de `cada`. `rotulo` es la fn que convierte un
+# valor en su texto (una hora, un número con unidades). Debajo de un
+# gui.onda del mismo ancho, las marcas caen donde corresponde.
+fn eje(ui: Ui, inicio: f64, fin: f64, cada: f64, rotulo: fn(f64) -> str) {
+    let w = _ancho_libre(ui)
+    let alto = scar_sdl_texto_alto(_tam_chico()) + 8
+    _lugar(ui, w, alto)
+    if fin <= inicio or cada <= 0.0 or w < 2 {
+        return
+    }
+    let x0 = ui.px
+    let y0 = ui.py
+    let mut v = (0.0 - floor((0.0 - inicio) / cada)) * cada     # el primer múltiplo desde inicio
+    while v <= fin {
+        let x = x0 + to_i32((v - inicio) / (fin - inicio) * to_f64(w - 1))
+        _rect(x, y0, 1, 5, ui.c_tenue)
+        let s = rotulo(v)
+        let ws = scar_sdl_texto_ancho(s, _tam_chico())
+        let xs = max(x0, min(x - ws / 2, x0 + w - ws))
+        _escribir(xs, y0 + 6, s, _tam_chico(), ui.c_tenue)
+        v = v + cada
+    }
+}
+
+# gui.paso_eje(rango, marcas) -> f64: un paso "redondo" (1, 2 o 5 por una
+# potencia de 10) para que un eje que abarca `rango` tenga más o menos
+# `marcas` marcas. Al acercarse con un gui.Zoom el rango cambia, y las marcas
+# también.
+fn paso_eje(rango: f64, marcas: i32) -> f64 {
+    if rango <= 0.0 or marcas < 1 {
+        return 1.0
+    }
+    let bruto = rango / to_f64(marcas)
+    let mut p = 1.0
+    while p > bruto {
+        p = p / 10.0
+    }
+    while p * 10.0 <= bruto {
+        p = p * 10.0
+    }
+    if bruto >= 5.0 * p {
+        return 5.0 * p
+    }
+    if bruto >= 2.0 * p {
+        return 2.0 * p
+    }
+    return p
+}
+
+# ---- tablas: gui.tabla -------------------------------------------------------------
+
+# gui.tabla_nueva("Estación|Nivel|Estado") -> Tabla; gui.tabla_fila(tabla,
+# "ARICA|1.21 m|normal") agrega una fila; gui.tabla_color(tabla, columna,
+# color) pinta esa celda de la última fila; gui.tabla_vaciar(tabla) la deja
+# sin filas (para llenarla de nuevo cuando cambian los datos).
+fn tabla_nueva(titulos: str) -> Tabla {
+    return Tabla { titulos: titulos, columnas: _partes(titulos), celdas: vec_new(), colores: vec_new() }
+}
+
+fn tabla_fila(t: Tabla, fila: str) {
+    for k in 0..t.columnas {
+        t.celdas.push(_parte(fila, k))
+        t.colores.push(-1)
+    }
+}
+
+fn tabla_color(t: Tabla, columna: i32, c: i32) {
+    let i = t.celdas.len() - t.columnas + columna
+    if columna >= 0 and columna < t.columnas and i >= 0 {
+        t.colores.set(i, c)
+    }
+}
+
+fn tabla_vaciar(t: Tabla) {
+    t.celdas = vec_new()
+    t.colores = vec_new()
+}
+
+fn _celda(t: Tabla, i: i32) -> str {
+    let mut s = ""
+    let mut o = t.celdas.get(i)
+    while let Some(x) = o {
+        s = x + ""
+        o = None
+    }
+    return s
+}
+
+# gui.tabla(ui, tabla) -> i32: las filas con las columnas alineadas (cada una
+# del ancho de su texto más largo; la última se estira); devuelve la fila en
+# que se hizo clic, o -1.
+fn tabla(ui: Ui, t: Tabla) -> i32 {
+    let nc = max(t.columnas, 1)
+    let filas = t.celdas.len() / nc
+    let anchos: Vec<i32> = vec_new()
+    let mut total = 0
+    for c in 0..nc {
+        let mut m = scar_sdl_texto_ancho(_parte(t.titulos, c), _tam_chico())
+        for f in 0..filas {
+            m = max(m, scar_sdl_texto_ancho(_celda(t, f * nc + c), _tam()))
+        }
+        anchos.push(m + 28)
+        total = total + m + 28
+    }
+    let w = _ancho_libre(ui)
+    let alto_titulo = scar_sdl_texto_alto(_tam_chico()) + 12
+    let fh = scar_sdl_texto_alto(_tam()) + 10
+    let h = alto_titulo + filas * fh
+    _lugar(ui, w, h)
+    let x0 = ui.px
+    let y0 = ui.py
+    let mut elegida = -1
+    for f in 0..filas {
+        let id = _nuevo_id(ui)
+        if _clic(ui, id, x0, y0 + alto_titulo + f * fh, w, fh) {
+            elegida = f
+        }
+    }
+    _rect(x0, y0, w, h, ui.c_panel)
+    scar_sdl_recorte(x0, y0, w, h)
+    ui.recortado = true
+    let mut x = x0
+    for c in 0..nc {
+        _escribir(x + 14, y0 + 6, _parte(t.titulos, c), _tam_chico(), ui.c_tenue)
+        x = x + anchos.get(c).unwrap_or(0)
+    }
+    _rect(x0, y0 + alto_titulo - 1, w, 1, ui.c_borde)
+    for f in 0..filas {
+        let fy = y0 + alto_titulo + f * fh
+        if f % 2 == 1 {
+            _rect(x0, fy, w, fh, _aclarar(ui.c_panel, -4))
+        }
+        if _encima(x0, fy, w, fh) {
+            _rect(x0, fy, w, fh, _mezclar(ui.c_panel, ui.c_acento, 15))
+        }
+        x = x0
+        for c in 0..nc {
+            let mut col = t.colores.get(f * nc + c).unwrap_or(-1)
+            if col < 0 {
+                col = ui.c_texto
+            }
+            _escribir(x + 14, fy + 5, _celda(t, f * nc + c), _tam(), col)
+            x = x + anchos.get(c).unwrap_or(0)
+        }
+    }
+    _borde(x0, y0, w, h, 1, ui.c_borde)
+    return elegida
+}

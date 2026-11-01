@@ -1,0 +1,272 @@
+# lib/animacion.scar: valores que cambian con suavidad en el tiempo (use "animacion").
+#
+#   use "animacion"
+#
+#   let t = animacion.tween(0.0, 300.0, 600, animacion.salida_cubica())   # de 0 a 300 en 600 ms
+#   while gui.abierta(ui) {
+#       animacion.avanzar(t, 16)               # pasaron 16 ms
+#       dibujar_algo_en(animacion.valor(t))    # el valor de ahora
+#       if animacion.terminado(t) { ... }
+#   }
+#
+#   animacion.suave_en(0.5, animacion.entrada_cuad())    # la curva sola: t en [0,1] -> [0,1]
+#   animacion.entre(10.0, 20.0, 0.5, animacion.lineal())
+#
+# Curvas ("easing"), todas con t entre 0 y 1 (fuera de ese rango se recorta), valen 0 en t=0 y 1
+# en t=1 (menos las de retroceso, que se pasan un poco en el medio). Son polinomios: sin senos ni
+# exponenciales, así que dan lo mismo en el intérprete y en el binario.
+#   lineal; entrada_/salida_/entrada_salida_ cuad, cubica y cuarta; suave (smoothstep) y
+#   mas_suave (smootherstep); rebote (salida) y entrada_rebote; retroceso (entrada, salida y
+#   entrada_salida: se echan un poco hacia atrás o se pasan antes de llegar).
+# Tween: de `desde` a `hasta` en `duracion` ms con una curva. Con ida_vuelta(tw, true) llega, y
+# vuelve, y sigue; con repetir(tw, true) llega y empieza de nuevo. Sin eso, se queda en `hasta`.
+
+struct Tween {
+    desde: f64
+    hasta: f64
+    duracion: i32
+    curva: i32
+    t: i32
+    repite: bool
+    ida_y_vuelta: bool
+    vueltas: i32
+}
+
+fn lineal() -> i32 {
+    return 0
+}
+
+fn entrada_cuad() -> i32 {
+    return 1
+}
+
+fn salida_cuad() -> i32 {
+    return 2
+}
+
+fn entrada_salida_cuad() -> i32 {
+    return 3
+}
+
+fn entrada_cubica() -> i32 {
+    return 4
+}
+
+fn salida_cubica() -> i32 {
+    return 5
+}
+
+fn entrada_salida_cubica() -> i32 {
+    return 6
+}
+
+fn entrada_cuarta() -> i32 {
+    return 7
+}
+
+fn salida_cuarta() -> i32 {
+    return 8
+}
+
+fn entrada_salida_cuarta() -> i32 {
+    return 9
+}
+
+fn suave() -> i32 {
+    return 10
+}
+
+fn mas_suave() -> i32 {
+    return 11
+}
+
+fn rebote() -> i32 {
+    return 12
+}
+
+fn entrada_rebote() -> i32 {
+    return 13
+}
+
+fn entrada_retroceso() -> i32 {
+    return 14
+}
+
+fn salida_retroceso() -> i32 {
+    return 15
+}
+
+fn entrada_salida_retroceso() -> i32 {
+    return 16
+}
+
+fn _pot(x: f64, n: i32) -> f64 {
+    let mut r = 1.0
+    for i in 0..n {
+        r = r * x
+    }
+    return r
+}
+
+fn _salida_rebote(t: f64) -> f64 {
+    let n = 7.5625
+    let d = 2.75
+    if t < 1.0 / d {
+        return n * t * t
+    }
+    if t < 2.0 / d {
+        let u = t - 1.5 / d
+        return n * u * u + 0.75
+    }
+    if t < 2.5 / d {
+        let u = t - 2.25 / d
+        return n * u * u + 0.9375
+    }
+    let u = t - 2.625 / d
+    return n * u * u + 0.984375
+}
+
+# Entrada con forma t^n, salida espejada y entrada-salida de las dos mitades, para n = 2, 3 o 4.
+fn _entrada(t: f64, n: i32) -> f64 {
+    return _pot(t, n)
+}
+
+fn _salida(t: f64, n: i32) -> f64 {
+    return 1.0 - _pot(1.0 - t, n)
+}
+
+fn _entrada_salida(t: f64, n: i32) -> f64 {
+    if t < 0.5 {
+        return _pot(2.0, n - 1) * _pot(t, n)
+    }
+    return 1.0 - _pot(2.0 - 2.0 * t, n) / 2.0
+}
+
+# suave_en(t, curva) -> f64: la curva evaluada en t (t se recorta a [0, 1]).
+fn suave_en(t0: f64, curva: i32) -> f64 {
+    let mut t = t0
+    if t < 0.0 {
+        t = 0.0
+    }
+    if t > 1.0 {
+        t = 1.0
+    }
+    let c1 = 1.70158
+    let c2 = c1 * 1.525
+    let c3 = c1 + 1.0
+    if curva == 1 {
+        return _entrada(t, 2)
+    }
+    if curva == 2 {
+        return _salida(t, 2)
+    }
+    if curva == 3 {
+        return _entrada_salida(t, 2)
+    }
+    if curva == 4 {
+        return _entrada(t, 3)
+    }
+    if curva == 5 {
+        return _salida(t, 3)
+    }
+    if curva == 6 {
+        return _entrada_salida(t, 3)
+    }
+    if curva == 7 {
+        return _entrada(t, 4)
+    }
+    if curva == 8 {
+        return _salida(t, 4)
+    }
+    if curva == 9 {
+        return _entrada_salida(t, 4)
+    }
+    if curva == 10 {
+        return t * t * (3.0 - 2.0 * t)
+    }
+    if curva == 11 {
+        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    }
+    if curva == 12 {
+        return _salida_rebote(t)
+    }
+    if curva == 13 {
+        return 1.0 - _salida_rebote(1.0 - t)
+    }
+    if curva == 14 {
+        return c3 * t * t * t - c1 * t * t
+    }
+    if curva == 15 {
+        let u = t - 1.0
+        return 1.0 + c3 * u * u * u + c1 * u * u
+    }
+    if curva == 16 {
+        if t < 0.5 {
+            let u = 2.0 * t
+            return (u * u * ((c2 + 1.0) * u - c2)) / 2.0
+        }
+        let u = 2.0 * t - 2.0
+        return (u * u * ((c2 + 1.0) * u + c2) + 2.0) / 2.0
+    }
+    return t
+}
+
+# entre(a, b, t, curva) -> f64: de a (t = 0) a b (t = 1) por la curva.
+fn entre(a: f64, b: f64, t: f64, curva: i32) -> f64 {
+    return a + (b - a) * suave_en(t, curva)
+}
+
+fn tween(desde: f64, hasta: f64, duracion: i32, curva: i32) -> Tween {
+    return Tween { desde: desde, hasta: hasta, duracion: max(duracion, 1), curva: curva, t: 0, repite: false, ida_y_vuelta: false, vueltas: 0 }
+}
+
+# repetir(tw, si): al llegar al final empieza de nuevo.
+fn repetir(tw: Tween, si: bool) {
+    tw.repite = si
+}
+
+# ida_vuelta(tw, si): al llegar al final vuelve hacia atrás, y así sigue.
+fn ida_vuelta(tw: Tween, si: bool) {
+    tw.ida_y_vuelta = si
+    tw.repite = si or tw.repite
+}
+
+fn reiniciar(tw: Tween) {
+    tw.t = 0
+    tw.vueltas = 0
+}
+
+# avanzar(tw, dt_ms): pasó ese tiempo. Un dt negativo se toma como 0.
+fn avanzar(tw: Tween, dt: i32) {
+    if dt <= 0 {
+        return
+    }
+    tw.t = tw.t + dt
+    if tw.t >= tw.duracion {
+        if tw.repite {
+            tw.vueltas = tw.vueltas + tw.t / tw.duracion
+            tw.t = tw.t % tw.duracion
+        } else {
+            tw.t = tw.duracion
+        }
+    }
+}
+
+# progreso(tw) -> f64: cuánto del recorrido va, de 0 a 1 (ya con la ida y vuelta, sin la curva).
+fn progreso(tw: Tween) -> f64 {
+    let p = to_f64(tw.t) / to_f64(tw.duracion)
+    if tw.ida_y_vuelta and tw.vueltas % 2 == 1 {
+        return 1.0 - p
+    }
+    return p
+}
+
+# valor(tw) -> f64: el valor de ahora.
+fn valor(tw: Tween) -> f64 {
+    return entre(tw.desde, tw.hasta, progreso(tw), tw.curva)
+}
+
+# terminado(tw) -> bool: llegó al final (los que repiten no terminan nunca).
+fn terminado(tw: Tween) -> bool {
+    return not tw.repite and tw.t >= tw.duracion
+}

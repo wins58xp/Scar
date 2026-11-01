@@ -1,0 +1,197 @@
+# lib/mate: vectores, matrices 4x4, cuaterniones, trigonometría y
+# azar con semilla, probados con lib/prueba.
+#
+# Propiedades que tienen que cumplirse (A·A⁻¹ = I, |q| = 1, una rotación de
+# 90° lleva x a y, la proyección lleva los planos de recorte a -1 y 1...) y
+# los primeros números de xorshift32, calculados aparte en Python. La
+# comparación número a número contra numpy está en
+# pruebas/test_mate_numpy.py.
+
+use "prueba"
+use "mate"
+
+fn cerca_v3(t: prueba.Prueba, a: mate.Vec3, b: mate.Vec3, que: str) {
+    prueba.afirmar(t, mate.v3_distancia(a, b) < 1e-12, que)
+    if mate.v3_distancia(a, b) >= 1e-12 {
+        print("    obtenido:", a.x, a.y, a.z, "esperado:", b.x, b.y, b.z)
+    }
+}
+
+fn cerca_m4(t: prueba.Prueba, a: mate.Mat4, b: mate.Mat4, tol: f64, que: str) {
+    let mut peor = 0.0
+    for f in 0..4 {
+        for c in 0..4 {
+            peor = max(peor, abs(mate.m4_get(a, f, c) - mate.m4_get(b, f, c)))
+        }
+    }
+    prueba.afirmar_cerca(t, peor, 0.0, tol, que)
+}
+
+fn escalares(t: prueba.Prueba) {
+    prueba.seccion(t, "escalares")
+    prueba.afirmar_cerca(t, mate.grados(mate.pi()), 180.0, 1e-12, "grados(pi)")
+    prueba.afirmar_cerca(t, mate.radianes(90.0), mate.pi() / 2.0, 1e-15, "radianes(90)")
+    prueba.afirmar_igual_f64(t, mate.recortar(5.0, 0.0, 1.0), 1.0, "recortar arriba")
+    prueba.afirmar_igual_f64(t, mate.recortar(0.0 - 5.0, 0.0, 1.0), 0.0, "recortar abajo")
+    prueba.afirmar_igual_f64(t, mate.interpolar(2.0, 4.0, 0.25), 2.5, "interpolar")
+    prueba.afirmar_igual_f64(t, mate.signo(0.0 - 3.0), 0.0 - 1.0, "signo")
+    let p = mate.pi()
+    prueba.afirmar_cerca(t, mate.atan2(1.0, 1.0), p / 4.0, 1e-15, "atan2 primer cuadrante")
+    prueba.afirmar_cerca(t, mate.atan2(1.0, 0.0 - 1.0), 3.0 * p / 4.0, 1e-15, "atan2 segundo")
+    prueba.afirmar_cerca(t, mate.atan2(0.0 - 1.0, 0.0 - 1.0), 0.0 - 3.0 * p / 4.0, 1e-15, "atan2 tercero")
+    prueba.afirmar_cerca(t, mate.atan2(0.0 - 1.0, 0.0), 0.0 - p / 2.0, 1e-15, "atan2 eje y negativo")
+    prueba.afirmar_cerca(t, mate.acos(0.5), p / 3.0, 1e-15, "acos(0,5)")
+    prueba.afirmar_cerca(t, mate.asin(0.5), p / 6.0, 1e-15, "asin(0,5)")
+    prueba.afirmar_cerca(t, mate.acos(0.0 - 1.0), p, 1e-15, "acos(-1)")
+}
+
+fn vectores(t: prueba.Prueba) {
+    prueba.seccion(t, "vectores")
+    let x = mate.v3(1.0, 0.0, 0.0)
+    let y = mate.v3(0.0, 1.0, 0.0)
+    cerca_v3(t, mate.v3_cruz(x, y), mate.v3(0.0, 0.0, 1.0), "x × y = z")
+    let a = mate.v3(1.0, 2.0, 3.0)
+    let b = mate.v3(0.0 - 4.0, 5.0, 0.5)
+    prueba.afirmar_igual_f64(t, mate.v3_punto(a, b), 7.5, "punto")
+    prueba.afirmar_cerca(t, mate.v3_punto(mate.v3_cruz(a, b), a), 0.0, 1e-12, "a × b es perpendicular a a")
+    prueba.afirmar_cerca(t, mate.v3_largo(mate.v3_normalizar(b)), 1.0, 1e-15, "normalizar da largo 1")
+    cerca_v3(t, mate.v3_normalizar(mate.v3(0.0, 0.0, 0.0)), mate.v3(0.0, 0.0, 0.0), "normalizar el cero")
+    cerca_v3(t, mate.v3_interpolar(a, b, 0.5), mate.v3(0.0 - 1.5, 3.5, 1.75), "interpolar")
+    prueba.afirmar_cerca(t, mate.v2_cruz(mate.v2(1.0, 0.0), mate.v2(0.0, 1.0)), 1.0, 0.0, "v2_cruz")
+    let r = mate.v2_rotar(mate.v2(1.0, 0.0), mate.radianes(90.0))
+    prueba.afirmar_cerca(t, r.x, 0.0, 1e-15, "v2_rotar x")
+    prueba.afirmar_cerca(t, r.y, 1.0, 1e-15, "v2_rotar y")
+    let h = mate.v4_a_v3(mate.v4(2.0, 4.0, 6.0, 2.0))
+    cerca_v3(t, h, mate.v3(1.0, 2.0, 3.0), "v4_a_v3 divide por w")
+}
+
+fn inversa_ok(t: prueba.Prueba, a: mate.Mat4, b: mate.Mat4, i: mate.Mat4) {
+    cerca_m4(t, mate.m4_producto(a, b), i, 1e-12, "A·A⁻¹ = I")
+    cerca_m4(t, mate.m4_producto(b, a), i, 1e-12, "A⁻¹·A = I")
+}
+
+fn matrices(t: prueba.Prueba) {
+    prueba.seccion(t, "matrices")
+    let i = mate.m4_identidad()
+    let a = mate.m4_de_filas(2.0, 0.0, 1.0, 3.0, 1.0, 1.0, 0.0, 2.0, 0.0, 4.0, 1.0, 1.0, 1.0, 3.0, 2.0, 1.0)
+    cerca_m4(t, mate.m4_producto(a, i), a, 0.0, "A·I = A")
+    cerca_m4(t, mate.m4_transpuesta(mate.m4_transpuesta(a)), a, 0.0, "transpuesta dos veces")
+    prueba.afirmar_cerca(t, mate.m4_determinante(a), 0.0 - 6.0, 1e-12, "determinante (numpy: -6)")
+    match mate.m4_inversa(a) {
+        Some(b) => inversa_ok(t, a, b, i)
+        None => prueba.afirmar(t, false, "A tiene inversa")
+    }
+    let singular = mate.m4_de_filas(1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 6.0, 8.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    match mate.m4_inversa(singular) {
+        Some(b) => prueba.afirmar(t, false, "una singular no tiene inversa")
+        None => prueba.afirmar(t, true, "una singular no tiene inversa")
+    }
+
+    let p = mate.v3(1.0, 2.0, 3.0)
+    cerca_v3(t, mate.m4_punto(mate.m4_traslacion(10.0, 0.0, 0.0 - 1.0), p), mate.v3(11.0, 2.0, 2.0), "traslación de un punto")
+    cerca_v3(t, mate.m4_direccion(mate.m4_traslacion(10.0, 0.0, 0.0 - 1.0), p), p, "una dirección no se traslada")
+    cerca_v3(t, mate.m4_punto(mate.m4_escala(2.0, 3.0, 4.0), p), mate.v3(2.0, 6.0, 12.0), "escala")
+    let rz = mate.m4_rotacion_z(mate.radianes(90.0))
+    cerca_v3(t, mate.m4_punto(rz, mate.v3(1.0, 0.0, 0.0)), mate.v3(0.0, 1.0, 0.0), "rotación z de 90: x va a y")
+    cerca_m4(t, mate.m4_rotacion(mate.v3(0.0, 0.0, 2.0), mate.radianes(90.0)), rz, 1e-15, "rotación por eje = rotación z")
+    cerca_m4(t, mate.m4_rotacion(mate.v3(1.0, 0.0, 0.0), 0.7), mate.m4_rotacion_x(0.7), 1e-15, "rotación por eje = rotación x")
+    cerca_m4(t, mate.m4_rotacion(mate.v3(0.0, 1.0, 0.0), 0.7), mate.m4_rotacion_y(0.7), 1e-15, "rotación por eje = rotación y")
+    let r = mate.m4_rotacion(mate.v3(1.0, 1.0, 1.0), 1.1)
+    cerca_m4(t, mate.m4_producto(r, mate.m4_transpuesta(r)), i, 1e-15, "una rotación es ortogonal")
+    prueba.afirmar_cerca(t, mate.m4_determinante(r), 1.0, 1e-15, "y su determinante es 1")
+    # componer: primero trasladar, después rotar
+    let compuesta = mate.m4_producto(rz, mate.m4_traslacion(1.0, 0.0, 0.0))
+    cerca_v3(t, mate.m4_punto(compuesta, mate.v3(0.0, 0.0, 0.0)), mate.v3(0.0, 1.0, 0.0), "producto(B, A): primero A")
+}
+
+fn camara(t: prueba.Prueba) {
+    prueba.seccion(t, "cámara")
+    let pr = mate.m4_perspectiva(mate.radianes(60.0), 16.0 / 9.0, 0.5, 100.0)
+    prueba.afirmar_cerca(t, mate.m4_punto(pr, mate.v3(0.0, 0.0, 0.0 - 0.5)).z, 0.0 - 1.0, 1e-12, "el plano cerca va a z = -1")
+    prueba.afirmar_cerca(t, mate.m4_punto(pr, mate.v3(0.0, 0.0, 0.0 - 100.0)).z, 1.0, 1e-12, "el plano lejos va a z = 1")
+    let borde = mate.m4_punto(pr, mate.v3(0.0, 10.0 * tan(mate.radianes(30.0)), 0.0 - 10.0))
+    prueba.afirmar_cerca(t, borde.y, 1.0, 1e-12, "el borde de arriba del campo va a y = 1")
+    let v = mate.m4_mirar_a(mate.v3(3.0, 4.0, 5.0), mate.v3(0.0, 0.0, 0.0), mate.v3(0.0, 1.0, 0.0))
+    cerca_v3(t, mate.m4_punto(v, mate.v3(3.0, 4.0, 5.0)), mate.v3(0.0, 0.0, 0.0), "mirar_a lleva el ojo al origen")
+    let c = mate.m4_punto(v, mate.v3(0.0, 0.0, 0.0))
+    prueba.afirmar_cerca(t, c.x, 0.0, 1e-12, "el centro queda en el eje (x)")
+    prueba.afirmar_cerca(t, c.y, 0.0, 1e-12, "el centro queda en el eje (y)")
+    prueba.afirmar_cerca(t, c.z, 0.0 - sqrt(50.0), 1e-12, "y hacia -z, a la distancia")
+    let o = mate.m4_ortografica(0.0 - 2.0, 2.0, 0.0 - 1.0, 1.0, 1.0, 11.0)
+    cerca_v3(t, mate.m4_punto(o, mate.v3(2.0, 1.0, 0.0 - 11.0)), mate.v3(1.0, 1.0, 1.0), "ortográfica: esquina lejana")
+}
+
+fn cuaterniones(t: prueba.Prueba) {
+    prueba.seccion(t, "cuaterniones")
+    let eje = mate.v3(1.0, 2.0, 0.5)
+    let q = mate.c_desde_eje_angulo(eje, 0.9)
+    prueba.afirmar_cerca(t, mate.c_largo(q), 1.0, 1e-15, "|q| = 1")
+    cerca_m4(t, mate.c_a_m4(q), mate.m4_rotacion(eje, 0.9), 1e-15, "c_a_m4 = m4_rotacion")
+    let p = mate.v3(0.3, 0.0 - 2.0, 4.0)
+    cerca_v3(t, mate.c_rotar_v3(q, p), mate.m4_punto(mate.m4_rotacion(eje, 0.9), p), "c_rotar_v3 = la matriz")
+    let q2 = mate.c_desde_eje_angulo(mate.v3(0.0, 0.0, 1.0), 0.4)
+    let qq = mate.c_producto(q2, q)
+    cerca_m4(t, mate.c_a_m4(qq), mate.m4_producto(mate.c_a_m4(q2), mate.c_a_m4(q)), 1e-14, "producto = componer las matrices")
+    let id = mate.c_producto(q, mate.c_conjugado(q))
+    prueba.afirmar_cerca(t, id.w, 1.0, 1e-15, "q·q* = 1")
+    let a = mate.c_desde_eje_angulo(mate.v3(0.0, 0.0, 1.0), 0.0)
+    let b = mate.c_desde_eje_angulo(mate.v3(0.0, 0.0, 1.0), 2.0)
+    let m = mate.c_slerp(a, b, 0.5)
+    cerca_m4(t, mate.c_a_m4(m), mate.c_a_m4(mate.c_desde_eje_angulo(mate.v3(0.0, 0.0, 1.0), 1.0)), 1e-15, "slerp a la mitad: la mitad del ángulo")
+    cerca_m4(t, mate.c_a_m4(mate.c_slerp(a, b, 1.0)), mate.c_a_m4(b), 1e-14, "slerp en 1 da b")
+    let menos_b = mate.cuat(0.0 - b.w, 0.0 - b.x, 0.0 - b.y, 0.0 - b.z)
+    cerca_m4(t, mate.c_a_m4(mate.c_slerp(a, menos_b, 0.5)), mate.c_a_m4(m), 1e-15, "slerp toma el camino corto")
+}
+
+fn azar(t: prueba.Prueba) {
+    prueba.seccion(t, "azar")
+    let g = mate.azar(1)
+    prueba.afirmar_igual_i32(t, mate.azar_siguiente(g), 270369, "xorshift32(1), 1°")
+    prueba.afirmar_igual_i32(t, mate.azar_siguiente(g), 67634689, "2°")
+    prueba.afirmar_igual_i32(t, mate.azar_siguiente(g), 0 - 1647531835, "3°")
+    prueba.afirmar_igual_i32(t, mate.azar_siguiente(g), 307599695, "4°")
+    prueba.afirmar_igual_i32(t, mate.azar_siguiente(g), 0 - 1896278063, "5°")
+    let g0 = mate.azar(0)
+    prueba.afirmar_igual_i32(t, mate.azar_siguiente(g0), 723471715, "la semilla 0 se cambia por 2463534242")
+    let u = mate.azar(12345)
+    prueba.afirmar_igual_f64(t, mate.azar_uniforme(u), 0.776938705239445, "uniforme, 1°")
+    prueba.afirmar_igual_f64(t, mate.azar_uniforme(u), 0.3951726963277906, "uniforme, 2°")
+    let h = mate.azar(7)
+    let mut suma = 0.0
+    let mut fuera = 0
+    let mut minimo = 100
+    let mut maximo = 0 - 100
+    let mut suma_n = 0.0
+    let mut suma_n2 = 0.0
+    let n = 4000
+    for k in 0..n {
+        suma = suma + mate.azar_uniforme(h)
+        let e = mate.azar_entero(h, 0 - 3, 3)
+        if e < 0 - 3 or e > 3 {
+            fuera = fuera + 1
+        }
+        minimo = min(minimo, e)
+        maximo = max(maximo, e)
+        let z = mate.azar_normal(h, 10.0, 2.0)
+        suma_n = suma_n + z
+        suma_n2 = suma_n2 + z * z
+    }
+    prueba.afirmar_cerca(t, suma / to_f64(n), 0.5, 0.02, "la media de la uniforme")
+    prueba.afirmar_igual_i32(t, fuera, 0, "azar_entero no se sale del rango")
+    prueba.afirmar_igual_i32(t, minimo, 0 - 3, "llega al mínimo")
+    prueba.afirmar_igual_i32(t, maximo, 3, "llega al máximo")
+    let media = suma_n / to_f64(n)
+    prueba.afirmar_cerca(t, media, 10.0, 0.15, "la media de la normal")
+    prueba.afirmar_cerca(t, sqrt(suma_n2 / to_f64(n) - media * media), 2.0, 0.15, "su desviación")
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("mate")
+    escalares(t)
+    vectores(t)
+    matrices(t)
+    camara(t)
+    cuaterniones(t)
+    azar(t)
+    return prueba.terminar(t)
+}

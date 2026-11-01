@@ -1,0 +1,60 @@
+# lib/tablero (dashboard sobre lib/gui): tarjetas de indicador, medidores,
+# barras de nivel, semáforos, mini gráfico, botones grandes e interruptor. El guion
+# (gui/302_tablero.guion) hace clic en un botón grande y en el interruptor; la salida dice
+# qué pasó. Con SCAR_SDL_CAPTURE=captura.bmp queda una foto de la ventana para mirarla.
+# ci-env: SCAR_SDL_GUION=./gui/302_tablero.guion
+# ci-env: SCAR_SDL_MAX_FRAMES=8
+use "gui"
+use "tablero"
+
+fn main() {
+    let ui = gui.ventana("Tablero", 900, 760)
+    gui.oscuro(ui)
+    let hist = gui.serie()
+    for i in 0..40 {
+        gui.agregar(hist, 20.0 + 8.0 * sin(to_f64(i) * 0.4) + to_f64(i % 5))
+    }
+    let mut alarma = false
+    let mut reinicios = 0
+    while gui.abierta(ui) {
+        tablero.encabezado(ui, "Red sísmica", "Estaciones CX · actualizado hace 3 s")
+        gui.fila(ui)
+        let w = tablero.ancho_celda(ui, 4)
+        tablero.tarjeta(ui, w, "Sismos hoy", "128", "", "últimas 24 h", tablero.azul())
+        tablero.tarjeta_delta(ui, w, "Magnitud máxima", "5.8", "Mw", 0.4, 1, false, "vs ayer")
+        tablero.tarjeta_delta(ui, w, "Estaciones activas", "21", "/ 22", -1.0, 0, true, "")
+        tablero.tarjeta(ui, w, "Datos recibidos", tablero.compacto(3420000.0), "muestras", "desde las 00:00", tablero.verde())
+        gui.fin_fila(ui)
+        gui.fila(ui)
+        let w3 = tablero.ancho_celda(ui, 3)
+        tablero.medidor(ui, w3, "CPU", 62.0, 0.0, 100.0, 70.0, 90.0, " %")
+        tablero.medidor(ui, w3, "Temperatura", 83.0, 0.0, 100.0, 70.0, 90.0, " °C")
+        tablero.medidor(ui, w3, "Batería", 18.0, 0.0, 100.0, 40.0, 20.0, " %")
+        gui.fin_fila(ui)
+        gui.fila(ui)
+        let w2 = tablero.ancho_celda(ui, 2)
+        tablero.nivel(ui, w2, "Disco", 71.0, 0.0, 100.0, 80.0, 95.0, " %")
+        tablero.nivel(ui, w2, "Red", 12.5, 0.0, 100.0, 0.0, 0.0, " MB/s")
+        gui.fin_fila(ui)
+        gui.fila(ui)
+        tablero.semaforo(ui, "GEOFON", 0)
+        tablero.semaforo(ui, "USGS", 1)
+        tablero.semaforo(ui, "IOC", 2)
+        tablero.semaforo(ui, "EMSC", 3)
+        gui.fin_fila(ui)
+        tablero.mini_lineas(ui, 0, 70, hist, tablero.violeta())
+        gui.fila(ui)
+        if tablero.boton_grande(ui, 220, 64, "Reiniciar", "las 22 estaciones", tablero.rojo()) {
+            reinicios = reinicios + 1
+            print("reiniciar", reinicios)
+        }
+        tablero.boton_grande(ui, 220, 64, "Exportar", "CSV de hoy", -1)
+        gui.fin_fila(ui)
+        let a = tablero.interruptor(ui, "Alarma sonora", alarma)
+        if a != alarma {
+            alarma = a
+            print("alarma", alarma)
+        }
+    }
+    print("fin", reinicios, alarma)
+}

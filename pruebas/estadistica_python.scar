@@ -1,0 +1,108 @@
+# lib/estadistica contra statistics y numpy: lo corre pruebas/test_estadistica_python.py.
+# Lee "casos.json" (en la carpeta donde corre): cada caso trae datos x (y, si es de
+# a pares), los percentiles pedidos, las cajas del histograma, el ancho de la
+# ventana móvil y el grado del polinomio. Escribe cada resultado en una línea
+# "nombre valores..." con los f64 en su forma más corta que vuelve idéntica (como
+# repr de Python), para comparar bit a bit o con tolerancia.
+
+use "json"
+use "texto"
+use "estadistica"
+
+fn num(d: json.Doc, ruta: str) -> f64 {
+    match texto.a_f64(json.texto(d, ruta)) {
+        Ok(x) => {
+            return x
+        }
+        Err(e) => {
+            return 0.0 / 0.0
+        }
+    }
+    return 0.0
+}
+
+fn vector(d: json.Doc, ruta: str) -> estadistica.Serie {
+    let s = estadistica.nueva()
+    for i in 0..json.largo(d, ruta) {
+        estadistica.agregar(s, num(d, ruta + "." + a_texto(i)))
+    }
+    return s
+}
+
+fn linea(nombre: str, s: estadistica.Serie) {
+    let mut t = nombre
+    for i in 0..estadistica.cantidad(s) {
+        t = t + " " + a_texto(estadistica.dato(s, i))
+    }
+    print(t)
+}
+
+fn uno(nombre: str, x: f64) {
+    print(nombre, a_texto(x))
+}
+
+fn caso(d: json.Doc, k: i32) {
+    let r = "casos." + a_texto(k)
+    let x = vector(d, r + ".x")
+    print("CASO", k)
+    uno("media", estadistica.media(x))
+    uno("mediana", estadistica.mediana(x))
+    uno("moda", estadistica.moda(x))
+    uno("varianza", estadistica.varianza(x))
+    uno("varpob", estadistica.varianza_poblacion(x))
+    uno("desviacion", estadistica.desviacion(x))
+    uno("despob", estadistica.desviacion_poblacion(x))
+    uno("minimo", estadistica.minimo(x))
+    uno("maximo", estadistica.maximo(x))
+    uno("iqr", estadistica.iqr(x))
+    uno("mad", estadistica.mad(x))
+    let ps = vector(d, r + ".ps")
+    let mut pc = "PERC"
+    for i in 0..estadistica.cantidad(ps) {
+        pc = pc + " " + a_texto(estadistica.percentil(x, estadistica.dato(ps, i)))
+    }
+    print(pc)
+    let cajas = to_i32(json.entero(d, r + ".cajas"))
+    let hc = estadistica.histograma(x, cajas)
+    let mut ht = "HIST"
+    for i in 0..hc.len() {
+        ht = ht + " " + a_texto(hc.get(i).unwrap_or(0))
+    }
+    print(ht)
+    linea("BORDES", estadistica.bordes(x, cajas))
+    let w = to_i32(json.entero(d, r + ".ancho"))
+    linea("MMEDIA", estadistica.movil_media(x, w))
+    linea("MMEDIANA", estadistica.movil_mediana(x, w))
+    linea("MP90", estadistica.movil_percentil(x, w, 90.0))
+    linea("MDESV", estadistica.movil_desviacion(x, w))
+    linea("ZSCORE", estadistica.zscore(x))
+    linea("ACUM", estadistica.acumulada(x))
+    linea("NORM", estadistica.normalizar(x))
+    linea("RANGOS", estadistica.rangos(x))
+    if json.existe(d, r + ".y") {
+        let y = vector(d, r + ".y")
+        uno("cov", estadistica.covarianza(x, y))
+        uno("corr", estadistica.correlacion(x, y))
+        uno("spearman", estadistica.correlacion_spearman(x, y))
+        let rec = estadistica.regresion_lineal(x, y)
+        print("RECTA", a_texto(rec.pendiente), a_texto(rec.intercepto), a_texto(rec.r2))
+        let g = to_i32(json.entero(d, r + ".grado"))
+        linea("POLI", estadistica.ajustar_polinomio(x, y, g))
+    }
+}
+
+fn correr() -> Result<i32> {
+    let d = json.leer_archivo("casos.json")?
+    let n = json.largo(d, "casos")
+    for k in 0..n {
+        caso(d, k)
+    }
+    return Ok(n)
+}
+
+fn main() {
+    let r = correr()
+    if r.is_err() {
+        print("ERROR", r.err())
+    }
+}

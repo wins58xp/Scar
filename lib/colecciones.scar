@@ -1,0 +1,973 @@
+# lib/colecciones.scar: pila, cola, mapa y conjunto con orden de inserción,
+# y ordenar (use "colecciones").
+#
+#   use "colecciones"
+#
+#   let p = colecciones.pila(0)                 # Pila<i32>: el 0 solo dice el tipo
+#   colecciones.apilar(p, 7)
+#   let c = colecciones.cola("")                # Cola<str>
+#   colecciones.encolar(c, "hola")
+#
+#   let m = colecciones.mapa(0)                 # claves str, valores i32
+#   colecciones.sumar(m, "pan", 2)              # pan: 2
+#   colecciones.poner(m, "leche", 1)
+#   for i in 0..colecciones.largo(m) {          # en el orden en que entraron
+#       print(colecciones.clave(m, i), colecciones.valor(m, i))
+#   }
+#
+#   let v = colecciones.ordenar(numeros)        # quicksort, Numeric
+#   let t = colecciones.ordenar_textos(nombres) # quicksort, str
+#   let e = colecciones.ordenar_por(personas, menor_edad)   # mergesort estable
+#
+# Por qué hay mapa si el lenguaje ya trae Map<K,V>: Map no se puede recorrer
+# (no tiene claves()), y estos sí, en el orden de inserción, como un dict de
+# Python: sacar una clave y volver a ponerla la manda al final. Está hecho como
+# el dict de Python desde 3.6: las entradas van en vectores en orden, y una
+# tabla de cubetas (encadenadas por índice) apunta a ellas.
+#
+# - Mapa<V> tiene claves str; MapaEnt<V> claves i32 (las funciones terminan en
+#   _ent). Conjunto y ConjuntoEnt, lo mismo, con unión, intersección y
+#   diferencia (que dejan el orden del primero, y después lo nuevo del segundo).
+# - Lo que se saca queda marcado hasta que se reconstruye la tabla; clave(m, i)
+#   y valor(m, i) primero la compactan si hace falta (una vez), así que recorrer
+#   después de sacar cuesta lo mismo que recorrer.
+# - obtener y valor devuelven Option<V>: se lee con match (o unwrap_or si V es
+#   un número). quitar devuelve si estaba.
+# - ordenar y ordenar_textos no son estables (quicksort con partición en tres,
+#   que no se pone lento con muchos repetidos); ordenar_por sí (mergesort, sobre
+#   los índices; después mueve los elementos sin copiarlos). Los textos se
+#   comparan carácter por carácter por su código, como los str de Python. Un
+#   NaN no tiene orden: con NaN, ordenar no garantiza nada.
+# - Todo lo que recibe un Vec se lo queda (como cualquier fn de SCAR) y lo
+#   devuelve ordenado: v = colecciones.ordenar(v).
+
+# ---- Pila ----------------------------------------------------------------------
+
+struct Pila<T> {
+    items: Vec<T>
+}
+
+# Una pila vacía. El argumento no se guarda: solo dice de qué tipo es.
+fn pila<T>(ejemplo: T) -> Pila<T> {
+    let v: Vec<T> = vec_new()
+    return Pila { items: v }
+}
+
+fn apilar<T>(p: Pila<T>, x: T) {
+    p.items.push(x)
+}
+
+fn desapilar<T>(p: Pila<T>) -> Option<T> {
+    return p.items.pop()
+}
+
+# El de arriba, sin sacarlo (None si está vacía).
+fn tope<T>(p: Pila<T>) -> Option<T> {
+    return p.items.get(p.items.len() - 1)
+}
+
+fn pila_largo<T>(p: Pila<T>) -> i32 {
+    return p.items.len()
+}
+
+fn pila_vacia<T>(p: Pila<T>) -> bool {
+    return p.items.len() == 0
+}
+
+# ---- Cola ----------------------------------------------------------------------
+# Dos pilas: se encola en `entrada`; para desencolar, si `salida` está vacía se
+# le pasa todo `entrada` dado vuelta. Cada elemento se mueve una vez: O(1) por
+# operación, en promedio.
+
+struct Cola<T> {
+    entrada: Vec<T>
+    salida: Vec<T>
+}
+
+fn cola<T>(ejemplo: T) -> Cola<T> {
+    let a: Vec<T> = vec_new()
+    let b: Vec<T> = vec_new()
+    return Cola { entrada: a, salida: b }
+}
+
+fn encolar<T>(c: Cola<T>, x: T) {
+    c.entrada.push(x)
+}
+
+fn _pasar<T>(c: Cola<T>) {
+    if c.salida.len() == 0 {
+        while let Some(x) = c.entrada.pop() {
+            c.salida.push(x)
+        }
+    }
+}
+
+fn desencolar<T>(c: Cola<T>) -> Option<T> {
+    _pasar(c)
+    return c.salida.pop()
+}
+
+# El primero, sin sacarlo (None si está vacía).
+fn frente<T>(c: Cola<T>) -> Option<T> {
+    _pasar(c)
+    return c.salida.get(c.salida.len() - 1)
+}
+
+fn cola_largo<T>(c: Cola<T>) -> i32 {
+    return c.entrada.len() + c.salida.len()
+}
+
+fn cola_vacia<T>(c: Cola<T>) -> bool {
+    return cola_largo(c) == 0
+}
+
+# ---- hash y comparación ------------------------------------------------------------
+
+# Polinomial sobre los códigos de los caracteres, módulo un primo (en i64, sin
+# desbordar: h < 2^31 y el código < 2^21).
+fn _hash_texto(s: str) -> i32 {
+    let mut h: i64 = to_i64(5381)
+    let p = to_i64(2147483629)
+    for i in 0..len(s) {
+        h = (h * to_i64(131) + to_i64(ord(s[i]))) % p
+    }
+    return to_i32(h)
+}
+
+# Multiplicativo (Knuth) y los 31 bits de arriba, siempre >= 0.
+fn _hash_ent(k: i32) -> i32 {
+    let x = to_i64(k) * to_i64(2654435761)
+    let m = to_i64(4294967296)
+    let r = ((x % m) + m) % m
+    return to_i32(r / to_i64(2))
+}
+
+# -1, 0 o 1: a antes, igual o después que b (por códigos de carácter, como
+# Python: "Z" < "a" < "ñ"; un prefijo va antes).
+fn comparar(a: str, b: str) -> i32 {
+    let na = len(a)
+    let nb = len(b)
+    let mut i = 0
+    while i < na and i < nb {
+        let x = ord(a[i])
+        let y = ord(b[i])
+        if x != y {
+            if x < y {
+                return 0 - 1
+            }
+            return 1
+        }
+        i = i + 1
+    }
+    if na < nb {
+        return 0 - 1
+    }
+    if na > nb {
+        return 1
+    }
+    return 0
+}
+
+fn menor_texto(a: str, b: str) -> bool {
+    return comparar(a, b) < 0
+}
+
+# ---- Mapa (claves str) ------------------------------------------------------------
+
+struct Mapa<V> {
+    claves: Vec<str>
+    valores: Vec<V>
+    vivo: Vec<bool>
+    hashes: Vec<i32>
+    sig: Vec<i32>           # la entrada siguiente en la misma cubeta, o -1
+    cubetas: Vec<i32>       # la primera entrada de cada cubeta, o -1
+    cuantos: i32            # las vivas
+}
+
+fn mapa<V>(ejemplo: V) -> Mapa<V> {
+    let k: Vec<str> = vec_new()
+    let v: Vec<V> = vec_new()
+    let vi: Vec<bool> = vec_new()
+    let h: Vec<i32> = vec_new()
+    let s: Vec<i32> = vec_new()
+    let c: Vec<i32> = vec_new()
+    for i in 0..8 {
+        c.push(0 - 1)
+    }
+    return Mapa { claves: k, valores: v, vivo: vi, hashes: h, sig: s, cubetas: c, cuantos: 0 }
+}
+
+fn _indice<V>(m: Mapa<V>, k: str) -> i32 {
+    let h = _hash_texto(k)
+    let mut i = m.cubetas.get(h % m.cubetas.len()).unwrap_or(0 - 1)
+    while i >= 0 {
+        if m.hashes.get(i).unwrap_or(0) == h and m.vivo.get(i).unwrap_or(false) {
+            let mut igual = false
+            match m.claves.get(i) {
+                Some(c) => {
+                    igual = c == k
+                }
+                None => {}
+            }
+            if igual {
+                return i
+            }
+        }
+        i = m.sig.get(i).unwrap_or(0 - 1)
+    }
+    return 0 - 1
+}
+
+# Rehace las cubetas para `n` (potencia de 2) con las entradas que hay.
+fn _encadenar<V>(m: Mapa<V>, n: i32) {
+    let c: Vec<i32> = vec_new()
+    for i in 0..n {
+        c.push(0 - 1)
+    }
+    m.cubetas = c
+    for i in 0..m.claves.len() {
+        let b = m.hashes.get(i).unwrap_or(0) % n
+        m.sig.set(i, m.cubetas.get(b).unwrap_or(0 - 1))
+        m.cubetas.set(b, i)
+    }
+}
+
+# Saca de verdad las entradas muertas, sin cambiar el orden de las vivas: se
+# vacían los vectores con pop() (al revés) a otros y de vuelta (al derecho).
+fn _compactar<V>(m: Mapa<V>) {
+    let ck: Vec<str> = vec_new()
+    let cv: Vec<V> = vec_new()
+    let ch: Vec<i32> = vec_new()
+    while let Some(vivo) = m.vivo.pop() {
+        let k = m.claves.pop()
+        let v = m.valores.pop()
+        let h = m.hashes.pop().unwrap_or(0)
+        m.sig.pop()
+        if vivo {
+            match k {
+                Some(x) => ck.push(x)
+                None => {}
+            }
+            match v {
+                Some(x) => cv.push(x)
+                None => {}
+            }
+            ch.push(h)
+        }
+    }
+    while let Some(h) = ch.pop() {
+        m.hashes.push(h)
+        m.vivo.push(true)
+        m.sig.push(0 - 1)
+    }
+    while let Some(k) = ck.pop() {
+        m.claves.push(k)
+    }
+    while let Some(v) = cv.pop() {
+        m.valores.push(v)
+    }
+    _encadenar(m, m.cubetas.len())
+}
+
+fn poner<V>(m: Mapa<V>, k: str, v: V) {
+    let i = _indice(m, k)
+    if i >= 0 {
+        m.valores.set(i, v)
+        return
+    }
+    if (m.claves.len() + 1) * 4 > m.cubetas.len() * 3 {
+        if m.cuantos < m.claves.len() {
+            _compactar(m)
+        }
+        if (m.claves.len() + 1) * 4 > m.cubetas.len() * 3 {
+            _encadenar(m, m.cubetas.len() * 2)
+        }
+    }
+    let h = _hash_texto(k)
+    let b = h % m.cubetas.len()
+    m.claves.push(k)
+    m.valores.push(v)
+    m.vivo.push(true)
+    m.hashes.push(h)
+    m.sig.push(m.cubetas.get(b).unwrap_or(0 - 1))
+    m.cubetas.set(b, m.claves.len() - 1)
+    m.cuantos = m.cuantos + 1
+}
+
+fn obtener<V>(m: Mapa<V>, k: str) -> Option<V> {
+    let i = _indice(m, k)
+    if i < 0 {
+        return None
+    }
+    return m.valores.get(i)
+}
+
+fn contiene<V>(m: Mapa<V>, k: str) -> bool {
+    return _indice(m, k) >= 0
+}
+
+fn quitar<V>(m: Mapa<V>, k: str) -> bool {
+    let i = _indice(m, k)
+    if i < 0 {
+        return false
+    }
+    m.vivo.set(i, false)
+    m.cuantos = m.cuantos - 1
+    return true
+}
+
+# Suma d al valor de k (si no estaba, lo pone en d): para contar.
+fn sumar<V: Numeric>(m: Mapa<V>, k: str, d: V) {
+    let i = _indice(m, k)
+    if i < 0 {
+        poner(m, k, d)
+        return
+    }
+    let viejo = m.valores.get(i).unwrap_or(d)
+    m.valores.set(i, viejo + d)
+}
+
+fn largo<V>(m: Mapa<V>) -> i32 {
+    return m.cuantos
+}
+
+# La clave número i, en orden de inserción (0 <= i < largo(m)).
+fn clave<V>(m: Mapa<V>, i: i32) -> str {
+    if m.cuantos < m.claves.len() {
+        _compactar(m)
+    }
+    let mut r = ""
+    match m.claves.get(i) {
+        Some(c) => {
+            r = c + ""
+        }
+        None => panic("colecciones.clave: índice fuera del mapa")
+    }
+    return r
+}
+
+fn valor<V>(m: Mapa<V>, i: i32) -> Option<V> {
+    if m.cuantos < m.claves.len() {
+        _compactar(m)
+    }
+    return m.valores.get(i)
+}
+
+# Las claves en orden de inserción (una copia).
+fn claves<V>(m: Mapa<V>) -> Vec<str> {
+    let r: Vec<str> = vec_new()
+    for i in 0..m.claves.len() {
+        if m.vivo.get(i).unwrap_or(false) {
+            match m.claves.get(i) {
+                Some(c) => r.push(c + "")
+                None => {}
+            }
+        }
+    }
+    return r
+}
+
+# ---- MapaEnt (claves i32) ----------------------------------------------------------
+
+struct MapaEnt<V> {
+    claves: Vec<i32>
+    valores: Vec<V>
+    vivo: Vec<bool>
+    sig: Vec<i32>
+    cubetas: Vec<i32>
+    cuantos: i32
+}
+
+fn mapa_ent<V>(ejemplo: V) -> MapaEnt<V> {
+    let k: Vec<i32> = vec_new()
+    let v: Vec<V> = vec_new()
+    let vi: Vec<bool> = vec_new()
+    let s: Vec<i32> = vec_new()
+    let c: Vec<i32> = vec_new()
+    for i in 0..8 {
+        c.push(0 - 1)
+    }
+    return MapaEnt { claves: k, valores: v, vivo: vi, sig: s, cubetas: c, cuantos: 0 }
+}
+
+fn _indice_ent<V>(m: MapaEnt<V>, k: i32) -> i32 {
+    let mut i = m.cubetas.get(_hash_ent(k) % m.cubetas.len()).unwrap_or(0 - 1)
+    while i >= 0 {
+        if m.claves.get(i).unwrap_or(0) == k and m.vivo.get(i).unwrap_or(false) {
+            return i
+        }
+        i = m.sig.get(i).unwrap_or(0 - 1)
+    }
+    return 0 - 1
+}
+
+fn _encadenar_ent<V>(m: MapaEnt<V>, n: i32) {
+    let c: Vec<i32> = vec_new()
+    for i in 0..n {
+        c.push(0 - 1)
+    }
+    m.cubetas = c
+    for i in 0..m.claves.len() {
+        let b = _hash_ent(m.claves.get(i).unwrap_or(0)) % n
+        m.sig.set(i, m.cubetas.get(b).unwrap_or(0 - 1))
+        m.cubetas.set(b, i)
+    }
+}
+
+fn _compactar_ent<V>(m: MapaEnt<V>) {
+    let ck: Vec<i32> = vec_new()
+    let cv: Vec<V> = vec_new()
+    while let Some(vivo) = m.vivo.pop() {
+        let k = m.claves.pop().unwrap_or(0)
+        let v = m.valores.pop()
+        m.sig.pop()
+        if vivo {
+            ck.push(k)
+            match v {
+                Some(x) => cv.push(x)
+                None => {}
+            }
+        }
+    }
+    while let Some(k) = ck.pop() {
+        m.claves.push(k)
+        m.vivo.push(true)
+        m.sig.push(0 - 1)
+    }
+    while let Some(v) = cv.pop() {
+        m.valores.push(v)
+    }
+    _encadenar_ent(m, m.cubetas.len())
+}
+
+fn poner_ent<V>(m: MapaEnt<V>, k: i32, v: V) {
+    let i = _indice_ent(m, k)
+    if i >= 0 {
+        m.valores.set(i, v)
+        return
+    }
+    if (m.claves.len() + 1) * 4 > m.cubetas.len() * 3 {
+        if m.cuantos < m.claves.len() {
+            _compactar_ent(m)
+        }
+        if (m.claves.len() + 1) * 4 > m.cubetas.len() * 3 {
+            _encadenar_ent(m, m.cubetas.len() * 2)
+        }
+    }
+    let b = _hash_ent(k) % m.cubetas.len()
+    m.claves.push(k)
+    m.valores.push(v)
+    m.vivo.push(true)
+    m.sig.push(m.cubetas.get(b).unwrap_or(0 - 1))
+    m.cubetas.set(b, m.claves.len() - 1)
+    m.cuantos = m.cuantos + 1
+}
+
+fn obtener_ent<V>(m: MapaEnt<V>, k: i32) -> Option<V> {
+    let i = _indice_ent(m, k)
+    if i < 0 {
+        return None
+    }
+    return m.valores.get(i)
+}
+
+fn contiene_ent<V>(m: MapaEnt<V>, k: i32) -> bool {
+    return _indice_ent(m, k) >= 0
+}
+
+fn quitar_ent<V>(m: MapaEnt<V>, k: i32) -> bool {
+    let i = _indice_ent(m, k)
+    if i < 0 {
+        return false
+    }
+    m.vivo.set(i, false)
+    m.cuantos = m.cuantos - 1
+    return true
+}
+
+fn sumar_ent<V: Numeric>(m: MapaEnt<V>, k: i32, d: V) {
+    let i = _indice_ent(m, k)
+    if i < 0 {
+        poner_ent(m, k, d)
+        return
+    }
+    let viejo = m.valores.get(i).unwrap_or(d)
+    m.valores.set(i, viejo + d)
+}
+
+fn largo_ent<V>(m: MapaEnt<V>) -> i32 {
+    return m.cuantos
+}
+
+fn clave_ent<V>(m: MapaEnt<V>, i: i32) -> i32 {
+    if m.cuantos < m.claves.len() {
+        _compactar_ent(m)
+    }
+    if i < 0 or i >= m.claves.len() {
+        panic("colecciones.clave_ent: índice fuera del mapa")
+    }
+    return m.claves.get(i).unwrap_or(0)
+}
+
+fn valor_ent<V>(m: MapaEnt<V>, i: i32) -> Option<V> {
+    if m.cuantos < m.claves.len() {
+        _compactar_ent(m)
+    }
+    return m.valores.get(i)
+}
+
+fn claves_ent<V>(m: MapaEnt<V>) -> Vec<i32> {
+    let r: Vec<i32> = vec_new()
+    for i in 0..m.claves.len() {
+        if m.vivo.get(i).unwrap_or(false) {
+            r.push(m.claves.get(i).unwrap_or(0))
+        }
+    }
+    return r
+}
+
+# ---- Conjunto (str) y ConjuntoEnt (i32) ------------------------------------------------
+
+struct Conjunto {
+    m: Mapa<bool>
+}
+
+fn conjunto() -> Conjunto {
+    return Conjunto { m: mapa(true) }
+}
+
+fn agregar(c: Conjunto, x: str) {
+    if not contiene(c.m, x) {
+        poner(c.m, x, true)
+    }
+}
+
+fn tiene(c: Conjunto, x: str) -> bool {
+    return contiene(c.m, x)
+}
+
+fn sacar(c: Conjunto, x: str) -> bool {
+    return quitar(c.m, x)
+}
+
+fn cardinal(c: Conjunto) -> i32 {
+    return largo(c.m)
+}
+
+# El elemento número i, en orden de inserción.
+fn elemento(c: Conjunto, i: i32) -> str {
+    return clave(c.m, i)
+}
+
+fn union(a: Conjunto, b: Conjunto) -> Conjunto {
+    let r = conjunto()
+    for i in 0..cardinal(a) {
+        agregar(r, elemento(a, i))
+    }
+    for i in 0..cardinal(b) {
+        agregar(r, elemento(b, i))
+    }
+    return r
+}
+
+fn interseccion(a: Conjunto, b: Conjunto) -> Conjunto {
+    let r = conjunto()
+    for i in 0..cardinal(a) {
+        let x = elemento(a, i)
+        if tiene(b, x) {
+            agregar(r, x)
+        }
+    }
+    return r
+}
+
+fn diferencia(a: Conjunto, b: Conjunto) -> Conjunto {
+    let r = conjunto()
+    for i in 0..cardinal(a) {
+        let x = elemento(a, i)
+        if not tiene(b, x) {
+            agregar(r, x)
+        }
+    }
+    return r
+}
+
+struct ConjuntoEnt {
+    m: MapaEnt<bool>
+}
+
+fn conjunto_ent() -> ConjuntoEnt {
+    return ConjuntoEnt { m: mapa_ent(true) }
+}
+
+fn agregar_ent(c: ConjuntoEnt, x: i32) {
+    if not contiene_ent(c.m, x) {
+        poner_ent(c.m, x, true)
+    }
+}
+
+fn tiene_ent(c: ConjuntoEnt, x: i32) -> bool {
+    return contiene_ent(c.m, x)
+}
+
+fn sacar_ent(c: ConjuntoEnt, x: i32) -> bool {
+    return quitar_ent(c.m, x)
+}
+
+fn cardinal_ent(c: ConjuntoEnt) -> i32 {
+    return largo_ent(c.m)
+}
+
+fn elemento_ent(c: ConjuntoEnt, i: i32) -> i32 {
+    return clave_ent(c.m, i)
+}
+
+fn union_ent(a: ConjuntoEnt, b: ConjuntoEnt) -> ConjuntoEnt {
+    let r = conjunto_ent()
+    for i in 0..cardinal_ent(a) {
+        agregar_ent(r, elemento_ent(a, i))
+    }
+    for i in 0..cardinal_ent(b) {
+        agregar_ent(r, elemento_ent(b, i))
+    }
+    return r
+}
+
+fn interseccion_ent(a: ConjuntoEnt, b: ConjuntoEnt) -> ConjuntoEnt {
+    let r = conjunto_ent()
+    for i in 0..cardinal_ent(a) {
+        let x = elemento_ent(a, i)
+        if tiene_ent(b, x) {
+            agregar_ent(r, x)
+        }
+    }
+    return r
+}
+
+fn diferencia_ent(a: ConjuntoEnt, b: ConjuntoEnt) -> ConjuntoEnt {
+    let r = conjunto_ent()
+    for i in 0..cardinal_ent(a) {
+        let x = elemento_ent(a, i)
+        if not tiene_ent(b, x) {
+            agregar_ent(r, x)
+        }
+    }
+    return r
+}
+
+# ---- ordenar ---------------------------------------------------------------------
+
+# (uso interno de ordenar)
+struct Tramo<T> {
+    xs: Vec<T>
+}
+
+struct Indices {
+    xs: Vec<i32>
+}
+
+fn _en(a: Indices, i: i32) -> i32 {
+    return a.xs.get(i).unwrap_or(0)
+}
+
+# Cambia de lugar xs[i] y xs[j] sin copiar: el último elemento hace de
+# comodín mientras tanto (replace mueve).
+fn _cambiar<T>(a: Tramo<T>, i: i32, j: i32) {
+    if i == j {
+        return
+    }
+    let n = a.xs.len()
+    match a.xs.pop() {
+        Some(t) => {
+            if i == n - 1 {
+                a.xs.push(a.xs.replace(j, t))
+            } else {
+                if j == n - 1 {
+                    a.xs.push(a.xs.replace(i, t))
+                } else {
+                    let x = a.xs.replace(i, t)
+                    let y = a.xs.replace(j, x)
+                    a.xs.push(a.xs.replace(i, y))
+                }
+            }
+        }
+        None => {}
+    }
+}
+
+# Quicksort de xs[desde..hasta) con partición en tres (< pivote, ==, >),
+# pivote la mediana de tres; recursión en la parte chica, ciclo en la grande.
+fn _rapido<T: Numeric>(a: Tramo<T>, desde: i32, hasta: i32, cero: T) {
+    let mut lo = desde
+    let mut hi = hasta
+    while hi - lo > 1 {
+        if hi - lo <= 12 {
+            # inserción
+            let mut i = lo + 1
+            while i < hi {
+                let mut j = i
+                while j > lo and a.xs.get(j).unwrap_or(cero) < a.xs.get(j - 1).unwrap_or(cero) {
+                    let t = a.xs.get(j).unwrap_or(cero)
+                    a.xs.set(j, a.xs.get(j - 1).unwrap_or(cero))
+                    a.xs.set(j - 1, t)
+                    j = j - 1
+                }
+                i = i + 1
+            }
+            return
+        }
+        let x = a.xs.get(lo).unwrap_or(cero)
+        let y = a.xs.get(lo + (hi - lo) / 2).unwrap_or(cero)
+        let z = a.xs.get(hi - 1).unwrap_or(cero)
+        let mut p = y
+        if x < y {
+            if z < x {
+                p = x
+            } else {
+                if z < y {
+                    p = z
+                }
+            }
+        } else {
+            if z < y {
+                p = y
+            } else {
+                if z < x {
+                    p = z
+                } else {
+                    p = x
+                }
+            }
+        }
+        # [lo, lt) < p, [lt, i) == p, [gt, hi) > p
+        let mut lt = lo
+        let mut i = lo
+        let mut gt = hi
+        while i < gt {
+            let v = a.xs.get(i).unwrap_or(cero)
+            if v < p {
+                a.xs.set(i, a.xs.get(lt).unwrap_or(cero))
+                a.xs.set(lt, v)
+                lt = lt + 1
+                i = i + 1
+            } else {
+                if p < v {
+                    gt = gt - 1
+                    a.xs.set(i, a.xs.get(gt).unwrap_or(cero))
+                    a.xs.set(gt, v)
+                } else {
+                    i = i + 1
+                }
+            }
+        }
+        if lt - lo < hi - gt {
+            _rapido(a, lo, lt, cero)
+            lo = gt
+        } else {
+            _rapido(a, gt, hi, cero)
+            hi = lt
+        }
+    }
+}
+
+# Ordena de menor a mayor (quicksort, no estable).
+fn ordenar<T: Numeric>(v: Vec<T>) -> Vec<T> {
+    let a = Tramo { xs: v }
+    match a.xs.get(0) {
+        Some(c) => _rapido(a, 0, a.xs.len(), c)
+        None => {}
+    }
+    return a.xs
+}
+
+# Igual, de mayor a menor.
+fn ordenar_desc<T: Numeric>(v: Vec<T>) -> Vec<T> {
+    let a = Tramo { xs: ordenar(v) }
+    let n = a.xs.len()
+    for i in 0..n / 2 {
+        _cambiar(a, i, n - 1 - i)
+    }
+    return a.xs
+}
+
+fn _cmp_en(a: Tramo<str>, i: i32, j: i32) -> i32 {
+    let mut r = 0
+    match a.xs.get(i) {
+        Some(x) => {
+            match a.xs.get(j) {
+                Some(y) => {
+                    r = comparar(x, y)
+                }
+                None => {}
+            }
+        }
+        None => {}
+    }
+    return r
+}
+
+fn _rapido_textos(a: Tramo<str>, desde: i32, hasta: i32) {
+    let mut lo = desde
+    let mut hi = hasta
+    while hi - lo > 1 {
+        if hi - lo <= 12 {
+            let mut i = lo + 1
+            while i < hi {
+                let mut j = i
+                while j > lo and _cmp_en(a, j, j - 1) < 0 {
+                    _cambiar(a, j, j - 1)
+                    j = j - 1
+                }
+                i = i + 1
+            }
+            return
+        }
+        # mediana de tres, que queda en lo
+        let m = lo + (hi - lo) / 2
+        if _cmp_en(a, m, lo) < 0 {
+            _cambiar(a, m, lo)
+        }
+        if _cmp_en(a, hi - 1, lo) < 0 {
+            _cambiar(a, hi - 1, lo)
+        }
+        if _cmp_en(a, hi - 1, m) < 0 {
+            _cambiar(a, hi - 1, m)
+        }
+        _cambiar(a, lo, m)
+        # el pivote está en lo; [lo, lt) < p, [lt, i) == p (el pivote se mueve
+        # con ellos, siempre en lt), [gt, hi) > p
+        let mut lt = lo
+        let mut i = lo + 1
+        let mut gt = hi
+        while i < gt {
+            let c = _cmp_en(a, i, lt)
+            if c < 0 {
+                _cambiar(a, i, lt)
+                lt = lt + 1
+                i = i + 1
+            } else {
+                if c > 0 {
+                    gt = gt - 1
+                    _cambiar(a, i, gt)
+                } else {
+                    i = i + 1
+                }
+            }
+        }
+        if lt - lo < hi - gt {
+            _rapido_textos(a, lo, lt)
+            lo = gt
+        } else {
+            _rapido_textos(a, gt, hi)
+            hi = lt
+        }
+    }
+}
+
+# Ordena textos por código de carácter (quicksort, no estable).
+fn ordenar_textos(v: Vec<str>) -> Vec<str> {
+    let a = Tramo { xs: v }
+    _rapido_textos(a, 0, a.xs.len())
+    return a.xs
+}
+
+fn _menor_en<T>(a: Tramo<T>, i: i32, j: i32, menor: fn(T, T) -> bool) -> bool {
+    let mut r = false
+    match a.xs.get(i) {
+        Some(x) => {
+            match a.xs.get(j) {
+                Some(y) => {
+                    r = menor(x, y)
+                }
+                None => {}
+            }
+        }
+        None => {}
+    }
+    return r
+}
+
+# Ordena con menor(a, b) ("a va antes que b"), estable: los que empatan quedan
+# en el orden en que estaban. Mergesort de abajo hacia arriba sobre los
+# índices; después cada elemento se mueve a su lugar siguiendo los ciclos de la
+# permutación, sin copiar ninguno.
+fn ordenar_por<T>(v: Vec<T>, menor: fn(T, T) -> bool) -> Vec<T> {
+    let a = Tramo { xs: v }
+    let n = a.xs.len()
+    let p = Indices { xs: vec_new() }
+    let q = Indices { xs: vec_new() }
+    for i in 0..n {
+        p.xs.push(i)
+        q.xs.push(i)
+    }
+    let mut ancho = 1
+    let mut en_p = true
+    while ancho < n {
+        let mut lo = 0
+        while lo < n {
+            let medio = min(lo + ancho, n)
+            let hi = min(lo + 2 * ancho, n)
+            let mut i = lo
+            let mut j = medio
+            let mut k = lo
+            while k < hi {
+                let mut tomar_i = false
+                if i < medio {
+                    if j >= hi {
+                        tomar_i = true
+                    } else {
+                        # el de la derecha pasa solo si es estrictamente menor
+                        if en_p {
+                            tomar_i = not _menor_en(a, _en(p, j), _en(p, i), menor)
+                        } else {
+                            tomar_i = not _menor_en(a, _en(q, j), _en(q, i), menor)
+                        }
+                    }
+                }
+                if en_p {
+                    if tomar_i {
+                        q.xs.set(k, _en(p, i))
+                        i = i + 1
+                    } else {
+                        q.xs.set(k, _en(p, j))
+                        j = j + 1
+                    }
+                } else {
+                    if tomar_i {
+                        p.xs.set(k, _en(q, i))
+                        i = i + 1
+                    } else {
+                        p.xs.set(k, _en(q, j))
+                        j = j + 1
+                    }
+                }
+                k = k + 1
+            }
+            lo = hi
+        }
+        en_p = not en_p
+        ancho = ancho * 2
+    }
+    # orden[k] = de qué posición viene el elemento que va en k
+    let orden = Indices { xs: vec_new() }
+    for k in 0..n {
+        if en_p {
+            orden.xs.push(_en(p, k))
+        } else {
+            orden.xs.push(_en(q, k))
+        }
+    }
+    # ciclos: en cada ciclo se va trayendo a k el que le corresponde
+    for k in 0..n {
+        let mut actual = k
+        let mut viene = _en(orden, actual)
+        while viene != k {
+            _cambiar(a, actual, viene)
+            orden.xs.set(actual, actual)
+            actual = viene
+            viene = _en(orden, actual)
+        }
+        orden.xs.set(actual, actual)
+    }
+    return a.xs
+}

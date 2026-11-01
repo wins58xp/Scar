@@ -1,0 +1,98 @@
+# lib/zlib contra el zlib de Python: lo corre pruebas/test_zlib_python.py, que
+# deja en la carpeta arg(0) unos datos (orig_*.bin), esos mismos datos
+# comprimidos por zlib con varios niveles y estrategias (z_*.z) y flujos
+# dañados (malo_*.z), más indice.txt con los nombres. Este programa comprime
+# cada orig con lib/zlib (scar_*.z, y sin comprimir scarg_*.z), descomprime
+# cada z_ y malo_ (des_*.bin o un ERR), y escribe las sumas de control.
+
+use "zlib"
+use "texto"
+use "imagen"
+
+fn guardar(ruta: str, bytes: Vec<i32>) -> bool {
+    let mut bien = false
+    match file_open(ruta, "w") {
+        Ok(f) => {
+            bien = f.write_bytes(bytes).is_ok()
+            f.close()
+        }
+        Err(e) => {}
+    }
+    return bien
+}
+
+fn main() -> i32 {
+    let mut dir = ""
+    match arg(0) {
+        Some(a) => { dir = a + "" }
+        None => {
+            print("falta la carpeta")
+            return 2
+        }
+    }
+    let mut indice = ""
+    match file_open(dir + "/indice.txt", "r") {
+        Ok(f) => {
+            match f.read_all() {
+                Ok(s) => { indice = s + "" }
+                Err(e) => {}
+            }
+            f.close()
+        }
+        Err(e) => {
+            print("no hay indice.txt:", e)
+            return 2
+        }
+    }
+    let nombres = texto.lineas(indice)
+    for i in 0..nombres.len() {
+        let mut nombre = ""
+        match nombres.get(i) {
+            Some(x) => { nombre = x + "" }
+            None => {}
+        }
+        let ruta = dir + "/" + nombre
+        match imagen.leer_bytes(ruta) {
+            Ok(b) => {
+                if texto.empieza(nombre, "orig_") {
+                    let base = texto.subtexto(nombre, 5, len(nombre) - 4)
+                    let n = b.len()
+                    let mut copia1: Vec<i32> = vec_new(n)
+                    let mut copia2: Vec<i32> = vec_new(n)
+                    let mut copia3: Vec<i32> = vec_new(n)
+                    for k in 0..n {
+                        let x = b.get(k).unwrap_or(0)
+                        copia1.push(x)
+                        copia2.push(x)
+                        copia3.push(x)
+                    }
+                    print("SUMAS", nombre, zlib.crc32(copia1), zlib.adler32(copia2))
+                    let z = zlib.comprimir(b)
+                    let largo = z.len()
+                    if not guardar(dir + "/scar_" + base + ".z", z) {
+                        print("ERR no se pudo guardar scar_" + base)
+                    }
+                    let g = zlib.comprimir_guardado(copia3)
+                    if not guardar(dir + "/scarg_" + base + ".z", g) {
+                        print("ERR no se pudo guardar scarg_" + base)
+                    }
+                    print("COMPRIME", nombre, n, largo)
+                } else {
+                    match zlib.descomprimir(b) {
+                        Ok(v) => {
+                            let n = v.len()
+                            if guardar(dir + "/des_" + nombre + ".bin", v) {
+                                print("DESC", nombre, n)
+                            } else {
+                                print("ERR", nombre, "no se pudo guardar")
+                            }
+                        }
+                        Err(e) => { print("ERR", nombre, e) }
+                    }
+                }
+            }
+            Err(e) => { print("ERR", nombre, e) }
+        }
+    }
+    return 0
+}

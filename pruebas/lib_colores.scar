@@ -1,0 +1,168 @@
+# lib/colores, probada con lib/prueba.
+#
+# Colores sueltos y hexadecimales, HSV, HSL, Lab y Oklab, mezclas, contraste y
+# diferencia de color, daltonismo, nombres de CSS, paletas y mapas de color, con
+# valores que se saben a mano o de matplotlib, scikit-image y colorsys. La comparación
+# sobre 577 casos al azar está en pruebas/test_colores_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "colores"
+
+fn ok_hex(r: Result<i32>) -> str {
+    match r {
+        Ok(c) => {
+            return colores.a_hex(c)
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn correr(p: prueba.Prueba) -> Result<i32> {
+    prueba.seccion(p, "colores y hexadecimal")
+    let n = colores.rgb(255, 128, 0)
+    prueba.afirmar_igual_str(p, colores.a_hex(n), "#ff8000", "a_hex")
+    prueba.afirmar_igual_str(p, colores.a_hex_a(colores.rgba(1, 2, 3, 4)), "#01020304", "a_hex_a")
+    prueba.afirmar_igual_i32(p, colores.canal_r(n), 255, "canal rojo")
+    prueba.afirmar_igual_i32(p, colores.canal_g(n), 128, "canal verde")
+    prueba.afirmar_igual_i32(p, colores.canal_a(n), 255, "opaco")
+    prueba.afirmar_igual_i32(p, colores.canal_b(colores.rgb(0, 0, 999)), 255, "se recorta a 255")
+    prueba.afirmar_igual_i32(p, colores.a_gui(n), 16744448, "a_gui quita el alfa")
+    prueba.afirmar_igual_str(p, ok_hex(colores.de_hex("#f80")), "#ff8800", "#rgb")
+    prueba.afirmar_igual_str(p, ok_hex(colores.de_hex("FF8000")), "#ff8000", "sin # y en mayúsculas")
+    prueba.afirmar_igual_str(p, colores.a_hex_a(colores.de_hex("#11223344")?), "#11223344", "#rrggbbaa")
+    prueba.afirmar_igual_str(p, ok_hex(colores.de_hex("#12345")), "ERR", "largo imposible")
+    prueba.afirmar_igual_str(p, ok_hex(colores.de_hex("#ggg")), "ERR", "no es hexadecimal")
+
+    prueba.seccion(p, "HSV y HSL")
+    let v = colores.a_hsv(n)
+    prueba.afirmar_cerca(p, v.h, 30.1176470588, 1e-9, "tono del naranja")
+    prueba.afirmar_cerca(p, v.s, 1.0, 1e-12, "saturación HSV")
+    prueba.afirmar_cerca(p, v.v, 1.0, 1e-12, "valor")
+    let l = colores.a_hsl(n)
+    prueba.afirmar_cerca(p, l.s, 1.0, 1e-12, "saturación HSL")
+    prueba.afirmar_cerca(p, l.l, 0.5, 1e-12, "luz")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.de_hsv(120.0, 1.0, 1.0)), "#00ff00", "verde puro")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.de_hsv(480.0, 1.0, 1.0)), "#00ff00", "el tono da la vuelta")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.de_hsl(240.0, 1.0, 0.5)), "#0000ff", "azul puro")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.de_hsv(colores.a_hsv(n).h, colores.a_hsv(n).s, colores.a_hsv(n).v)), "#ff8000", "ida y vuelta HSV")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.complementario(colores.rgb(255, 0, 0))), "#00ffff", "el complementario del rojo")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.girar_tono(colores.rgb(255, 0, 0), 120.0)), "#00ff00", "girar el tono")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.saturar(colores.rgb(255, 0, 0), 0.0)), "#808080", "saturación cero da gris")
+
+    prueba.seccion(p, "Lab y Oklab")
+    let lab = colores.a_lab(colores.rgb(255, 0, 0))
+    prueba.afirmar_cerca(p, lab.l, 53.2406, 1e-3, "L del rojo")
+    prueba.afirmar_cerca(p, lab.a, 80.0923, 1e-3, "a del rojo")
+    prueba.afirmar_cerca(p, lab.b, 67.2028, 1e-3, "b del rojo")
+    prueba.afirmar_cerca(p, colores.a_lab(colores.rgb(255, 255, 255)).l, 100.0, 1e-3, "el blanco tiene L 100")
+    prueba.afirmar_cerca(p, colores.a_lab(colores.rgb(0, 0, 0)).l, 0.0, 1e-9, "el negro tiene L 0")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.de_lab(lab.l, lab.a, lab.b)), "#ff0000", "ida y vuelta Lab")
+    let ok = colores.a_oklab(colores.rgb(255, 0, 0))
+    prueba.afirmar_cerca(p, ok.l, 0.62796, 1e-4, "L de Oklab del rojo")
+    prueba.afirmar_cerca(p, ok.a, 0.22486, 1e-4, "a de Oklab del rojo")
+    prueba.afirmar_cerca(p, ok.b, 0.12585, 1e-4, "b de Oklab del rojo")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.de_oklab(ok.l, ok.a, ok.b)), "#ff0000", "ida y vuelta Oklab")
+
+    prueba.seccion(p, "mezclas")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mezclar(colores.rgb(0, 0, 0), colores.rgb(255, 255, 255), 0.5)), "#808080", "mitad entre negro y blanco")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mezclar(colores.rgb(10, 20, 30), colores.rgb(200, 100, 0), 0.0)), "#0a141e", "t = 0 es el primero")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mezclar(colores.rgb(10, 20, 30), colores.rgb(200, 100, 0), 1.0)), "#c86400", "t = 1 es el segundo")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mezclar(colores.rgb(10, 20, 30), colores.rgb(200, 100, 0), 7.0)), "#c86400", "t se recorta")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mezclar_oklab(colores.rgb(255, 0, 0), colores.rgb(0, 0, 255), 0.5)), "#8c53a2", "rojo y azul en Oklab")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.aclarar(colores.rgb(100, 100, 100), 0.5)), "#b2b2b2", "aclarar")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.oscurecer(colores.rgb(100, 100, 100), 0.5)), "#323232", "oscurecer")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.invertir(colores.rgb(10, 20, 30))), "#f5ebe1", "invertir")
+    prueba.afirmar_igual_i32(p, colores.canal_a(colores.mezclar(colores.rgba(0, 0, 0, 0), colores.rgba(0, 0, 0, 200), 0.5)), 100, "el alfa también se mezcla")
+    let g = colores.lista()
+    colores.lista_agregar(g, colores.rgb(0, 0, 0))
+    colores.lista_agregar(g, colores.rgb(255, 0, 0))
+    colores.lista_agregar(g, colores.rgb(255, 255, 255))
+    prueba.afirmar_igual_i32(p, colores.lista_largo(g), 3, "tres paradas")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.degradado(g, 0.0, false)), "#000000", "degradado: el comienzo")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.degradado(g, 0.5, false)), "#ff0000", "degradado: la parada del medio")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.degradado(g, 1.0, true)), "#ffffff", "degradado: el final")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.degradado(g, 0.25, false)), "#800000", "degradado: entre dos paradas")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.degradado(colores.lista(), 0.5, false)), "#000000", "degradado vacío")
+
+    prueba.seccion(p, "contraste y diferencias")
+    let blanco = colores.rgb(255, 255, 255)
+    let negro = colores.rgb(0, 0, 0)
+    prueba.afirmar_cerca(p, colores.contraste(negro, blanco), 21.0, 1e-12, "negro sobre blanco: 21")
+    prueba.afirmar_cerca(p, colores.contraste(blanco, blanco), 1.0, 1e-12, "igual consigo mismo: 1")
+    prueba.afirmar_cerca(p, colores.contraste(colores.rgb(119, 119, 119), blanco), 4.478089, 1e-6, "el gris #777 sobre blanco")
+    prueba.afirmar_cerca(p, colores.luminancia(colores.rgb(255, 0, 0)), 0.2126, 1e-12, "luminancia del rojo")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.texto_sobre(colores.rgb(255, 255, 0))), "#000000", "sobre amarillo, negro")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.texto_sobre(colores.rgb(0, 0, 128))), "#ffffff", "sobre azul oscuro, blanco")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.gris(colores.rgb(255, 0, 0))), "#7f7f7f", "el gris de la luminancia del rojo")
+    prueba.afirmar_cerca(p, colores.delta_e(n, n), 0.0, 1e-12, "diferencia de un color consigo mismo")
+    prueba.afirmar_cerca(p, colores.delta_e(colores.rgb(255, 0, 0), colores.rgb(0, 255, 0)), 86.608459, 1e-5, "rojo contra verde, CIEDE2000")
+
+    prueba.seccion(p, "daltonismo")
+    prueba.afirmar_igual_str(p, ok_hex(colores.simular(colores.rgb(255, 0, 0), "deuteranopia", 1.0)), "#a39000", "el rojo para una deuteranopia")
+    prueba.afirmar_igual_str(p, ok_hex(colores.simular(colores.rgb(255, 0, 0), "protanopia", 1.0)), "#6d5f00", "el rojo para una protanopia")
+    prueba.afirmar_igual_str(p, ok_hex(colores.simular(colores.rgb(0, 255, 0), "tritanopia", 1.0)), "#00f7d9", "el verde para una tritanopia")
+    prueba.afirmar_igual_str(p, ok_hex(colores.simular(colores.rgb(255, 0, 0), "acromatopsia", 1.0)), "#7f7f7f", "sin color")
+    prueba.afirmar_igual_str(p, ok_hex(colores.simular(n, "protanopia", 0.0)), "#ff8000", "severidad 0: se ve igual")
+    prueba.afirmar_igual_str(p, ok_hex(colores.simular(colores.rgb(128, 128, 128), "deuteranopia", 1.0)), "#808080", "los grises no cambian")
+    prueba.afirmar_igual_str(p, ok_hex(colores.simular(n, "verde", 1.0)), "ERR", "tipo desconocido")
+
+    prueba.seccion(p, "nombres de CSS")
+    prueba.afirmar_igual_i32(p, colores.cantidad_nombres(), 148, "148 nombres")
+    prueba.afirmar_igual_str(p, ok_hex(colores.con_nombre("rebeccapurple")), "#663399", "rebeccapurple")
+    prueba.afirmar_igual_str(p, ok_hex(colores.con_nombre(" Tomato ")), "#ff6347", "mayúsculas y espacios")
+    prueba.afirmar_igual_str(p, ok_hex(colores.con_nombre("gris")), "ERR", "no existe")
+    prueba.afirmar_igual_str(p, colores.nombre_en(0), "aliceblue", "el primero, en orden alfabético")
+    prueba.afirmar_igual_str(p, colores.nombre_en(147), "yellowgreen", "el último")
+    prueba.afirmar_igual_str(p, colores.nombre_mas_cercano(colores.rgb(250, 0, 3)), "red", "el nombre más cercano")
+    prueba.afirmar_igual_str(p, colores.nombre_mas_cercano(colores.rgb(255, 99, 71)), "tomato", "un color con nombre se llama como es")
+
+    prueba.seccion(p, "paletas y mapas")
+    let t10 = colores.paleta("tab10")?
+    prueba.afirmar_igual_i32(p, colores.paleta_largo(t10), 10, "tab10 tiene 10 colores")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.paleta_color(t10, 0)), "#1f77b4", "el primer color de tab10")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.paleta_color(t10, 10)), "#1f77b4", "da la vuelta")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.paleta_color(t10, 0 - 1)), "#17becf", "los negativos cuentan desde el final")
+    let oi = colores.paleta("okabe_ito")?
+    prueba.afirmar_igual_i32(p, colores.paleta_largo(oi), 8, "Okabe-Ito: 8 colores")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.paleta_color(oi, 5)), "#d55e00", "el bermellón de Okabe-Ito")
+    prueba.afirmar_igual_str(p, ok_hex(Ok(colores.paleta_color(colores.paleta("Set1")?, 0))), "#e41a1c", "Set1, sin importar mayúsculas")
+    prueba.afirmar(p, colores.paleta("nada").is_err(), "paleta que no existe")
+    let vi = colores.mapa("viridis")?
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mapa_en(vi, 0.0)), "#440154", "viridis en 0")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mapa_en(vi, 0.5)), "#20908c", "viridis en 0.5")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mapa_en(vi, 1.0)), "#fde724", "viridis en 1")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mapa_en(vi, 0.0 - 5.0)), "#440154", "fuera de rango se recorta")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mapa_en(colores.mapa("magma")?, 0.5)), "#b63679", "magma en 0.5")
+    prueba.afirmar_igual_str(p, colores.a_hex(colores.mapa_en(colores.mapa("coolwarm")?, 0.5)), "#dddcdb", "coolwarm en el medio")
+    prueba.afirmar_igual_i32(p, colores.cantidad_mapas(), 12, "12 mapas")
+    prueba.afirmar_igual_str(p, colores.nombre_mapa(0), "viridis", "el primero")
+    prueba.afirmar(p, colores.mapa("jet").is_err(), "mapa que no existe")
+    let mut distintos = 0
+    for i in 1..9 {
+        if colores.delta_e(colores.paleta_n(8, 0), colores.paleta_n(8, i % 8)) > 5.0 {
+            distintos = distintos + 1
+        }
+    }
+    prueba.afirmar_igual_i32(p, distintos, 7, "paleta_n: 8 colores distintos entre sí")
+
+    return Ok(prueba.terminar(p))
+}
+
+fn main() -> i32 {
+    let p = prueba.nueva("lib/colores")
+    let r = correr(p)
+    match r {
+        Ok(codigo) => {
+            return codigo
+        }
+        Err(e) => {
+            print("ERROR:", e)
+            return 1
+        }
+    }
+    return 1
+}

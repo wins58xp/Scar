@@ -1,0 +1,95 @@
+# lib/json contra Python: lo corre pruebas/test_json_python.py. Lee "casos.txt"
+# (en la carpeta donde corre): cada línea es "J" y un JSON (que se lee, se
+# escribe de tres maneras y se guarda como documento actual) o "Q" y una ruta
+# escrita como un str de JSON (se consulta el documento actual). Las salidas
+# llevan los textos en hexadecimal (los bytes UTF-8) para comparar exacto.
+
+use "json"
+
+fn hex(s: str) -> str {
+    let v = json.bytes_de(s)
+    let digitos = "0123456789abcdef"
+    let mut t = ""
+    for i in 0..v.len() {
+        match v.get(i) {
+            Some(b) => { t = t + digitos[(b >> 4) & 15] + digitos[b & 15] }
+            None => {}
+        }
+    }
+    return t
+}
+
+fn resto(linea: Vec<i32>) -> Vec<i32> {
+    let r: Vec<i32> = vec_new()
+    for i in 1..linea.len() {
+        match linea.get(i) {
+            Some(b) => { r.push(b) }
+            None => {}
+        }
+    }
+    return r
+}
+
+# Una línea "J": lee, escribe de tres maneras y devuelve el documento.
+fn leer_linea(cuerpo: Vec<i32>) -> Result<json.Doc> {
+    match json.analizar(cuerpo) {
+        Err(e) => {
+            print("J err")
+            return Ok(json.nuevo_objeto())
+        }
+        Ok(d) => {
+            print("J ok")
+            print("C", hex(json.escribir(d)))
+            print("A", hex(json.escribir_ascii(d)))
+            print("P", hex(json.escribir_bonito(d, 2)))
+            return Ok(d)
+        }
+    }
+    return Ok(json.nuevo_objeto())
+}
+
+# Una línea "Q": consulta el documento actual.
+fn consultar(cuerpo: Vec<i32>, actual: json.Doc) -> Result<i32> {
+    let rp = json.analizar(cuerpo)
+    if rp.is_err() {
+        print("Q ruta ilegible")
+        return Ok(0)
+    }
+    let dp = rp?
+    let ruta = json.texto(dp, "")
+    print("Q", json.tipo(actual, ruta), json.existe(actual, ruta), json.largo(actual, ruta), hex(json.texto(actual, ruta)), json.entero(actual, ruta), json.booleano(actual, ruta))
+    return Ok(1)
+}
+
+fn correr() -> Result<i32> {
+    let todo = json.bytes_de_archivo("casos.txt")?
+    let mut actual = json.nuevo_objeto()
+    let mut linea: Vec<i32> = vec_new()
+    let mut n = 0
+    for i in 0..todo.len() {
+        let b = todo.get(i).unwrap_or(10)
+        if b == 10 {
+            if linea.len() > 0 {
+                let tipo = linea.get(0).unwrap_or(0)
+                let cuerpo = resto(linea)
+                if tipo == 74 {
+                    actual = leer_linea(cuerpo)?
+                } else {
+                    let _q = consultar(cuerpo, actual)?
+                }
+                n = n + 1
+            }
+            linea = vec_new()
+        } else {
+            linea.push(b)
+        }
+    }
+    return Ok(n)
+}
+
+fn main() {
+    let r = correr()
+    if r.is_err() {
+        print("ERROR", r.err())
+    }
+}

@@ -1,0 +1,877 @@
+# lib/grafico.scar: gráficos de líneas, barras, dispersión e histograma (use "grafico").
+#
+#   use "grafico"
+#
+#   let g = grafico.nuevo(640, 400, "Magnitud por día")
+#   grafico.ejes(g, "día", "magnitud")
+#   grafico.linea(g, "Calama", [1.0, 2.0, 3.0], [2.5, 3.1, 2.8], grafico.paleta(0))
+#   grafico.puntos(g, "Ovalle", [1.0, 2.0, 3.0], [3.4, 2.2, 4.0], grafico.paleta(1))
+#   grafico.guardar_png(g, "mag.png")?
+#
+#   # barras agrupadas por categoría, e histograma de un conjunto de datos
+#   let b = grafico.nuevo(640, 400, "Sismos por zona")
+#   grafico.categorias(b, ["Norte", "Centro", "Sur"])
+#   grafico.barras(b, "2025", [12.0, 30.0, 7.0], grafico.paleta(0))
+#   grafico.barras(b, "2026", [15.0, 28.0, 9.0], grafico.paleta(1))
+#   let h = grafico.nuevo(640, 400, "Profundidad")
+#   grafico.histograma(h, "km", datos, 10, grafico.paleta(2))
+#
+# Más colores: `colores_paleta("okabe_ito", 3)`, `colores_mapa("viridis", 5)`,
+# `color_hex("#ff8000")` y `color_nombre("tomato")` salen de lib/colores.
+#
+# Se dibuja sobre un lienzo (lib/lienzo.scar) con su fuente de 8x8 y se guarda
+# como PNG (lib/imagen.scar). `grafico.dibujar(g)` devuelve el lienzo, que
+# también se puede mostrar en una ventana con pantalla.mostrar.
+#
+# Cómo se decide cada cosa, para que sea predecible y se pueda comprobar:
+# - Las marcas de los ejes son "números bonitos": el paso es 1, 2 o 5 por una
+#   potencia de 10, con unas 6 marcas (`marcas(minimo, maximo, objetivo)`); los
+#   ejes de líneas y de puntos se extienden hasta la marca de afuera.
+# - Un dato (x, y) cae en el píxel (x0 + redondear((x-xmin)/(xmax-xmin)·(x1-x0)),
+#   y1 - redondear((y-ymin)/(ymax-ymin)·(y1-y0))), con (x0, y0)-(x1, y1) el
+#   rectángulo del gráfico (`diseno(g)` lo da).
+# - El histograma cuenta como numpy.histogram: cajas iguales entre el mínimo y el
+#   máximo, y la última incluye el máximo (`cuentas(datos, cajas)`).
+# - Un NaN corta la línea. Las barras de varias series van una al lado de otra
+#   en cada categoría, y el eje de las barras siempre incluye el 0.
+
+use "lienzo"
+use "imagen"
+use "texto"
+use "colores"
+
+struct Grafico {
+    ancho: i32
+    alto: i32
+    titulo: str
+    etiqueta_x: str
+    etiqueta_y: str
+    tipo: Vec<i32>
+    nombre: Vec<str>
+    color: Vec<i32>
+    ini: Vec<i32>
+    cuenta: Vec<i32>
+    cajas: Vec<i32>
+    xs: Vec<f64>
+    ys: Vec<f64>
+    cats: Vec<str>
+    lim: Vec<f64>
+    fijo: Vec<i32>
+}
+
+# tipo de serie: 0 línea, 1 puntos, 2 barras, 3 histograma
+
+struct Diseno {
+    x0: i32
+    y0: i32
+    x1: i32
+    y1: i32
+    xmin: f64
+    xmax: f64
+    ymin: f64
+    ymax: f64
+    xt: Vec<f64>
+    yt: Vec<f64>
+    categorico: bool
+}
+
+fn nuevo(ancho: i32, alto: i32, titulo: str) -> Grafico {
+    let tipo: Vec<i32> = vec_new()
+    let nombre: Vec<str> = vec_new()
+    let color: Vec<i32> = vec_new()
+    let ini: Vec<i32> = vec_new()
+    let cuenta: Vec<i32> = vec_new()
+    let cajas: Vec<i32> = vec_new()
+    let xs: Vec<f64> = vec_new()
+    let ys: Vec<f64> = vec_new()
+    let cats: Vec<str> = vec_new()
+    let lim: Vec<f64> = vec_new()
+    let fijo: Vec<i32> = vec_new()
+    for i in 0..4 {
+        lim.push(0.0)
+        fijo.push(0)
+    }
+    return Grafico { ancho: max(ancho, 80), alto: max(alto, 60), titulo: titulo, etiqueta_x: "", etiqueta_y: "", tipo: tipo, nombre: nombre, color: color, ini: ini, cuenta: cuenta, cajas: cajas, xs: xs, ys: ys, cats: cats, lim: lim, fijo: fijo }
+}
+
+# Diez colores bien distintos (los de siempre en gráficos), por número.
+fn paleta(i: i32) -> i32 {
+    let k = i % 10
+    if k < 0 {
+        return lienzo.color(31, 119, 180)
+    }
+    if k == 0 {
+        return lienzo.color(31, 119, 180)
+    }
+    if k == 1 {
+        return lienzo.color(255, 127, 14)
+    }
+    if k == 2 {
+        return lienzo.color(44, 160, 44)
+    }
+    if k == 3 {
+        return lienzo.color(214, 39, 40)
+    }
+    if k == 4 {
+        return lienzo.color(148, 103, 189)
+    }
+    if k == 5 {
+        return lienzo.color(140, 86, 75)
+    }
+    if k == 6 {
+        return lienzo.color(227, 119, 194)
+    }
+    if k == 7 {
+        return lienzo.color(127, 127, 127)
+    }
+    if k == 8 {
+        return lienzo.color(188, 189, 34)
+    }
+    return lienzo.color(23, 190, 207)
+}
+
+# Un color a partir de rojo, verde y azul (0 a 255).
+fn color_rgb(r: i32, g: i32, b: i32) -> i32 {
+    return lienzo.color(r, g, b)
+}
+
+# Un color a partir de "#rrggbb" (o "#rgb"). Err si el texto no es un color.
+fn color_hex(s: str) -> Result<i32> {
+    return colores.de_hex(s)
+}
+
+# Un color a partir de su nombre de CSS ("tomato", "navy"...). Err si no existe.
+fn color_nombre(nombre: str) -> Result<i32> {
+    return colores.con_nombre(nombre)
+}
+
+# Los n primeros colores de una paleta de lib/colores ("tab10", "tab20", "set1", "set2",
+# "dark2", "paired", "okabe_ito"...), dando la vuelta si n pasa de su largo. "tab10" es la
+# misma de `paleta(i)`. Err si la paleta no existe.
+fn colores_paleta(nombre: str, n: i32) -> Result<Vec<i32>> {
+    let p = colores.paleta(nombre)?
+    let v: Vec<i32> = vec_new()
+    for i in 0..n {
+        v.push(colores.paleta_color(p, i))
+    }
+    return Ok(v)
+}
+
+# n colores repartidos parejo a lo largo de un mapa continuo de lib/colores ("viridis",
+# "magma", "turbo", "coolwarm"...), de punta a punta (con n = 1, el del medio): sirven
+# para teñir n líneas o barras que siguen un orden. Err si el mapa no existe.
+fn colores_mapa(nombre: str, n: i32) -> Result<Vec<i32>> {
+    let m = colores.mapa(nombre)?
+    let v: Vec<i32> = vec_new()
+    for i in 0..n {
+        let t = if n > 1 { to_f64(i) / to_f64(n - 1) } else { 0.5 }
+        v.push(colores.mapa_en(m, t))
+    }
+    return Ok(v)
+}
+
+fn ejes(g: Grafico, etiqueta_x: str, etiqueta_y: str) {
+    g.etiqueta_x = etiqueta_x
+    g.etiqueta_y = etiqueta_y
+}
+
+# Fija los límites de los ejes en vez de calcularlos (mínimo y máximo de cada uno).
+fn limites(g: Grafico, xmin: f64, xmax: f64, ymin: f64, ymax: f64) {
+    g.lim.set(0, xmin)
+    g.lim.set(1, xmax)
+    g.lim.set(2, ymin)
+    g.lim.set(3, ymax)
+    for i in 0..4 {
+        g.fijo.set(i, 1)
+    }
+}
+
+fn series(g: Grafico) -> i32 {
+    return g.tipo.len()
+}
+
+# ---------- cargar series ----------
+
+fn _agregar(g: Grafico, tipo: i32, nombre: str, color: i32, cajas: i32) {
+    g.tipo.push(tipo)
+    g.nombre.push(nombre)
+    g.color.push(color)
+    g.ini.push(g.ys.len())
+    g.cajas.push(cajas)
+}
+
+# Una línea que une los puntos (xs[i], ys[i]). Un NaN en ys corta la línea.
+fn linea(g: Grafico, nombre: str, xs: Vec<f64>, ys: Vec<f64>, color: i32) {
+    _agregar(g, 0, nombre, color, 0)
+    let n = min(xs.len(), ys.len())
+    for i in 0..n {
+        g.xs.push(xs.get(i).unwrap_or(0.0))
+        g.ys.push(ys.get(i).unwrap_or(0.0))
+    }
+    g.cuenta.push(n)
+}
+
+# Puntos sueltos (dispersión).
+fn puntos(g: Grafico, nombre: str, xs: Vec<f64>, ys: Vec<f64>, color: i32) {
+    _agregar(g, 1, nombre, color, 0)
+    let n = min(xs.len(), ys.len())
+    for i in 0..n {
+        g.xs.push(xs.get(i).unwrap_or(0.0))
+        g.ys.push(ys.get(i).unwrap_or(0.0))
+    }
+    g.cuenta.push(n)
+}
+
+# Los nombres de las categorías del eje x de las barras.
+fn categorias(g: Grafico, nombres: Vec<str>) {
+    for i in 0..nombres.len() {
+        match nombres.get(i) {
+            Some(s) => { g.cats.push(s + "") }
+            None => {}
+        }
+    }
+}
+
+# Una serie de barras: valores[i] es la altura en la categoría i.
+fn barras(g: Grafico, nombre: str, valores: Vec<f64>, color: i32) {
+    _agregar(g, 2, nombre, color, 0)
+    let n = valores.len()
+    for i in 0..n {
+        g.xs.push(to_f64(i))
+        g.ys.push(valores.get(i).unwrap_or(0.0))
+    }
+    g.cuenta.push(n)
+}
+
+# Un histograma de los datos en `cajas` cajas.
+fn histograma(g: Grafico, nombre: str, datos: Vec<f64>, cajas: i32, color: i32) {
+    _agregar(g, 3, nombre, color, max(cajas, 1))
+    let n = datos.len()
+    for i in 0..n {
+        g.xs.push(0.0)
+        g.ys.push(datos.get(i).unwrap_or(0.0))
+    }
+    g.cuenta.push(n)
+}
+
+# ---------- números bonitos ----------
+
+# 10 elevado a e, exacto (e entero, positivo o negativo).
+fn _pot10(e: i32) -> f64 {
+    let mut r = 1.0
+    if e >= 0 {
+        for i in 0..e {
+            r = r * 10.0
+        }
+        return r
+    }
+    for i in 0..(0 - e) {
+        r = r * 10.0
+    }
+    return 1.0 / r
+}
+
+fn _techo(x: f64) -> f64 {
+    return 0.0 - floor(0.0 - x)
+}
+
+# Las marcas de un eje que cubre de `minimo` a `maximo`: pasos de 1, 2 o 5 por
+# una potencia de 10, desde la marca de abajo hasta la de arriba, con unas
+# `objetivo` marcas. Si el rango es un solo valor, se abre a su alrededor.
+fn marcas(minimo: f64, maximo: f64, objetivo: i32) -> Vec<f64> {
+    let mut lo = minimo
+    let mut hi = maximo
+    if hi - lo <= 0.0 {
+        let mut d = abs(lo) * 0.5
+        if d == 0.0 {
+            d = 1.0
+        }
+        lo = lo - d
+        hi = hi + d
+    }
+    let paso0 = (hi - lo) / to_f64(max(objetivo, 1))
+    let mut e = 0
+    while _pot10(e + 1) <= paso0 {
+        e = e + 1
+    }
+    while _pot10(e) > paso0 {
+        e = e - 1
+    }
+    let frac = paso0 / _pot10(e)
+    let mut bonito = 10.0
+    if frac <= 1.0 {
+        bonito = 1.0
+    } else {
+        if frac <= 2.0 {
+            bonito = 2.0
+        } else {
+            if frac <= 5.0 {
+                bonito = 5.0
+            }
+        }
+    }
+    let paso = _paso_en(bonito, e)
+    let k0 = floor(lo / paso)
+    let k1 = _techo(hi / paso)
+    let r: Vec<f64> = vec_new()
+    let mut k = k0
+    while k <= k1 {
+        r.push(_valor_marca(k, bonito, e))
+        k = k + 1.0
+    }
+    return r
+}
+
+fn _paso_en(bonito: f64, e: i32) -> f64 {
+    if e >= 0 {
+        return bonito * _pot10(e)
+    }
+    return bonito / _pot10(0 - e)
+}
+
+# k pasos de `bonito` por 10^e, sin acumular error.
+fn _valor_marca(k: f64, bonito: f64, e: i32) -> f64 {
+    if e >= 0 {
+        return (k * bonito) * _pot10(e)
+    }
+    return (k * bonito) / _pot10(0 - e)
+}
+
+# Cuántos decimales hacen falta para escribir las marcas de ese paso.
+fn _decimales_de(paso: f64) -> i32 {
+    let mut d = 0
+    while d < 12 and _pot10(0 - d) > paso * 0.999999 {
+        d = d + 1
+    }
+    return d
+}
+
+fn _etiqueta(x: f64, d: i32) -> str {
+    let mut v = x
+    if abs(v) < _pot10(0 - d - 3) {
+        v = 0.0
+    }
+    return texto.decimales(v, d)
+}
+
+# Las marcas escritas, todas con los mismos decimales ("0.5", "1.0", "1.5").
+fn etiquetas(m: Vec<f64>) -> Vec<str> {
+    let mut paso = 1.0
+    if m.len() >= 2 {
+        paso = m.get(1).unwrap_or(1.0) - m.get(0).unwrap_or(0.0)
+    }
+    let d = _decimales_de(paso)
+    let r: Vec<str> = vec_new()
+    for i in 0..m.len() {
+        r.push(_etiqueta(m.get(i).unwrap_or(0.0), d))
+    }
+    return r
+}
+
+# ---------- histograma ----------
+
+struct Datos {
+    v: Vec<f64>
+}
+
+# El mínimo y el máximo de los datos que no son NaN (si todos son iguales, un
+# rango de 1 alrededor).
+fn _rango(d: Datos) -> Vec<f64> {
+    let mut lo = 0.0
+    let mut hi = 0.0
+    let mut primero = true
+    for i in 0..d.v.len() {
+        let x = d.v.get(i).unwrap_or(0.0)
+        if x == x {
+            if primero {
+                lo = x
+                hi = x
+                primero = false
+            } else {
+                lo = min(lo, x)
+                hi = max(hi, x)
+            }
+        }
+    }
+    if hi == lo {
+        lo = lo - 0.5
+        hi = hi + 0.5
+    }
+    let r: Vec<f64> = vec_new()
+    r.push(lo)
+    r.push(hi)
+    return r
+}
+
+fn _bordes_de(lo: f64, hi: f64, cajas: i32) -> Vec<f64> {
+    let r: Vec<f64> = vec_new()
+    let paso = (hi - lo) / to_f64(cajas)
+    for i in 0..cajas {
+        r.push(lo + to_f64(i) * paso)
+    }
+    r.push(hi)
+    return r
+}
+
+# Los bordes de las cajas: `cajas` + 1 valores entre el mínimo y el máximo
+# (como numpy.linspace).
+fn bordes(datos: Vec<f64>, cajas: i32) -> Vec<f64> {
+    let d = Datos { v: datos }
+    let r = _rango(d)
+    return _bordes_de(r.get(0).unwrap_or(0.0), r.get(1).unwrap_or(1.0), cajas)
+}
+
+# Cuántos datos caen en cada caja, como numpy.histogram(datos, bins=cajas).
+fn cuentas(datos: Vec<f64>, cajas: i32) -> Vec<i32> {
+    let d = Datos { v: datos }
+    let rg = _rango(d)
+    let lo = rg.get(0).unwrap_or(0.0)
+    let hi = rg.get(1).unwrap_or(1.0)
+    let b = _bordes_de(lo, hi, cajas)
+    let norma = to_f64(cajas) / (hi - lo)
+    let r: Vec<i32> = vec_new()
+    for i in 0..cajas {
+        r.push(0)
+    }
+    for i in 0..d.v.len() {
+        let x = d.v.get(i).unwrap_or(0.0)
+        if x == x and x >= lo and x <= hi {
+            let mut k = to_i32(floor((x - lo) * norma))
+            if k >= cajas {
+                k = cajas - 1
+            }
+            if x < b.get(k).unwrap_or(lo) {
+                k = k - 1
+            } else {
+                if x >= b.get(k + 1).unwrap_or(hi) and k != cajas - 1 {
+                    k = k + 1
+                }
+            }
+            r.set(k, r.get(k).unwrap_or(0) + 1)
+        }
+    }
+    return r
+}
+
+fn _datos_de(g: Grafico, s: i32) -> Vec<f64> {
+    let r: Vec<f64> = vec_new()
+    let ini = g.ini.get(s).unwrap_or(0)
+    let n = g.cuenta.get(s).unwrap_or(0)
+    for i in 0..n {
+        r.push(g.ys.get(ini + i).unwrap_or(0.0))
+    }
+    return r
+}
+
+# ---------- diseño ----------
+
+fn _redondear(v: f64) -> i32 {
+    return to_i32(floor(v + 0.5))
+}
+
+fn _dentro(m: Vec<f64>, lo: f64, hi: f64) -> Vec<f64> {
+    let r: Vec<f64> = vec_new()
+    let eps = (hi - lo) * 1.0e-9
+    for i in 0..m.len() {
+        let t = m.get(i).unwrap_or(0.0)
+        if t >= lo - eps and t <= hi + eps {
+            r.push(t)
+        }
+    }
+    return r
+}
+
+# Cuántas categorías tiene el eje x de las barras.
+fn _ncats(g: Grafico) -> i32 {
+    let mut n = g.cats.len()
+    for s in 0..g.tipo.len() {
+        if g.tipo.get(s).unwrap_or(0) == 2 {
+            n = max(n, g.cuenta.get(s).unwrap_or(0))
+        }
+    }
+    return n
+}
+
+fn _hay_barras(g: Grafico) -> bool {
+    for s in 0..g.tipo.len() {
+        if g.tipo.get(s).unwrap_or(0) == 2 {
+            return true
+        }
+    }
+    return false
+}
+
+# Rectángulo del gráfico, rangos de los ejes y marcas, calculados de las series.
+fn diseno(g: Grafico) -> Diseno {
+    let categorico = _hay_barras(g)
+    # --- rango de x (numérico) y de y ---
+    let mut xlo = 0.0
+    let mut xhi = 1.0
+    let mut xhay = false
+    let mut hist_solo = true
+    let mut ylo = 0.0
+    let mut yhi = 1.0
+    let mut yhay = false
+    let mut con_cero = false
+    for s in 0..g.tipo.len() {
+        let t = g.tipo.get(s).unwrap_or(0)
+        let ini = g.ini.get(s).unwrap_or(0)
+        let n = g.cuenta.get(s).unwrap_or(0)
+        if t == 3 {
+            con_cero = true
+            let datos = _datos_de(g, s)
+            let c = g.cajas.get(s).unwrap_or(1)
+            let cu = cuentas(datos, c)
+            for j in 0..cu.len() {
+                let v = to_f64(cu.get(j).unwrap_or(0))
+                if yhay {
+                    ylo = min(ylo, v)
+                    yhi = max(yhi, v)
+                } else {
+                    ylo = v
+                    yhi = v
+                    yhay = true
+                }
+            }
+            let rg = _rango(Datos { v: _datos_de(g, s) })
+            let a = rg.get(0).unwrap_or(0.0)
+            let b = rg.get(1).unwrap_or(1.0)
+            if xhay {
+                xlo = min(xlo, a)
+                xhi = max(xhi, b)
+            } else {
+                xlo = a
+                xhi = b
+                xhay = true
+            }
+        } else {
+            if t == 2 {
+                con_cero = true
+            } else {
+                hist_solo = false
+            }
+            for i in 0..n {
+                let x = g.xs.get(ini + i).unwrap_or(0.0)
+                let y = g.ys.get(ini + i).unwrap_or(0.0)
+                if y == y {
+                    if yhay {
+                        ylo = min(ylo, y)
+                        yhi = max(yhi, y)
+                    } else {
+                        ylo = y
+                        yhi = y
+                        yhay = true
+                    }
+                }
+                if t != 2 and x == x {
+                    if xhay {
+                        xlo = min(xlo, x)
+                        xhi = max(xhi, x)
+                    } else {
+                        xlo = x
+                        xhi = x
+                        xhay = true
+                    }
+                }
+            }
+        }
+    }
+    if con_cero {
+        ylo = min(ylo, 0.0)
+        yhi = max(yhi, 0.0)
+    }
+    let mut yt = marcas(ylo, yhi, 6)
+    let mut ymin = yt.get(0).unwrap_or(0.0)
+    let mut ymax = yt.get(yt.len() - 1).unwrap_or(1.0)
+    let mut xt: Vec<f64> = vec_new()
+    let mut xmin = 0.0
+    let mut xmax = 1.0
+    if categorico {
+        xmin = 0.0
+        xmax = to_f64(max(_ncats(g), 1))
+    } else {
+        if hist_solo and xhay {
+            xmin = xlo
+            xmax = xhi
+            xt = _dentro(marcas(xlo, xhi, 6), xlo, xhi)
+        } else {
+            xt = marcas(xlo, xhi, 6)
+            xmin = xt.get(0).unwrap_or(0.0)
+            xmax = xt.get(xt.len() - 1).unwrap_or(1.0)
+        }
+    }
+    # --- límites fijados a mano ---
+    if g.fijo.get(0).unwrap_or(0) == 1 {
+        if categorico == false {
+            xmin = g.lim.get(0).unwrap_or(0.0)
+            xmax = g.lim.get(1).unwrap_or(1.0)
+            xt = _dentro(marcas(xmin, xmax, 6), xmin, xmax)
+        }
+        ymin = g.lim.get(2).unwrap_or(0.0)
+        ymax = g.lim.get(3).unwrap_or(1.0)
+        yt = _dentro(marcas(ymin, ymax, 6), ymin, ymax)
+    }
+    # --- el rectángulo, según el tamaño de los textos ---
+    let mut paso_y = 1.0
+    if yt.len() >= 2 {
+        paso_y = yt.get(1).unwrap_or(1.0) - yt.get(0).unwrap_or(0.0)
+    }
+    let dec_y = _decimales_de(paso_y)
+    let mut ancho_y = 0
+    for i in 0..yt.len() {
+        ancho_y = max(ancho_y, _etiqueta(yt.get(i).unwrap_or(0.0), dec_y).len())
+    }
+    let x0 = 8 * ancho_y + 14
+    let mut sup = 8
+    if g.titulo.len() > 0 {
+        sup = sup + 24
+    }
+    if g.etiqueta_y.len() > 0 {
+        sup = sup + 12
+    }
+    let mut inf = 24
+    if g.etiqueta_x.len() > 0 {
+        inf = inf + 14
+    }
+    return Diseno { x0: x0, y0: sup, x1: g.ancho - 15, y1: g.alto - 1 - inf, xmin: xmin, xmax: xmax, ymin: ymin, ymax: ymax, xt: xt, yt: yt, categorico: categorico }
+}
+
+# El píxel (columna) de un valor de x, y el (fila) de un valor de y.
+fn px(d: Diseno, x: f64) -> i32 {
+    return d.x0 + _redondear((x - d.xmin) / (d.xmax - d.xmin) * to_f64(d.x1 - d.x0))
+}
+
+fn py(d: Diseno, y: f64) -> i32 {
+    return d.y1 - _redondear((y - d.ymin) / (d.ymax - d.ymin) * to_f64(d.y1 - d.y0))
+}
+
+# ---------- dibujar ----------
+
+# Cuántas marcas tiene cada eje y dónde está la número i.
+fn marcas_x(d: Diseno) -> i32 {
+    return d.xt.len()
+}
+
+fn marcas_y(d: Diseno) -> i32 {
+    return d.yt.len()
+}
+
+fn marca_x(d: Diseno, i: i32) -> f64 {
+    return d.xt.get(i).unwrap_or(0.0)
+}
+
+fn marca_y(d: Diseno, i: i32) -> f64 {
+    return d.yt.get(i).unwrap_or(0.0)
+}
+
+# La etiqueta de la marca número i de y (o de x) del diseño.
+fn etiqueta_y(d: Diseno, i: i32) -> str {
+    let mut paso = 1.0
+    if d.yt.len() >= 2 {
+        paso = d.yt.get(1).unwrap_or(1.0) - d.yt.get(0).unwrap_or(0.0)
+    }
+    return _etiqueta(d.yt.get(i).unwrap_or(0.0), _decimales_de(paso))
+}
+
+fn etiqueta_x(d: Diseno, i: i32) -> str {
+    let mut paso = 1.0
+    if d.xt.len() >= 2 {
+        paso = d.xt.get(1).unwrap_or(1.0) - d.xt.get(0).unwrap_or(0.0)
+    }
+    return _etiqueta(d.xt.get(i).unwrap_or(0.0), _decimales_de(paso))
+}
+
+fn _texto_centrado(l: lienzo.Lienzo, cx: i32, y: i32, s: str, c: i32) {
+    lienzo.texto(l, cx - (s.len() * 8) / 2, y, s, c)
+}
+
+fn _dibujar_serie(l: lienzo.Lienzo, g: Grafico, d: Diseno, s: i32) {
+    let t = g.tipo.get(s).unwrap_or(0)
+    let c = g.color.get(s).unwrap_or(0)
+    let ini = g.ini.get(s).unwrap_or(0)
+    let n = g.cuenta.get(s).unwrap_or(0)
+    if t == 0 {
+        for i in 0..n - 1 {
+            let xa = g.xs.get(ini + i).unwrap_or(0.0)
+            let ya = g.ys.get(ini + i).unwrap_or(0.0)
+            let xb = g.xs.get(ini + i + 1).unwrap_or(0.0)
+            let yb = g.ys.get(ini + i + 1).unwrap_or(0.0)
+            if xa == xa and ya == ya and xb == xb and yb == yb {
+                lienzo.linea(l, px(d, xa), py(d, ya), px(d, xb), py(d, yb), c)
+                lienzo.linea(l, px(d, xa), py(d, ya) + 1, px(d, xb), py(d, yb) + 1, c)
+            }
+        }
+    }
+    if t == 1 {
+        for i in 0..n {
+            let x = g.xs.get(ini + i).unwrap_or(0.0)
+            let y = g.ys.get(ini + i).unwrap_or(0.0)
+            if x == x and y == y {
+                lienzo.circulo_lleno(l, px(d, x), py(d, y), 3, c)
+            }
+        }
+    }
+    if t == 2 {
+        let nser = _barras_series(g)
+        let k = _barras_indice(g, s)
+        let ncat = to_f64(max(_ncats(g), 1))
+        let ranura = to_f64(d.x1 - d.x0) / ncat
+        let ancho_b = ranura * 0.8 / to_f64(nser)
+        let base = py(d, 0.0)
+        for i in 0..n {
+            let v = g.ys.get(ini + i).unwrap_or(0.0)
+            if v == v {
+                let izq = to_f64(d.x0) + to_f64(i) * ranura + ranura * 0.1 + to_f64(k) * ancho_b
+                let xl = _redondear(izq)
+                let xr = _redondear(izq + ancho_b)
+                let alto_v = py(d, v)
+                let mut arriba = alto_v
+                let mut hh = base - alto_v
+                if v < 0.0 {
+                    arriba = base
+                    hh = alto_v - base
+                }
+                if hh > 0 {
+                    lienzo.rect_lleno(l, xl, arriba, max(xr - xl, 1), hh, c)
+                }
+            }
+        }
+    }
+    if t == 3 {
+        let cu = cuentas(_datos_de(g, s), g.cajas.get(s).unwrap_or(1))
+        let b = bordes(_datos_de(g, s), g.cajas.get(s).unwrap_or(1))
+        let base = py(d, 0.0)
+        for j in 0..cu.len() {
+            let xl = px(d, b.get(j).unwrap_or(0.0))
+            let xr = px(d, b.get(j + 1).unwrap_or(0.0))
+            let arriba = py(d, to_f64(cu.get(j).unwrap_or(0)))
+            if base > arriba {
+                lienzo.rect_lleno(l, xl, arriba, max(xr - xl, 1), base - arriba, c)
+                lienzo.rect(l, xl, arriba, max(xr - xl, 1), base - arriba, lienzo.gris(40))
+            }
+        }
+    }
+}
+
+# Cuántas series de barras hay, y cuál es la número `s` entre ellas.
+fn _barras_series(g: Grafico) -> i32 {
+    let mut n = 0
+    for s in 0..g.tipo.len() {
+        if g.tipo.get(s).unwrap_or(0) == 2 {
+            n = n + 1
+        }
+    }
+    return max(n, 1)
+}
+
+fn _barras_indice(g: Grafico, s: i32) -> i32 {
+    let mut k = 0
+    for i in 0..s {
+        if g.tipo.get(i).unwrap_or(0) == 2 {
+            k = k + 1
+        }
+    }
+    return k
+}
+
+fn _leyenda(l: lienzo.Lienzo, g: Grafico, d: Diseno) {
+    let mut filas = 0
+    let mut ancho_max = 0
+    for s in 0..g.tipo.len() {
+        let mut o = g.nombre.get(s)
+        while let Some(e) = o {
+            if e.len() > 0 {
+                filas = filas + 1
+                ancho_max = max(ancho_max, e.len())
+            }
+            o = None
+        }
+    }
+    if filas == 0 {
+        return
+    }
+    let w = 8 * ancho_max + 28
+    let h = 14 * filas + 4
+    let x = d.x1 - w - 6
+    let y = d.y0 + 6
+    lienzo.rect_lleno(l, x, y, w, h, lienzo.blanco())
+    lienzo.rect(l, x, y, w, h, lienzo.gris(160))
+    let mut fila = 0
+    for s in 0..g.tipo.len() {
+        let mut o = g.nombre.get(s)
+        while let Some(e) = o {
+            if e.len() > 0 {
+                lienzo.rect_lleno(l, x + 6, y + 4 + 14 * fila, 10, 10, g.color.get(s).unwrap_or(0))
+                lienzo.texto(l, x + 22, y + 5 + 14 * fila, e, lienzo.negro())
+                fila = fila + 1
+            }
+            o = None
+        }
+    }
+}
+
+# Dibuja el gráfico entero en un lienzo nuevo del tamaño de `nuevo`.
+fn dibujar(g: Grafico) -> lienzo.Lienzo {
+    let l = lienzo.nuevo(g.ancho, g.alto, lienzo.blanco())
+    let d = diseno(g)
+    let tinta = lienzo.color(60, 60, 60)
+    # rejilla
+    for i in 0..d.yt.len() {
+        let y = py(d, d.yt.get(i).unwrap_or(0.0))
+        lienzo.linea(l, d.x0, y, d.x1, y, lienzo.gris(225))
+    }
+    if d.categorico == false {
+        for i in 0..d.xt.len() {
+            let x = px(d, d.xt.get(i).unwrap_or(0.0))
+            lienzo.linea(l, x, d.y0, x, d.y1, lienzo.gris(225))
+        }
+    }
+    for s in 0..g.tipo.len() {
+        _dibujar_serie(l, g, d, s)
+    }
+    # ejes y marcas
+    lienzo.linea(l, d.x0, d.y0, d.x0, d.y1, lienzo.negro())
+    lienzo.linea(l, d.x0, d.y1, d.x1, d.y1, lienzo.negro())
+    for i in 0..d.yt.len() {
+        let y = py(d, d.yt.get(i).unwrap_or(0.0))
+        lienzo.linea(l, d.x0 - 4, y, d.x0, y, lienzo.negro())
+        let e = etiqueta_y(d, i)
+        lienzo.texto(l, d.x0 - 6 - 8 * e.len(), y - 4, e, tinta)
+    }
+    if d.categorico {
+        let ncat = max(_ncats(g), 1)
+        let ranura = to_f64(d.x1 - d.x0) / to_f64(ncat)
+        for i in 0..g.cats.len() {
+            let cx = d.x0 + _redondear((to_f64(i) + 0.5) * ranura)
+            lienzo.linea(l, cx, d.y1, cx, d.y1 + 4, lienzo.negro())
+            let mut o = g.cats.get(i)
+            while let Some(e) = o {
+                _texto_centrado(l, cx, d.y1 + 8, e, tinta)
+                o = None
+            }
+        }
+    } else {
+        for i in 0..d.xt.len() {
+            let x = px(d, d.xt.get(i).unwrap_or(0.0))
+            lienzo.linea(l, x, d.y1, x, d.y1 + 4, lienzo.negro())
+            _texto_centrado(l, x, d.y1 + 8, etiqueta_x(d, i), tinta)
+        }
+    }
+    if g.titulo.len() > 0 {
+        let w = lienzo.ancho_texto(g.titulo, 2)
+        lienzo.texto_escala(l, (g.ancho - w) / 2, 8, g.titulo, lienzo.negro(), 2)
+    }
+    if g.etiqueta_y.len() > 0 {
+        lienzo.texto(l, d.x0, d.y0 - 12, g.etiqueta_y, tinta)
+    }
+    if g.etiqueta_x.len() > 0 {
+        _texto_centrado(l, (d.x0 + d.x1) / 2, d.y1 + 22, g.etiqueta_x, tinta)
+    }
+    _leyenda(l, g, d)
+    return l
+}
+
+# Dibuja y guarda como PNG. Devuelve los bytes escritos.
+fn guardar_png(g: Grafico, ruta: str) -> Result<i32> {
+    return imagen.guardar_png(dibujar(g), ruta)
+}

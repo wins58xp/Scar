@@ -1,0 +1,116 @@
+# lib/motor3d, probada con
+# lib/prueba.
+#
+# Mallas (cubo, esfera, .obj con y sin normales, errores del .obj), y un
+# dibujo chico de cada modo: que el cubo se vea donde tiene que verse, que la
+# cara de arriba quede más clara que las de los costados con una luz desde
+# arriba, que el z-buffer deje adelante lo cercano aunque se dibuje después, y
+# que el plano cercano corte sin romper nada. La comparación píxel por píxel
+# con una implementación aparte en Python está en pruebas/test_motor3d_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "mate"
+use "lienzo"
+use "texto"
+use "motor3d"
+
+fn pintados(l: lienzo.Lienzo, fondo: i32) -> i32 {
+    let mut n = 0
+    for y in 0..lienzo.alto(l) {
+        for x in 0..lienzo.ancho(l) {
+            if lienzo.leer(l, x, y) != fondo {
+                n = n + 1
+            }
+        }
+    }
+    return n
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("motor3d")
+    let fondo = lienzo.negro()
+
+    prueba.seccion(t, "mallas")
+    let c = motor3d.cubo(2.0)
+    prueba.afirmar_igual_i32(t, motor3d.vertices(c), 24, "cubo: 24 vértices")
+    prueba.afirmar_igual_i32(t, motor3d.triangulos(c), 12, "cubo: 12 triángulos")
+    let e = motor3d.esfera(1.0, 8, 4)
+    prueba.afirmar_igual_i32(t, motor3d.triangulos(e), 8 * 2 * 4 - 2 * 8, "esfera: 2·seg·anillos - 2·seg")
+    let obj = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvn 0 0 1\nf 1//1 2//1 3//1 4//1\n"
+    match motor3d.de_obj(obj) {
+        Ok(m) => {
+            prueba.afirmar_igual_i32(t, motor3d.triangulos(m), 2, ".obj: un cuadrado son dos triángulos")
+            prueba.afirmar_igual_f64(t, m.nz.get(0).unwrap_or(0.0), 1.0, ".obj: la normal que trae")
+        }
+        Err(err) => { prueba.afirmar(t, false, ".obj: " + err) }
+    }
+    match motor3d.de_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf -3 -2 -1\n") {
+        Ok(m) => { prueba.afirmar_cerca(t, m.nz.get(0).unwrap_or(0.0), 1.0, 1e-12, ".obj sin normales: se calculan") }
+        Err(err) => { prueba.afirmar(t, false, ".obj negativo: " + err) }
+    }
+    prueba.afirmar(t, motor3d.de_obj("v 1 2\n").is_err(), ".obj: faltan coordenadas")
+    prueba.afirmar(t, motor3d.de_obj("v 0 0 0\nf 1 2 3\n").is_err(), ".obj: índice inválido")
+    prueba.afirmar(t, motor3d.de_obj("# nada\n").is_err(), ".obj sin caras")
+
+    prueba.seccion(t, "dibujar")
+    let r = motor3d.nuevo(32, 24, fondo)
+    let cam = motor3d.camara(mate.v3(3.0, 2.5, 3.5), mate.v3(0.0, 0.0, 0.0), mate.v3(0.0, 1.0, 0.0), 0.9, 0.1, 20.0)
+    let luz = motor3d.luz(mate.v3(0.0, 0.0 - 1.0, 0.0), 0.2, 0.8)
+    motor3d.dibujar(r, motor3d.cubo(2.0), mate.m4_identidad(), cam, luz, lienzo.color(200, 200, 200), motor3d.plano())
+    let n = pintados(r.lienzo, fondo)
+    prueba.afirmar(t, n > 100 and n < 32 * 24, "el cubo se ve (" + a_texto(n) + " píxeles)")
+    prueba.afirmar(t, lienzo.leer(r.lienzo, 16, 12) != fondo, "en el centro")
+    prueba.afirmar_igual_i32(t, lienzo.leer(r.lienzo, 0, 0), fondo, "y no en la esquina")
+    # la cara de arriba (luz de frente) más clara que las de los costados (solo ambiente)
+    let mut mas_claro = 0
+    let mut mas_oscuro = 255
+    for y in 0..24 {
+        for x in 0..32 {
+            let p = lienzo.leer(r.lienzo, x, y)
+            if p != fondo {
+                mas_claro = max(mas_claro, lienzo.canal_r(p))
+                mas_oscuro = min(mas_oscuro, lienzo.canal_r(p))
+            }
+        }
+    }
+    prueba.afirmar_igual_i32(t, mas_claro, 200, "arriba: luz entera (200)")
+    prueba.afirmar_igual_i32(t, mas_oscuro, 40, "los costados: solo el ambiente (200 · 0,2)")
+
+    prueba.seccion(t, "z-buffer")
+    motor3d.limpiar(r, fondo)
+    let cerca = mate.m4_traslacion(0.0, 0.0, 1.5)
+    let lejos = mate.m4_traslacion(0.0, 0.0, 0.0 - 1.5)
+    motor3d.dibujar(r, motor3d.esfera(0.8, 10, 6), cerca, cam, luz, lienzo.rojo(), motor3d.gouraud())
+    motor3d.dibujar(r, motor3d.cubo(1.6), lejos, cam, luz, lienzo.azul(), motor3d.plano())
+    let mut rojos = 0
+    let mut azules = 0
+    for y in 0..24 {
+        for x in 0..32 {
+            let p = lienzo.leer(r.lienzo, x, y)
+            if lienzo.canal_r(p) > 0 and lienzo.canal_b(p) == 0 {
+                rojos = rojos + 1
+            }
+            if lienzo.canal_b(p) > 0 and lienzo.canal_r(p) == 0 {
+                azules = azules + 1
+            }
+        }
+    }
+    prueba.afirmar(t, rojos > 0 and azules > 0, "se ven los dos")
+    let centro_cerca = lienzo.leer(r.lienzo, 16, 13)
+    prueba.afirmar(t, lienzo.canal_r(centro_cerca) > 0 or rojos > azules / 4,
+                   "lo cercano queda adelante aunque se dibuje antes")
+
+    prueba.seccion(t, "alambre y recorte")
+    motor3d.limpiar(r, fondo)
+    motor3d.dibujar(r, motor3d.cubo(2.0), mate.m4_identidad(), cam, luz, lienzo.verde(), motor3d.alambre())
+    let solo_bordes = pintados(r.lienzo, fondo)
+    prueba.afirmar(t, solo_bordes > 20 and solo_bordes < n, "alambre: solo los bordes")
+    motor3d.limpiar(r, fondo)
+    let cam_cerca = motor3d.camara(mate.v3(3.0, 2.5, 3.5), mate.v3(0.0, 0.0, 0.0), mate.v3(0.0, 1.0, 0.0), 0.9, 4.6, 20.0)
+    motor3d.dibujar(r, motor3d.cubo(2.0), mate.m4_identidad(), cam_cerca, luz, lienzo.blanco(), motor3d.plano())
+    let cortado = pintados(r.lienzo, fondo)
+    prueba.afirmar(t, cortado > 0 and cortado < n, "el plano cercano corta el cubo (" + a_texto(cortado) + " píxeles)")
+
+    return prueba.terminar(t)
+}

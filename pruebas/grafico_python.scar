@@ -1,0 +1,130 @@
+# lib/grafico contra una referencia en Python: lo corre pruebas/test_grafico_python.py.
+# Lee "casos.json" (en la carpeta donde corre) con gráficos de líneas, puntos,
+# barras e histogramas, arma cada uno con lib/grafico, escribe su diseño (el
+# rectángulo, los rangos, las marcas y sus etiquetas, las cuentas del histograma)
+# y guarda el PNG como c<número>.png. Python calcula lo mismo por su cuenta, compara
+# los números y mira los píxeles de cada PNG con Pillow.
+
+use "json"
+use "texto"
+use "grafico"
+
+fn num(d: json.Doc, ruta: str) -> f64 {
+    match texto.a_f64(json.texto(d, ruta)) {
+        Ok(x) => {
+            return x
+        }
+        Err(e) => {
+            return 0.0 / 0.0
+        }
+    }
+    return 0.0
+}
+
+fn vector(d: json.Doc, ruta: str) -> Vec<f64> {
+    let v: Vec<f64> = vec_new()
+    for i in 0..json.largo(d, ruta) {
+        if json.tipo(d, ruta + "." + a_texto(i)) == "nulo" {
+            v.push(0.0 / 0.0)
+        } else {
+            v.push(num(d, ruta + "." + a_texto(i)))
+        }
+    }
+    return v
+}
+
+fn color_de(d: json.Doc, ruta: str) -> i32 {
+    return grafico.color_rgb(to_i32(json.entero(d, ruta + ".0")), to_i32(json.entero(d, ruta + ".1")), to_i32(json.entero(d, ruta + ".2")))
+}
+
+fn lista(m: Vec<f64>) -> str {
+    let mut s = ""
+    for i in 0..m.len() {
+        s = s + " " + texto.decimales(m.get(i).unwrap_or(0.0), 12)
+    }
+    return s
+}
+
+fn caso(d: json.Doc, k: i32, ruta: str) -> Result<i32> {
+    let w = to_i32(json.entero(d, ruta + ".w"))
+    let h = to_i32(json.entero(d, ruta + ".h"))
+    let g = grafico.nuevo(w, h, json.texto(d, ruta + ".titulo"))
+    grafico.ejes(g, json.texto(d, ruta + ".ex"), json.texto(d, ruta + ".ey"))
+    let cats: Vec<str> = vec_new()
+    for i in 0..json.largo(d, ruta + ".cats") {
+        cats.push(json.texto(d, ruta + ".cats." + a_texto(i)))
+    }
+    if cats.len() > 0 {
+        grafico.categorias(g, cats)
+    }
+    let mut cuentas_txt = ""
+    for s in 0..json.largo(d, ruta + ".series") {
+        let r = ruta + ".series." + a_texto(s)
+        let tipo = json.texto(d, r + ".kind")
+        let nombre = json.texto(d, r + ".nombre")
+        let c = color_de(d, r + ".color")
+        if tipo == "linea" {
+            grafico.linea(g, nombre, vector(d, r + ".xs"), vector(d, r + ".ys"), c)
+        }
+        if tipo == "puntos" {
+            grafico.puntos(g, nombre, vector(d, r + ".xs"), vector(d, r + ".ys"), c)
+        }
+        if tipo == "barras" {
+            grafico.barras(g, nombre, vector(d, r + ".ys"), c)
+        }
+        if tipo == "hist" {
+            let cajas = to_i32(json.entero(d, r + ".cajas"))
+            grafico.histograma(g, nombre, vector(d, r + ".datos"), cajas, c)
+            let cu = grafico.cuentas(vector(d, r + ".datos"), cajas)
+            let mut t = " H"
+            for j in 0..cu.len() {
+                t = t + " " + a_texto(cu.get(j).unwrap_or(0))
+            }
+            cuentas_txt = cuentas_txt + t
+            t = " B" + lista(grafico.bordes(vector(d, r + ".datos"), cajas))
+            cuentas_txt = cuentas_txt + t
+        }
+    }
+    let di = grafico.diseno(g)
+    print("CASO", k)
+    print("D", di.x0, di.y0, di.x1, di.y1, texto.decimales(di.xmin, 12), texto.decimales(di.xmax, 12), texto.decimales(di.ymin, 12), texto.decimales(di.ymax, 12), di.categorico)
+    let mut xt = ""
+    for i in 0..grafico.marcas_x(di) {
+        xt = xt + " " + texto.decimales(grafico.marca_x(di, i), 12)
+    }
+    print("XT" + xt)
+    let mut yt = ""
+    for i in 0..grafico.marcas_y(di) {
+        yt = yt + " " + texto.decimales(grafico.marca_y(di, i), 12)
+    }
+    print("YT" + yt)
+    let mut xl = ""
+    for i in 0..grafico.marcas_x(di) {
+        xl = xl + " [" + grafico.etiqueta_x(di, i) + "]"
+    }
+    print("XL" + xl)
+    let mut yl = ""
+    for i in 0..grafico.marcas_y(di) {
+        yl = yl + " [" + grafico.etiqueta_y(di, i) + "]"
+    }
+    print("YL" + yl)
+    print("HC" + cuentas_txt)
+    let n = grafico.guardar_png(g, "c" + a_texto(k) + ".png")?
+    return Ok(n)
+}
+
+fn correr() -> Result<i32> {
+    let d = json.leer_archivo("casos.json")?
+    let n = json.largo(d, "casos")
+    for k in 0..n {
+        let _b = caso(d, k, "casos." + a_texto(k))?
+    }
+    return Ok(n)
+}
+
+fn main() {
+    let r = correr()
+    if r.is_err() {
+        print("ERROR", r.err())
+    }
+}

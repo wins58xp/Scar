@@ -1,0 +1,21 @@
+# Capítulo 1: el primer programa.
+#
+#   scar run ejemplos/01_hola.scar -- Ana
+#   scar build ejemplos/01_hola.scar -o hola && ./hola Ana
+
+fn main() -> i32 {
+    print("Hola, SCAR")
+    print("suma:", 2 + 2)
+
+    # arg(0) es el primer argumento: Some(texto) si lo hay, None si no
+    match arg(0) {
+        Some(nombre) => {
+            print("Hola,", nombre)
+            return 0
+        }
+        None => {
+            print("Pásame tu nombre: scar run 01_hola.scar -- Ana")
+            return 2
+        }
+    }
+}

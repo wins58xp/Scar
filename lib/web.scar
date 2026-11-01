@@ -1,0 +1,1254 @@
+# lib/web.scar: URLs y un cliente HTTP (use "web"). Escrita entera en SCAR, sobre los
+# sockets del lenguaje.
+#
+#   use "web"
+#
+#   # URLs (como urllib.parse)
+#   let u = web.analizar("https://ana@ejemplo.cl:8443/a/b?x=1&y=2#fin")?
+#   print(u.esquema, web.host(u), web.puerto(u), u.ruta)   # https ejemplo.cl 8443 /a/b
+#   print(web.armar(u))
+#   print(web.unir("http://a.cl/x/y.html", "../z"))        # http://a.cl/z
+#   let q = web.consulta_leer("a=1&b=hola+mundo", true)    # una lista de pares
+#   print(web.nombre_en(q, 1), web.valor_en(q, 1))         # b hola mundo
+#   print(web.consulta_armar(q))                           # a=1&b=hola+mundo
+#
+#   # cliente HTTP (http://, por sockets)
+#   let r = web.obtener("http://127.0.0.1:8000/api")?
+#   print(r.codigo, web.cuerpo_texto(r)?)
+#   let o = web.opciones()
+#   web.cabecera(o, "Authorization", "Bearer ...")
+#   o.reintentos = 3
+#   let r2 = web.enviar_json("http://127.0.0.1:8000/api", doc, o)?
+#   let datos = web.json_de(r2)?
+#
+# URLs: igual que urllib.parse.urlsplit / urlunsplit / urljoin / parse_qsl / urlencode (con
+# quote_plus), comprobado contra Python. Cosas que NO hace:
+# separar los parámetros ;así de la última parte de la ruta (urlparse), validar que lo que
+# va entre [ ] sea una dirección IPv6 de verdad, ni nombres de dominio internacionales
+# (IDNA). El % mal escrito se deja tal cual al leer una consulta.
+#
+# Cliente: HTTP/1.1 con "Connection: close" (un pedido por conexión), cuerpo por
+# Content-Length, por trozos (chunked) o hasta que el servidor cierra, redirecciones
+# (301, 302, 303, 307, 308; en un cambio de servidor se sueltan Authorization y Cookie),
+# reintentos con espera doble cada vez (si no se puede conectar y, en pedidos que se pueden
+# repetir -- GET, HEAD, PUT, DELETE, OPTIONS --, si el servidor contesta 502, 503 o 504). No hace HTTPS (SCAR no trae TLS): una URL https:// da Err con el motivo;
+# para eso está native/scarhttp.c (libcurl). Sin compresión (pide
+# Accept-Encoding: identity) ni cookies ni proxy.
+
+use "texto"
+use "codigos"
+use "json"
+
+# ---------- URLs ----------
+
+struct Par {
+    nombre: str
+    valor: str
+}
+
+# Las cinco partes de urlsplit. `autoridad` es el netloc tal cual: usuario:clave@host:puerto.
+struct Url {
+    esquema: str
+    autoridad: str
+    ruta: str
+    consulta: str
+    fragmento: str
+}
+
+# Una lista de textos y una de pares van dentro de un struct: así se prestan a las funciones
+# (un Vec suelto se movería al pasarlo).
+struct Lista {
+    v: Vec<str>
+}
+
+struct Pares {
+    v: Vec<Par>
+}
+
+# El elemento i de una lista de textos ("" si no existe).
+fn _en(l: Lista, i: i32) -> str {
+    let mut r = ""
+    let mut o = l.v.get(i)
+    while let Some(e) = o {
+        r = e + ""
+        o = None
+    }
+    return r
+}
+
+fn _par_en(p: Pares, i: i32) -> Par {
+    let mut r = Par { nombre: "", valor: "" }
+    let mut o = p.v.get(i)
+    while let Some(e) = o {
+        r = Par { nombre: e.nombre + "", valor: e.valor + "" }
+        o = None
+    }
+    return r
+}
+
+fn _limpiar(s: str) -> str {
+    let mut r = ""
+    let mut inicio = true
+    for i in 0..len(s) {
+        let c = s[i]
+        let k = ord(c)
+        let saltar = k == 9 or k == 10 or k == 13 or (inicio and k <= 32)
+        if not saltar {
+            inicio = false
+            r = r + c
+        }
+    }
+    return r
+}
+
+fn _es_letra_ascii(k: i32) -> bool {
+    return (k >= 65 and k <= 90) or (k >= 97 and k <= 122)
+}
+
+fn _es_cifra(k: i32) -> bool {
+    return k >= 48 and k <= 57
+}
+
+# Texto en minúsculas solo para ASCII (el esquema y el nombre del servidor).
+fn _bajar(s: str) -> str {
+    let mut r = ""
+    for i in 0..len(s) {
+        let c = s[i]
+        let k = ord(c)
+        if k >= 65 and k <= 90 {
+            r = r + chr(k + 32)
+        } else {
+            r = r + c
+        }
+    }
+    return r
+}
+
+# Un esquema válido de la posición 0 a i: letra y luego letras, cifras, + - .
+fn _esquema_valido(s: str, i: i32) -> bool {
+    if i <= 0 {
+        return false
+    }
+    if not _es_letra_ascii(ord(s[0])) {
+        return false
+    }
+    for j in 0..i {
+        let k = ord(s[j])
+        let bien = _es_letra_ascii(k) or _es_cifra(k) or k == 43 or k == 45 or k == 46
+        if not bien {
+            return false
+        }
+    }
+    return true
+}
+
+fn _todo_digitos(t: str) -> bool {
+    if len(t) == 0 {
+        return false
+    }
+    for i in 0..len(t) {
+        if not _es_cifra(ord(t[i])) {
+            return false
+        }
+    }
+    return true
+}
+
+fn _ipv4_ok(t: str) -> bool {
+    let o = Lista { v: texto.dividir(t, ".") }
+    if o.v.len() != 4 {
+        return false
+    }
+    for i in 0..4 {
+        let x = _en(o, i)
+        if not _todo_digitos(x) or len(x) > 3 {
+            return false
+        }
+        if len(x) > 1 and x[0] == "0" {
+            return false
+        }
+        let mut v = 0
+        for j in 0..len(x) {
+            v = v * 10 + ord(x[j]) - 48
+        }
+        if v > 255 {
+            return false
+        }
+    }
+    return true
+}
+
+fn _hextet_ok(t: str) -> bool {
+    if len(t) == 0 or len(t) > 4 {
+        return false
+    }
+    for i in 0..len(t) {
+        if _valor_hex(ord(t[i])) < 0 {
+            return false
+        }
+    }
+    return true
+}
+
+# ¿Es una dirección IPv6 válida, como la entiende ipaddress de Python (con ::, una IPv4 al
+# final y una zona %algo)?
+fn _ipv6_ok(s: str) -> bool {
+    let mut a = s + ""
+    let z = texto.buscar(s, "%")
+    if z >= 0 {
+        let zona = texto.subtexto(s, z + 1, len(s))
+        if len(zona) == 0 or zona.contains("%") {
+            return false
+        }
+        a = texto.subtexto(s, 0, z)
+    }
+    let crudas = Lista { v: texto.dividir(a, ":") }
+    let mut n = crudas.v.len()
+    if n < 3 {
+        return false
+    }
+    let partes = Lista { v: vec_new() }
+    for i in 0..n {
+        partes.v.push(_en(crudas, i))
+    }
+    let ultima = _en(partes, n - 1)
+    if ultima.contains(".") {
+        if not _ipv4_ok(ultima) {
+            return false
+        }
+        partes.v.pop()
+        partes.v.push("0")
+        partes.v.push("0")
+        n = n + 1
+    }
+    if n > 9 {
+        return false
+    }
+    let mut salto = -1
+    for i in 1..n - 1 {
+        if _en(partes, i) == "" {
+            if salto >= 0 {
+                return false
+            }
+            salto = i
+        }
+    }
+    let mut alto = n
+    let mut bajo = 0
+    if salto >= 0 {
+        alto = salto
+        bajo = n - salto - 1
+        if _en(partes, 0) == "" {
+            alto = alto - 1
+            if alto > 0 {
+                return false
+            }
+        }
+        if _en(partes, n - 1) == "" {
+            bajo = bajo - 1
+            if bajo > 0 {
+                return false
+            }
+        }
+        if 8 - (alto + bajo) < 1 {
+            return false
+        }
+    } else {
+        if n != 8 or _en(partes, 0) == "" or _en(partes, n - 1) == "" {
+            return false
+        }
+    }
+    for i in 0..alto {
+        if not _hextet_ok(_en(partes, i)) {
+            return false
+        }
+    }
+    for i in 0..bajo {
+        if not _hextet_ok(_en(partes, n - bajo + i)) {
+            return false
+        }
+    }
+    return true
+}
+
+# Lo que urlsplit comprueba cuando la autoridad trae [ y ] (_check_bracketed_netloc).
+fn _autoridad_ok(a: str) -> bool {
+    let hp = _despues_de_arroba(a)
+    let ab = texto.buscar(hp, "[")
+    let mut nombre = ""
+    if ab >= 0 {
+        if ab > 0 {
+            return false
+        }
+        let c = texto.buscar(hp, "]")
+        let mut resto = ""
+        if c >= 0 {
+            nombre = texto.subtexto(hp, 1, c)
+            resto = texto.subtexto(hp, c + 1, len(hp))
+        } else {
+            nombre = texto.subtexto(hp, 1, len(hp))
+        }
+        if len(resto) > 0 and resto[0] != ":" {
+            return false
+        }
+    } else {
+        let c = texto.buscar(hp, ":")
+        if c >= 0 {
+            nombre = texto.subtexto(hp, 0, c)
+        } else {
+            nombre = hp + ""
+        }
+    }
+    if len(nombre) > 0 and (nombre[0] == "v" or nombre[0] == "V") {
+        let p = texto.buscar(nombre, ".")
+        if p < 2 or p + 1 >= len(nombre) {
+            return false
+        }
+        for i in 1..p {
+            if _valor_hex(ord(nombre[i])) < 0 {
+                return false
+            }
+        }
+        return true
+    }
+    return _ipv6_ok(nombre)
+}
+
+fn _primero_de(s: str, desde: i32, marcas: str) -> i32 {
+    let mut fin = len(s)
+    for m in 0..len(marcas) {
+        let p = texto.buscar_desde(s, marcas[m], desde)
+        if p >= 0 and p < fin {
+            fin = p
+        }
+    }
+    return fin
+}
+
+# Parte una URL en esquema, autoridad, ruta, consulta y fragmento (urlsplit). Err si hay un
+# [ sin ] o al revés en la autoridad.
+fn analizar(s: str) -> Result<Url> {
+    let mut resto = _limpiar(s)
+    let mut esquema = ""
+    let i = texto.buscar(resto, ":")
+    if _esquema_valido(resto, i) {
+        esquema = _bajar(texto.subtexto(resto, 0, i))
+        resto = texto.subtexto(resto, i + 1, len(resto))
+    }
+    let mut autoridad = ""
+    if texto.empieza(resto, "//") {
+        let fin = _primero_de(resto, 2, "/?#")
+        autoridad = texto.subtexto(resto, 2, fin)
+        resto = texto.subtexto(resto, fin, len(resto))
+        let ab = autoridad.contains("[")
+        let ce = autoridad.contains("]")
+        if ab != ce or (ab and not _autoridad_ok(autoridad)) {
+            return Err("web: URL con IPv6 mal escrita: " + s)
+        }
+    }
+    let mut fragmento = ""
+    let h = texto.buscar(resto, "#")
+    if h >= 0 {
+        fragmento = texto.subtexto(resto, h + 1, len(resto))
+        resto = texto.subtexto(resto, 0, h)
+    }
+    let mut consulta = ""
+    let q = texto.buscar(resto, "?")
+    if q >= 0 {
+        consulta = texto.subtexto(resto, q + 1, len(resto))
+        resto = texto.subtexto(resto, 0, q)
+    }
+    return Ok(Url { esquema: esquema, autoridad: autoridad, ruta: resto, consulta: consulta, fragmento: fragmento })
+}
+
+fn _usa_autoridad(e: str) -> bool {
+    let lista = "||ftp|http|gopher|nntp|telnet|imap|wais|file|mms|https|shttp|snews|prospero|rtsp|rtsps|rtspu|rsync|svn|svn+ssh|sftp|nfs|git|git+ssh|ws|wss|itms-services|"
+    return lista.contains("|" + e + "|")
+}
+
+fn _es_relativo(e: str) -> bool {
+    let lista = "||ftp|http|gopher|nntp|imap|wais|file|https|shttp|mms|prospero|rtsp|rtsps|rtspu|sftp|svn|svn+ssh|ws|wss|"
+    return lista.contains("|" + e + "|")
+}
+
+# Junta las partes en una URL (urlunsplit): se pierde un ? o un # sin nada detrás.
+fn armar(u: Url) -> str {
+    let mut ruta = u.ruta
+    if len(u.autoridad) > 0 {
+        if len(ruta) > 0 and not texto.empieza(ruta, "/") {
+            ruta = "/" + ruta
+        }
+        ruta = "//" + u.autoridad + ruta
+    } else if texto.empieza(ruta, "//") {
+        ruta = "//" + ruta
+    } else if len(u.esquema) > 0 and _usa_autoridad(u.esquema) and (len(ruta) == 0 or texto.empieza(ruta, "/")) {
+        ruta = "//" + ruta
+    }
+    let mut r = ruta
+    if len(u.esquema) > 0 {
+        r = u.esquema + ":" + r
+    }
+    if len(u.consulta) > 0 {
+        r = r + "?" + u.consulta
+    }
+    if len(u.fragmento) > 0 {
+        r = r + "#" + u.fragmento
+    }
+    return r
+}
+
+# La autoridad sin el usuario: host:puerto.
+fn _despues_de_arroba(a: str) -> str {
+    let mut p = -1
+    for i in 0..len(a) {
+        if a[i] == "@" {
+            p = i
+        }
+    }
+    if p < 0 {
+        return a
+    }
+    return texto.subtexto(a, p + 1, len(a))
+}
+
+fn _antes_de_arroba(a: str) -> str {
+    let mut p = -1
+    for i in 0..len(a) {
+        if a[i] == "@" {
+            p = i
+        }
+    }
+    if p < 0 {
+        return ""
+    }
+    return texto.subtexto(a, 0, p)
+}
+
+# La posición del ":" que separa el puerto en host:puerto, o -1 (no cuenta el de una IPv6).
+fn _dos_puntos_puerto(h: str) -> i32 {
+    let mut dentro = false
+    for i in 0..len(h) {
+        let c = h[i]
+        if c == "[" {
+            dentro = true
+        }
+        if c == "]" {
+            dentro = false
+        }
+        if c == ":" and not dentro {
+            return i
+        }
+    }
+    return -1
+}
+
+# El nombre del servidor, en minúsculas y sin los [ ] de una IPv6 (u.hostname de Python).
+# "" si no hay.
+fn host(u: Url) -> str {
+    let h = _despues_de_arroba(u.autoridad)
+    let p = _dos_puntos_puerto(h)
+    let mut nombre = h + ""
+    if p >= 0 {
+        nombre = texto.subtexto(h, 0, p)
+    }
+    if texto.empieza(nombre, "[") {
+        let c = texto.buscar(nombre, "]")
+        if c > 0 {
+            nombre = texto.subtexto(nombre, 1, c)
+        }
+    }
+    let z = texto.buscar(nombre, "%")
+    if z >= 0 {
+        return _bajar(texto.subtexto(nombre, 0, z)) + texto.subtexto(nombre, z, len(nombre))
+    }
+    return _bajar(nombre)
+}
+
+# El puerto: -1 si no hay, -2 si está mal escrito o pasa de 65535 (u.port de Python).
+fn puerto(u: Url) -> i32 {
+    let h = _despues_de_arroba(u.autoridad)
+    let p = _dos_puntos_puerto(h)
+    if p < 0 {
+        return -1
+    }
+    let t = texto.subtexto(h, p + 1, len(h))
+    if len(t) == 0 {
+        return -1
+    }
+    let mut n = 0
+    for i in 0..len(t) {
+        let k = ord(t[i])
+        if not _es_cifra(k) or n > 100000 {
+            return -2
+        }
+        n = n * 10 + k - 48
+    }
+    if n > 65535 {
+        return -2
+    }
+    return n
+}
+
+fn usuario(u: Url) -> str {
+    let a = _antes_de_arroba(u.autoridad)
+    let p = texto.buscar(a, ":")
+    if p < 0 {
+        return a
+    }
+    return texto.subtexto(a, 0, p)
+}
+
+fn clave(u: Url) -> str {
+    let a = _antes_de_arroba(u.autoridad)
+    let p = texto.buscar(a, ":")
+    if p < 0 {
+        return ""
+    }
+    return texto.subtexto(a, p + 1, len(a))
+}
+
+# Resuelve `ref` contra `base` (urljoin): "../z" contra "http://a.cl/x/y.html" da
+# "http://a.cl/z". No separa los ;parámetros de la ruta.
+fn unir(base: str, ref: str) -> str {
+    if len(base) == 0 {
+        return ref
+    }
+    if len(ref) == 0 {
+        return base
+    }
+    let mut b = Url { esquema: "", autoridad: "", ruta: "", consulta: "", fragmento: "" }
+    match analizar(base) {
+        Ok(x) => {
+            b = x
+        }
+        Err(e) => {
+            return ref
+        }
+    }
+    let mut r = Url { esquema: "", autoridad: "", ruta: "", consulta: "", fragmento: "" }
+    match analizar(ref) {
+        Ok(x) => {
+            r = x
+        }
+        Err(e) => {
+            return ref
+        }
+    }
+    if len(r.esquema) == 0 {
+        r.esquema = b.esquema
+    }
+    if r.esquema != b.esquema or not _es_relativo(r.esquema) {
+        return ref
+    }
+    if _usa_autoridad(r.esquema) {
+        if len(r.autoridad) > 0 {
+            return armar(r)
+        }
+        r.autoridad = b.autoridad
+    }
+    if len(r.ruta) == 0 {
+        r.ruta = b.ruta
+        if len(r.consulta) == 0 {
+            r.consulta = b.consulta
+        }
+        return armar(r)
+    }
+    let base_partes = Lista { v: texto.dividir(b.ruta, "/") }
+    if _en(base_partes, base_partes.v.len() - 1) != "" {
+        base_partes.v.pop()
+    }
+    let segmentos = Lista { v: vec_new() }
+    if texto.empieza(r.ruta, "/") {
+        segmentos.v = texto.dividir(r.ruta, "/")
+    } else {
+        let todos = Lista { v: texto.dividir(r.ruta, "/") }
+        let juntos = Lista { v: vec_new() }
+        for i in 0..base_partes.v.len() {
+            juntos.v.push(_en(base_partes, i))
+        }
+        for i in 0..todos.v.len() {
+            juntos.v.push(_en(todos, i))
+        }
+        # se tiran los vacíos del medio (no el primero ni el último)
+        let n = juntos.v.len()
+        for i in 0..n {
+            let s = _en(juntos, i)
+            if i == 0 or i == n - 1 or len(s) > 0 {
+                segmentos.v.push(s)
+            }
+        }
+    }
+    let resuelto = Lista { v: vec_new() }
+    for i in 0..segmentos.v.len() {
+        let s = _en(segmentos, i)
+        if s == ".." {
+            resuelto.v.pop()
+        }
+        if s != ".." and s != "." {
+            resuelto.v.push(s)
+        }
+    }
+    let ultimo = _en(segmentos, segmentos.v.len() - 1)
+    if ultimo == "." or ultimo == ".." {
+        resuelto.v.push("")
+    }
+    let mut ruta = texto.unir(resuelto.v, "/")
+    if len(ruta) == 0 {
+        ruta = "/"
+    }
+    r.ruta = ruta
+    return armar(r)
+}
+
+# ---------- consulta (?a=1&b=2) ----------
+
+fn _valor_hex(k: i32) -> i32 {
+    if k >= 48 and k <= 57 {
+        return k - 48
+    }
+    if k >= 65 and k <= 70 {
+        return k - 55
+    }
+    if k >= 97 and k <= 102 {
+        return k - 87
+    }
+    return -1
+}
+
+# Como unquote_plus de Python: + es espacio y un % sin dos cifras hexadecimales se deja
+# tal cual. Si el resultado no es UTF-8 válido se devuelve el texto sin tocar.
+fn _desescapar(s: str) -> str {
+    let d = codigos.vacio()
+    let n = len(s)
+    let mut i = 0
+    while i < n {
+        let c = s[i]
+        if c == "%" and i + 2 < n and _valor_hex(ord(s[i + 1])) >= 0 and _valor_hex(ord(s[i + 2])) >= 0 {
+            d.v.push(_valor_hex(ord(s[i + 1])) * 16 + _valor_hex(ord(s[i + 2])))
+            i = i + 3
+        } else if c == "+" {
+            d.v.push(32)
+            i = i + 1
+        } else {
+            let k = codigos.de_texto(c)
+            let mut j = 0
+            while j < k.v.len() {
+                let mut o = k.v.get(j)
+                while let Some(x) = o {
+                    d.v.push(x)
+                    o = None
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+    }
+    match codigos.a_cadena(d) {
+        Ok(t) => {
+            return t
+        }
+        Err(e) => {
+            return s + ""
+        }
+    }
+    return s + ""
+}
+
+fn pares() -> Pares {
+    return Pares { v: vec_new() }
+}
+
+fn poner(p: Pares, nombre: str, valor: str) {
+    p.v.push(Par { nombre: nombre, valor: valor })
+}
+
+fn cantidad(p: Pares) -> i32 {
+    return p.v.len()
+}
+
+fn nombre_en(p: Pares, i: i32) -> str {
+    return _par_en(p, i).nombre
+}
+
+fn valor_en(p: Pares, i: i32) -> str {
+    return _par_en(p, i).valor
+}
+
+# Los pares nombre=valor de una consulta (parse_qsl). Con `conservar_vacios`, "a=" y "a" dan
+# un par con valor "" (sin eso se saltan).
+fn consulta_leer(qs: str, conservar_vacios: bool) -> Pares {
+    let r = pares()
+    if len(qs) == 0 {
+        return r
+    }
+    let trozos = Lista { v: texto.dividir(qs, "&") }
+    for i in 0..trozos.v.len() {
+        let t = _en(trozos, i)
+        if len(t) > 0 {
+            let e = texto.buscar(t, "=")
+            let mut nombre = t + ""
+            let mut valor = ""
+            if e >= 0 {
+                nombre = texto.subtexto(t, 0, e)
+                valor = texto.subtexto(t, e + 1, len(t))
+            }
+            if len(valor) > 0 or conservar_vacios {
+                poner(r, _desescapar(nombre), _desescapar(valor))
+            }
+        }
+    }
+    return r
+}
+
+# nombre=valor&nombre=valor con el escape de formularios (urlencode: espacio como +).
+fn consulta_armar(p: Pares) -> str {
+    let partes = Lista { v: vec_new() }
+    for i in 0..p.v.len() {
+        let x = _par_en(p, i)
+        partes.v.push(codigos.url_codificar(x.nombre, true) + "=" + codigos.url_codificar(x.valor, true))
+    }
+    return texto.unir(partes.v, "&")
+}
+
+# El primer valor de `nombre` en una consulta, o `defecto`.
+fn consulta_valor(qs: str, nombre: str, defecto: str) -> str {
+    let l = consulta_leer(qs, true)
+    for i in 0..l.v.len() {
+        let x = _par_en(l, i)
+        if x.nombre == nombre {
+            return x.valor
+        }
+    }
+    return defecto + ""
+}
+
+# Agrega pares a la consulta de una URL: con_consulta("http://a.cl/x?y=1", p) da
+# "http://a.cl/x?y=1&z=2" si p tiene z=2.
+fn con_consulta(url: str, p: Pares) -> Result<str> {
+    let mut u = analizar(url)?
+    let extra = consulta_armar(p)
+    if len(extra) > 0 {
+        if len(u.consulta) > 0 {
+            u.consulta = u.consulta + "&" + extra
+        } else {
+            u.consulta = extra
+        }
+    }
+    return Ok(armar(u))
+}
+
+# ---------- cliente HTTP ----------
+
+struct Respuesta {
+    codigo: i32
+    motivo: str
+    cabeceras: Pares
+    cuerpo: codigos.Datos
+    url: str
+}
+
+# Las opciones de un pedido: cabeceras que se agregan, cuántas veces se reintenta (con una
+# espera de `pausa` segundos que se duplica cada vez) y cuántas redirecciones se siguen.
+struct Opciones {
+    cabeceras: Pares
+    reintentos: i32
+    pausa: f64
+    redirecciones: i32
+}
+
+fn opciones() -> Opciones {
+    return Opciones { cabeceras: pares(), reintentos: 0, pausa: 0.2, redirecciones: 5 }
+}
+
+fn cabecera(o: Opciones, nombre: str, valor: str) {
+    o.cabeceras.v.push(Par { nombre: nombre, valor: valor })
+}
+
+fn _byte(d: codigos.Datos, i: i32) -> i32 {
+    let mut r = -1
+    let mut o = d.v.get(i)
+    while let Some(x) = o {
+        r = x
+        o = None
+    }
+    return r
+}
+
+fn _rebanada(d: codigos.Datos, a: i32, b: i32) -> codigos.Datos {
+    let r = codigos.vacio()
+    let mut i = a
+    while i < b {
+        r.v.push(_byte(d, i))
+        i = i + 1
+    }
+    return r
+}
+
+# Los bytes como texto: UTF-8 si lo es y, si no, un carácter por byte (solo ASCII).
+fn _texto_de(d: codigos.Datos) -> str {
+    match codigos.a_cadena(d) {
+        Ok(t) => {
+            return t
+        }
+        Err(e) => {
+            let mut r = ""
+            for i in 0..d.v.len() {
+                let b = _byte(d, i)
+                if b > 0 and b < 128 {
+                    r = r + chr(b)
+                } else {
+                    r = r + "?"
+                }
+            }
+            return r
+        }
+    }
+    return ""
+}
+
+# El valor de la primera cabecera con ese nombre (sin distinguir mayúsculas), o "".
+fn _valor_de(p: Pares, nombre: str) -> str {
+    let n = _bajar(nombre)
+    for i in 0..p.v.len() {
+        let x = _par_en(p, i)
+        if _bajar(x.nombre) == n {
+            return x.valor
+        }
+    }
+    return ""
+}
+
+fn _tiene(p: Pares, nombre: str) -> bool {
+    let n = _bajar(nombre)
+    for i in 0..p.v.len() {
+        if _bajar(_par_en(p, i).nombre) == n {
+            return true
+        }
+    }
+    return false
+}
+
+fn cabecera_de(r: Respuesta, nombre: str) -> str {
+    return _valor_de(r.cabeceras, nombre)
+}
+
+fn _entero(t: str) -> i32 {
+    if not _todo_digitos(t) or len(t) > 9 {
+        return -1
+    }
+    let mut v = 0
+    for i in 0..len(t) {
+        v = v * 10 + ord(t[i]) - 48
+    }
+    return v
+}
+
+struct Cabecera {
+    codigo: i32
+    motivo: str
+    pares: Pares
+}
+
+fn _leer_cabecera(d: codigos.Datos, fin: i32) -> Result<Cabecera> {
+    let lineas = Lista { v: texto.lineas(_texto_de(_rebanada(d, 0, fin))) }
+    let estado = _en(lineas, 0)
+    let partes = Lista { v: texto.dividir(estado, " ") }
+    if partes.v.len() < 2 or not texto.empieza(_en(partes, 0), "HTTP/") {
+        return Err("web: respuesta que no es HTTP: " + estado)
+    }
+    let codigo = _entero(_en(partes, 1))
+    if codigo < 100 or codigo > 999 {
+        return Err("web: código de respuesta inválido: " + estado)
+    }
+    let mut motivo = ""
+    let p1 = texto.buscar(estado, " ")
+    let p2 = texto.buscar_desde(estado, " ", p1 + 1)
+    if p2 >= 0 {
+        motivo = texto.subtexto(estado, p2 + 1, len(estado))
+    }
+    let ps = pares()
+    for i in 1..lineas.v.len() {
+        let l = _en(lineas, i)
+        let c = texto.buscar(l, ":")
+        if c > 0 {
+            poner(ps, texto.subtexto(l, 0, c), texto.recortar(texto.subtexto(l, c + 1, len(l))))
+        }
+    }
+    return Ok(Cabecera { codigo: codigo, motivo: motivo, pares: ps })
+}
+
+# Lee un byte del socket. Err("EOF") si el servidor cerró.
+fn _leer_byte(s: Socket) -> Result<i32> {
+    let v = s.read_bytes(1)?
+    let mut r = -1
+    let mut o = v.get(0)
+    while let Some(x) = o {
+        r = x
+        o = None
+    }
+    return Ok(r)
+}
+
+# Lee exactamente n bytes y los agrega a d. read_bytes espera los n completos (si el otro
+# lado cierra antes da Err("EOF") y se pierde lo parcial), por eso se pide en bloques.
+fn _leer_exacto(s: Socket, n: i32, d: codigos.Datos) -> Result<i32> {
+    let mut falta = n
+    while falta > 0 {
+        let mut pedir = falta
+        if pedir > 65536 {
+            pedir = 65536
+        }
+        let v = s.read_bytes(pedir)?
+        let mut i = 0
+        while i < v.len() {
+            let mut o = v.get(i)
+            while let Some(x) = o {
+                d.v.push(x)
+                o = None
+            }
+            i = i + 1
+        }
+        falta = falta - pedir
+    }
+    return Ok(n)
+}
+
+# Una línea (hasta el \n, sin el \r), o Err("EOF") si se cierra antes.
+fn _leer_linea(s: Socket) -> Result<str> {
+    let d = codigos.vacio()
+    let mut c = _leer_byte(s)?
+    while c != 10 {
+        if c != 13 {
+            d.v.push(c)
+        }
+        if d.v.len() > 65536 {
+            return Err("web: línea demasiado larga")
+        }
+        c = _leer_byte(s)?
+    }
+    return Ok(_texto_de(d))
+}
+
+# La cabecera de la respuesta: bytes hasta la línea vacía (\r\n\r\n o \n\n).
+fn _leer_cabecera_bytes(s: Socket) -> Result<codigos.Datos> {
+    let d = codigos.vacio()
+    let mut seguir = true
+    while seguir {
+        d.v.push(_leer_byte(s)?)
+        let n = d.v.len()
+        if n >= 2 and _byte(d, n - 1) == 10 and _byte(d, n - 2) == 10 {
+            seguir = false
+        }
+        if n >= 4 and _byte(d, n - 1) == 10 and _byte(d, n - 2) == 13 and _byte(d, n - 3) == 10 and _byte(d, n - 4) == 13 {
+            seguir = false
+        }
+        if n > 65536 {
+            return Err("web: la cabecera de la respuesta es demasiado grande")
+        }
+    }
+    return Ok(d)
+}
+
+# El cuerpo por trozos: tamaño en hexadecimal (con extensión opcional), datos, salto; el
+# último trozo es 0 y detrás pueden venir cabeceras finales hasta una línea vacía.
+fn _leer_trozos(s: Socket, d: codigos.Datos) -> Result<i32> {
+    let mut hecho = false
+    while not hecho {
+        let l = _leer_linea(s)?
+        let mut t = l + ""
+        let pc = texto.buscar(l, ";")
+        if pc >= 0 {
+            t = texto.subtexto(l, 0, pc)
+        }
+        t = texto.recortar(t)
+        if len(t) == 0 or len(t) > 7 {
+            return Err("web: tamaño de trozo inválido")
+        }
+        let mut tam = 0
+        for i in 0..len(t) {
+            let v = _valor_hex(ord(t[i]))
+            if v < 0 {
+                return Err("web: tamaño de trozo inválido")
+            }
+            tam = tam * 16 + v
+        }
+        if tam == 0 {
+            let mut fin = false
+            while not fin {
+                if len(_leer_linea(s)?) == 0 {
+                    fin = true
+                }
+            }
+            hecho = true
+        } else {
+            _leer_exacto(s, tam, d)?
+            if len(_leer_linea(s)?) > 0 {
+                return Err("web: falta el salto después de un trozo")
+            }
+        }
+    }
+    return Ok(0)
+}
+
+fn _con_cuerpo(metodo: str) -> bool {
+    return metodo == "POST" or metodo == "PUT" or metodo == "PATCH"
+}
+
+fn _limpio(t: str) -> bool {
+    return not t.contains("\r") and not t.contains("\n")
+}
+
+# Un pedido, sin reintentos ni redirecciones. Un Err que empieza con "conexión:" es que no
+# se pudo ni conectar (se puede repetir sin miedo, aunque sea un POST).
+fn _un_pedido(metodo: str, url: str, o: Opciones, cuerpo: codigos.Datos) -> Result<Respuesta> {
+    let u = analizar(url)?
+    if u.esquema == "https" {
+        return Err("web: https no está disponible (SCAR no trae TLS; native/scarhttp.c, con libcurl, sí lo hace): " + url)
+    }
+    if u.esquema != "http" {
+        return Err("web: esquema no soportado '" + u.esquema + "' en " + url)
+    }
+    let h = host(u)
+    if len(h) == 0 {
+        return Err("web: la URL no tiene servidor: " + url)
+    }
+    let mut pto = puerto(u)
+    if pto == -2 {
+        return Err("web: puerto inválido en " + url)
+    }
+    if pto == -1 {
+        pto = 80
+    }
+    let mut destino = u.ruta + ""
+    if len(destino) == 0 {
+        destino = "/"
+    }
+    if len(u.consulta) > 0 {
+        destino = destino + "?" + u.consulta
+    }
+    if destino.contains(" ") {
+        return Err("web: la URL tiene un espacio (hay que escaparlo): " + url)
+    }
+    if not _limpio(metodo) or metodo.contains(" ") or len(metodo) == 0 {
+        return Err("web: método inválido")
+    }
+    let mut cabtxt = ""
+    for i in 0..o.cabeceras.v.len() {
+        let x = _par_en(o.cabeceras, i)
+        if not _limpio(x.nombre) or not _limpio(x.valor) or len(x.nombre) == 0 or x.nombre.contains(":") {
+            return Err("web: cabecera inválida: " + x.nombre)
+        }
+        cabtxt = cabtxt + x.nombre + ": " + x.valor + "\r\n"
+    }
+    if not _tiene(o.cabeceras, "User-Agent") {
+        cabtxt = cabtxt + "User-Agent: scar-web/1.0\r\n"
+    }
+    if not _tiene(o.cabeceras, "Accept") {
+        cabtxt = cabtxt + "Accept: */*\r\n"
+    }
+    if cuerpo.v.len() > 0 or _con_cuerpo(metodo) {
+        cabtxt = cabtxt + "Content-Length: " + a_texto(cuerpo.v.len()) + "\r\n"
+    }
+    let pedido = metodo + " " + destino + " HTTP/1.1\r\nHost: " + _despues_de_arroba(u.autoridad) + "\r\n" + cabtxt + "Accept-Encoding: identity\r\nConnection: close\r\n\r\n"
+    # sin conexión se reintenta (el servidor puede estar arrancando), con la espera de `o`
+    let mut rs = tcp_connect(h, pto)
+    let mut intento = 0
+    while rs.is_err() and intento < o.reintentos {
+        sleep(o.pausa * to_f64(1 << min(intento, 5)))
+        rs = tcp_connect(h, pto)
+        intento = intento + 1
+    }
+    if rs.is_err() {
+        return Err("conexión: " + rs.err())
+    }
+    let s = rs?
+    s.write(pedido)?
+    if cuerpo.v.len() > 0 {
+        let copia = codigos.copia(cuerpo)
+        s.write_bytes(copia.v)?
+    }
+    let rc = _leer_cabecera_bytes(s)
+    if rc.is_err() {
+        s.close()
+        if rc.err() == "EOF" {
+            return Err("web: el servidor cerró sin responder")
+        }
+        return Err("web: error al leer: " + rc.err())
+    }
+    let bytes_cab = rc?
+    let cab_r = _leer_cabecera(bytes_cab, bytes_cab.v.len())?
+    let c = cab_r.codigo
+    let cuerpo_r = codigos.vacio()
+    let mut fallo = ""
+    if not (metodo == "HEAD" or c < 200 or c == 204 or c == 304) {
+        if _bajar(_valor_de(cab_r.pares, "Transfer-Encoding")).contains("chunked") {
+            let rt = _leer_trozos(s, cuerpo_r)
+            if rt.is_err() {
+                fallo = rt.err()
+            }
+        } else if _tiene(cab_r.pares, "Content-Length") {
+            let largo = _entero(texto.recortar(_valor_de(cab_r.pares, "Content-Length")))
+            if largo < 0 {
+                s.close()
+                return Err("web: Content-Length inválido")
+            }
+            if largo > 536870912 {
+                s.close()
+                return Err("web: respuesta demasiado grande")
+            }
+            let rt = _leer_exacto(s, largo, cuerpo_r)
+            if rt.is_err() {
+                fallo = rt.err()
+            }
+        } else {
+            # sin largo: hasta que el servidor cierre (de a un byte, que read_bytes pide exactos)
+            let mut seguir = true
+            while seguir {
+                let rb = _leer_byte(s)
+                if rb.is_err() {
+                    seguir = false
+                    if rb.err() != "EOF" {
+                        fallo = rb.err()
+                    }
+                } else {
+                    cuerpo_r.v.push(rb?)
+                }
+            }
+        }
+    }
+    s.close()
+    if len(fallo) > 0 {
+        if fallo == "EOF" {
+            return Err("web: respuesta incompleta (el servidor cerró antes de terminar el cuerpo)")
+        }
+        if texto.empieza(fallo, "web:") {
+            return Err(fallo)
+        }
+        return Err("web: error al leer: " + fallo)
+    }
+    return Ok(Respuesta { codigo: cab_r.codigo, motivo: cab_r.motivo, cabeceras: cab_r.pares, cuerpo: cuerpo_r, url: url + "" })
+}
+
+fn _repetible(metodo: str) -> bool {
+    return metodo == "GET" or metodo == "HEAD" or metodo == "PUT" or metodo == "DELETE" or metodo == "OPTIONS"
+}
+
+fn _con_reintentos(metodo: str, url: str, o: Opciones, cuerpo: codigos.Datos) -> Result<Respuesta> {
+    let mut k = 0
+    let mut x = _un_pedido(metodo, url, o, cuerpo)?
+    while (x.codigo == 502 or x.codigo == 503 or x.codigo == 504) and _repetible(metodo) and k < o.reintentos {
+        sleep(o.pausa * to_f64(1 << min(k, 5)))
+        k = k + 1
+        x = _un_pedido(metodo, url, o, cuerpo)?
+    }
+    return Ok(x)
+}
+
+# Copia las opciones; con `sin_secretos` quita Authorization y Cookie (un cambio de servidor) y
+# con `sin_tipo` quita Content-Type y Content-Length (un pedido que pasa a ser GET).
+fn _copiar(o: Opciones, sin_secretos: bool, sin_tipo: bool) -> Opciones {
+    let r = opciones()
+    r.reintentos = o.reintentos
+    r.pausa = o.pausa
+    r.redirecciones = o.redirecciones
+    for i in 0..o.cabeceras.v.len() {
+        let x = _par_en(o.cabeceras, i)
+        let n = _bajar(x.nombre)
+        let secreto = sin_secretos and (n == "authorization" or n == "cookie")
+        let tipo = sin_tipo and (n == "content-type" or n == "content-length")
+        if not secreto and not tipo {
+            poner(r.cabeceras, x.nombre, x.valor)
+        }
+    }
+    return r
+}
+
+fn _seguir(metodo: str, url: str, o: Opciones, cuerpo: codigos.Datos) -> Result<Respuesta> {
+    let mut m = metodo + ""
+    let mut u = url + ""
+    let mut oo = _copiar(o, false, false)
+    let mut cu = codigos.copia(cuerpo)
+    let mut vuelta = 0
+    let mut r = _con_reintentos(m, u, oo, cu)?
+    let mut seguir = true
+    while seguir {
+        let c = r.codigo
+        let sitio = c == 301 or c == 302 or c == 303 or c == 307 or c == 308
+        let destino = _valor_de(r.cabeceras, "Location")
+        if not sitio or len(destino) == 0 or o.redirecciones <= 0 {
+            seguir = false
+        } else {
+            if vuelta >= o.redirecciones {
+                return Err("web: demasiadas redirecciones (" + a_texto(o.redirecciones) + ") desde " + url)
+            }
+            let nueva = unir(u, destino)
+            let a = analizar(u)?
+            let b = analizar(nueva)?
+            let cambia = host(a) != host(b) or puerto(a) != puerto(b) or a.esquema != b.esquema
+            if c == 307 or c == 308 {
+                let o2 = _copiar(oo, cambia, false)
+                oo = o2
+            } else {
+                let o2 = _copiar(oo, cambia, true)
+                oo = o2
+                cu = codigos.vacio()
+                if m != "HEAD" {
+                    m = "GET"
+                }
+            }
+            u = nueva
+            r = _con_reintentos(m, u, oo, cu)?
+            vuelta = vuelta + 1
+        }
+    }
+    return Ok(r)
+}
+
+# Un pedido con el método, la URL, las opciones y un cuerpo (bytes; vacío si no hay).
+# Sigue redirecciones y reintenta según `o`. Err solo si no hubo respuesta: un 404 o un 500
+# llegan como Ok con su código.
+fn enviar(metodo: str, url: str, o: Opciones, cuerpo: codigos.Datos) -> Result<Respuesta> {
+    return _seguir(metodo, url, o, cuerpo)
+}
+
+fn obtener_con(url: str, o: Opciones) -> Result<Respuesta> {
+    return enviar("GET", url, o, codigos.vacio())
+}
+
+fn obtener(url: str) -> Result<Respuesta> {
+    return enviar("GET", url, opciones(), codigos.vacio())
+}
+
+# POST de un texto con el Content-Type dado.
+fn enviar_texto(url: str, tipo: str, cuerpo: str, o: Opciones) -> Result<Respuesta> {
+    let o2 = _copiar(o, false, false)
+    if not _tiene(o2.cabeceras, "Content-Type") {
+        cabecera(o2, "Content-Type", tipo)
+    }
+    return enviar("POST", url, o2, codigos.de_texto(cuerpo))
+}
+
+# POST de un documento de lib/json (Content-Type: application/json).
+fn enviar_json(url: str, doc: json.Doc, o: Opciones) -> Result<Respuesta> {
+    return enviar_texto(url, "application/json", json.escribir(doc), o)
+}
+
+# POST de un formulario (application/x-www-form-urlencoded).
+fn enviar_formulario(url: str, p: Pares, o: Opciones) -> Result<Respuesta> {
+    return enviar_texto(url, "application/x-www-form-urlencoded", consulta_armar(p), o)
+}
+
+# El cuerpo como texto (Err si no es UTF-8).
+fn cuerpo_texto(r: Respuesta) -> Result<str> {
+    return codigos.a_cadena(r.cuerpo)
+}
+
+# El cuerpo leído como JSON.
+fn json_de(r: Respuesta) -> Result<json.Doc> {
+    return json.analizar_texto(cuerpo_texto(r)?)
+}
+
+# ¿Salió bien (código 200 a 299)?
+fn exito(r: Respuesta) -> bool {
+    return r.codigo >= 200 and r.codigo < 300
+}

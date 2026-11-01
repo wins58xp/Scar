@@ -1,0 +1,56 @@
+# Capítulo 5: enums, Option, Result y el operador ?.
+#
+#   scar run ejemplos/05_enums_y_errores.scar
+
+enum Pago {
+    Efectivo(i64)
+    Tarjeta(i64, i32)      # monto y número de cuotas
+    Regalo
+}
+
+fn total_a_cobrar(p: Pago) -> i64 {
+    return match p {
+        Efectivo(monto) => monto
+        Tarjeta(monto, cuotas) => monto + monto * to_i64(cuotas) / 100
+        Regalo => 0
+    }
+}
+
+# Result: o un número de mes válido, o por qué no
+fn leer_mes(texto: str) -> Result<i32> {
+    let n = int(texto)?
+    if n < 1 or n > 12 {
+        return Err("el mes va de 1 a 12, no " + texto)
+    }
+    return Ok(n)
+}
+
+# Option: puede que no haya ningún día que sirva
+fn primer_lunes(desde: i32, dia_de_la_semana_del_1: i32) -> Option<i32> {
+    for dia in desde..32 {
+        if (dia_de_la_semana_del_1 + dia - 1) % 7 == 1 {
+            return Some(dia)
+        }
+    }
+    return None
+}
+
+fn main() {
+    print("efectivo:", total_a_cobrar(Efectivo(10000)))
+    print("tarjeta en 6 cuotas:", total_a_cobrar(Tarjeta(10000, 6)))
+    print("regalo:", total_a_cobrar(Regalo))
+
+    match leer_mes("10") {
+        Ok(m) => print("mes", m)
+        Err(e) => print("error:", e)
+    }
+    match leer_mes("13") {
+        Ok(m) => print("mes", m)
+        Err(e) => print("error:", e)
+    }
+
+    match primer_lunes(1, 3) {
+        Some(d) => print("el primer lunes es el", d)
+        None => print("no hay lunes")
+    }
+}

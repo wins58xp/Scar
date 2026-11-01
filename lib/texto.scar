@@ -1,0 +1,882 @@
+# lib/texto.scar: texto (use "texto").
+#
+#   use "texto"
+#
+#   let partes = texto.dividir("uno,dos,,tres", ",")      # ["uno", "dos", "", "tres"]
+#   print(texto.unir(partes, " | "))                     # uno | dos |  | tres
+#   print(texto.mayusculas("año ñandú"))                 # AÑO ÑANDÚ
+#   print(texto.decimales(3.14159, 2))                   # 3.14
+#   print(texto.decimales_miles(1234567.891, 2, ".", ",")) # 1.234.567,89
+#
+# Todo cuenta caracteres, no bytes, igual que len(s) y s[i]: un índice es la
+# posición de un carácter. Cada función hace lo mismo que su par de Python
+# (str.find, split, strip, ljust, f"{x:.2f}"...), comprobado con textos con
+# tildes, ñ y emojis.
+#
+# Límites:
+# - mayusculas/minusculas conocen ASCII, Latin-1 y Latin extendido A
+#   (U+0000-U+017F: el español, el portugués, el francés, el alemán, el polaco,
+#   el checo...), con los casos especiales de Python (ß -> SS, İ -> i̇). El
+#   griego, el cirílico y el resto de Unicode quedan como están.
+# - es_letra/es_digito: ASCII y Latin-1/extendido A; es_espacio: los mismos
+#   espacios que str.isspace() de Python.
+# - El lenguaje no trae subtextos: subtexto arma el pedazo carácter a carácter
+#   (en mitades, para no copiar de más). Para textos de varios MB conviene
+#   recorrerlos una vez, no buscar una y otra vez desde el principio.
+
+# ---- pedazos ---------------------------------------------------------------
+
+fn _pedazo(s: str, desde: i32, hasta: i32) -> str {
+    if hasta - desde <= 24 {
+        let mut r = ""
+        let mut i = desde
+        while i < hasta {
+            r = r + s[i]
+            i = i + 1
+        }
+        return r
+    }
+    let medio = desde + (hasta - desde) / 2
+    return _pedazo(s, desde, medio) + _pedazo(s, medio, hasta)
+}
+
+# Los caracteres de desde a hasta (sin incluir hasta). Los índices se ajustan
+# al texto, como s[desde:hasta] en Python con índices no negativos.
+fn subtexto(s: str, desde: i32, hasta: i32) -> str {
+    let n = len(s)
+    let a = max(0, min(desde, n))
+    let b = max(a, min(hasta, n))
+    return _pedazo(s, a, b)
+}
+
+# Junta una lista de textos de a pares, para no copiar todo en cada paso
+# (con `+` uno por uno, un texto de n caracteres cuesta n² copias). La lista
+# se consume con pop(), que va del final al principio: `invertido` dice si
+# está al revés, y cada nivel la deja al revés del anterior.
+fn _juntar(partes: Vec<str>, invertido: bool) -> str {
+    let mut v = partes
+    let mut inv = invertido
+    while v.len() > 1 {
+        let mut w: Vec<str> = vec_new()
+        while v.len() > 0 {
+            let mut a = ""
+            match v.pop() {
+                Some(x) => { a = x }
+                None => {}
+            }
+            if v.len() > 0 {
+                let mut b = ""
+                match v.pop() {
+                    Some(y) => { b = y }
+                    None => {}
+                }
+                # a salió primero: en una lista al derecho es el de la derecha
+                if inv {
+                    w.push(a + b)
+                } else {
+                    w.push(b + a)
+                }
+            } else {
+                w.push(a)
+            }
+        }
+        v = w
+        inv = not inv
+    }
+    let mut r = ""
+    match v.pop() {
+        Some(x) => { r = x }
+        None => {}
+    }
+    return r
+}
+
+# Los textos de la lista con sep entre cada uno (sep.join(partes) de Python).
+# Como toda fn que recibe un Vec, se queda con la lista.
+fn unir(partes: Vec<str>, sep: str) -> str {
+    let mut p = partes
+    let mut v: Vec<str> = vec_new()
+    let mut primero = true
+    while let Some(x) = p.pop() {
+        if not primero and len(sep) > 0 {
+            v.push(sep)
+        }
+        v.push(x)
+        primero = false
+    }
+    return _juntar(v, true)
+}
+
+# Cada carácter como un texto aparte.
+fn caracteres(s: str) -> Vec<str> {
+    let mut v: Vec<str> = vec_new()
+    for i in 0..len(s) {
+        v.push(s[i])
+    }
+    return v
+}
+
+# Al revés.
+fn invertir(s: str) -> str {
+    let mut v: Vec<str> = vec_new()
+    let mut i = len(s) - 1
+    while i >= 0 {
+        v.push(s[i])
+        i = i - 1
+    }
+    return _juntar(v, false)
+}
+
+# s repetido n veces ("" si n <= 0).
+fn repetir(s: str, n: i32) -> str {
+    if n <= 0 or len(s) == 0 {
+        return ""
+    }
+    let mut v: Vec<str> = vec_new()
+    for i in 0..n {
+        v.push(s)
+    }
+    return _juntar(v, false)
+}
+
+# ---- buscar ----------------------------------------------------------------
+
+fn _coincide(s: str, i: i32, sub: str) -> bool {
+    let m = len(sub)
+    let mut k = 0
+    while k < m {
+        if s[i + k] != sub[k] {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+# La posición de la primera aparición de sub desde la posición desde, o -1
+# (s.find(sub, desde) de Python, con desde >= 0).
+fn buscar_desde(s: str, sub: str, desde: i32) -> i32 {
+    let n = len(s)
+    let m = len(sub)
+    let a = max(desde, 0)
+    if a > n {
+        return 0 - 1
+    }
+    if m == 0 {
+        return a
+    }
+    if not s.contains(sub) {
+        return 0 - 1
+    }
+    let mut i = a
+    while i + m <= n {
+        if _coincide(s, i, sub) {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+# La posición de la primera aparición de sub, o -1 (s.find(sub)).
+fn buscar(s: str, sub: str) -> i32 {
+    return buscar_desde(s, sub, 0)
+}
+
+# La posición de la última aparición de sub, o -1 (s.rfind(sub)).
+fn buscar_ultimo(s: str, sub: str) -> i32 {
+    let n = len(s)
+    let m = len(sub)
+    if m == 0 {
+        return n
+    }
+    if not s.contains(sub) {
+        return 0 - 1
+    }
+    let mut i = n - m
+    while i >= 0 {
+        if _coincide(s, i, sub) {
+            return i
+        }
+        i = i - 1
+    }
+    return 0 - 1
+}
+
+fn contiene(s: str, sub: str) -> bool {
+    return s.contains(sub)
+}
+
+fn empieza(s: str, prefijo: str) -> bool {
+    return s.starts_with(prefijo)
+}
+
+fn termina(s: str, sufijo: str) -> bool {
+    return s.ends_with(sufijo)
+}
+
+# Cuántas veces aparece sub sin pisarse (s.count(sub); con sub vacío, len + 1).
+fn contar(s: str, sub: str) -> i32 {
+    let m = len(sub)
+    if m == 0 {
+        return len(s) + 1
+    }
+    let mut total = 0
+    let mut i = buscar(s, sub)
+    while i >= 0 {
+        total = total + 1
+        i = buscar_desde(s, sub, i + m)
+    }
+    return total
+}
+
+# Cada aparición de viejo cambiada por nuevo (s.replace(viejo, nuevo); con
+# viejo vacío, s queda igual).
+fn reemplazar(s: str, viejo: str, nuevo: str) -> str {
+    let m = len(viejo)
+    if m == 0 or not s.contains(viejo) {
+        return s
+    }
+    let mut v: Vec<str> = vec_new()
+    let mut desde = 0
+    let mut i = buscar(s, viejo)
+    while i >= 0 {
+        v.push(subtexto(s, desde, i))
+        v.push(nuevo)
+        desde = i + m
+        i = buscar_desde(s, viejo, desde)
+    }
+    v.push(subtexto(s, desde, len(s)))
+    return _juntar(v, false)
+}
+
+# ---- dividir ---------------------------------------------------------------
+
+# Los pedazos entre cada sep (s.split(sep) de Python): "a,,b" da "a", "" y "b";
+# "" da una lista con "". Un sep vacío es un panic, como en Python.
+fn dividir(s: str, sep: str) -> Vec<str> {
+    let m = len(sep)
+    if m == 0 {
+        panic("texto.dividir: el separador no puede ser vacío")
+    }
+    let mut v: Vec<str> = vec_new()
+    let mut desde = 0
+    let mut i = buscar(s, sep)
+    while i >= 0 {
+        v.push(subtexto(s, desde, i))
+        desde = i + m
+        i = buscar_desde(s, sep, desde)
+    }
+    v.push(subtexto(s, desde, len(s)))
+    return v
+}
+
+# Las palabras separadas por espacios, tabs o saltos de línea, sin pedazos
+# vacíos (s.split() de Python).
+fn dividir_espacios(s: str) -> Vec<str> {
+    let mut v: Vec<str> = vec_new()
+    let n = len(s)
+    let mut i = 0
+    while i < n {
+        while i < n and es_espacio(s[i]) {
+            i = i + 1
+        }
+        let inicio = i
+        while i < n and not es_espacio(s[i]) {
+            i = i + 1
+        }
+        if i > inicio {
+            v.push(_pedazo(s, inicio, i))
+        }
+    }
+    return v
+}
+
+# Las líneas, sin el "\n" ni un "\r" antes de él; un "\n" al final no agrega
+# una línea vacía (como s.splitlines() de Python con "\n" y "\r\n").
+fn lineas(s: str) -> Vec<str> {
+    let mut v: Vec<str> = vec_new()
+    let n = len(s)
+    let mut inicio = 0
+    let mut i = 0
+    while i < n {
+        if s[i] == "\n" {
+            let fin = if i > inicio and s[i - 1] == "\r" { i - 1 } else { i }
+            v.push(_pedazo(s, inicio, fin))
+            inicio = i + 1
+        }
+        i = i + 1
+    }
+    if inicio < n {
+        let fin = if s[n - 1] == "\r" { n - 1 } else { n }
+        v.push(_pedazo(s, inicio, fin))
+    }
+    return v
+}
+
+# ---- espacios y relleno ------------------------------------------------------
+
+# Un espacio, un tab, un salto de línea... (los mismos que str.isspace()).
+fn es_espacio(c: str) -> bool {
+    if len(c) != 1 {
+        return false
+    }
+    let k = ord(c)
+    if k == 32 or (k >= 9 and k <= 13) or (k >= 28 and k <= 31) {
+        return true
+    }
+    if k < 133 {
+        return false
+    }
+    return k == 133 or k == 160 or k == 5760 or (k >= 8192 and k <= 8202) or k == 8232
+        or k == 8233 or k == 8239 or k == 8287 or k == 12288
+}
+
+# Sin los espacios del principio y del final (s.strip()).
+fn recortar(s: str) -> str {
+    let n = len(s)
+    let mut a = 0
+    while a < n and es_espacio(s[a]) {
+        a = a + 1
+    }
+    let mut b = n
+    while b > a and es_espacio(s[b - 1]) {
+        b = b - 1
+    }
+    if a == 0 and b == n {
+        return s
+    }
+    return _pedazo(s, a, b)
+}
+
+# Sin los espacios del principio (s.lstrip()).
+fn recortar_izq(s: str) -> str {
+    let n = len(s)
+    let mut a = 0
+    while a < n and es_espacio(s[a]) {
+        a = a + 1
+    }
+    return if a == 0 { s } else { _pedazo(s, a, n) }
+}
+
+# Sin los espacios del final (s.rstrip()).
+fn recortar_der(s: str) -> str {
+    let n = len(s)
+    let mut b = n
+    while b > 0 and es_espacio(s[b - 1]) {
+        b = b - 1
+    }
+    return if b == n { s } else { _pedazo(s, 0, b) }
+}
+
+fn _un_caracter(c: str, quien: str) {
+    if len(c) != 1 {
+        panic("texto." + quien + ": el relleno tiene que ser un solo carácter, se dio '" + c + "'")
+    }
+}
+
+# s con relleno a la izquierda hasta tener ancho caracteres (s.rjust(ancho, c)).
+fn rellenar_izq(s: str, ancho: i32, c: str) -> str {
+    _un_caracter(c, "rellenar_izq")
+    return repetir(c, ancho - len(s)) + s
+}
+
+# s con relleno a la derecha hasta tener ancho caracteres (s.ljust(ancho, c)).
+fn rellenar_der(s: str, ancho: i32, c: str) -> str {
+    _un_caracter(c, "rellenar_der")
+    return s + repetir(c, ancho - len(s))
+}
+
+# s centrado en ancho caracteres (s.center(ancho, c): si sobra uno, va a la
+# izquierda cuando ancho es impar, como en Python).
+fn centrar(s: str, ancho: i32, c: str) -> str {
+    _un_caracter(c, "centrar")
+    let sobra = ancho - len(s)
+    if sobra <= 0 {
+        return s
+    }
+    let izq = sobra / 2 + (sobra % 2) * (ancho % 2)
+    return repetir(c, izq) + s + repetir(c, sobra - izq)
+}
+
+# ---- mayúsculas y minúsculas -------------------------------------------------
+
+fn _mayuscula(c: str) -> str {
+    let k = ord(c)
+    if k < 97 {
+        return c
+    }
+    if k <= 122 {
+        return chr(k - 32)
+    }
+    if k < 181 {
+        return c
+    }
+    if k == 181 {
+        return chr(924)           # µ -> Μ (la griega, como Python)
+    }
+    if k == 223 {
+        return "SS"               # ß
+    }
+    if k >= 224 and k <= 254 and k != 247 {
+        return chr(k - 32)
+    }
+    if k == 255 {
+        return chr(376)           # ÿ -> Ÿ
+    }
+    if k < 256 or k > 383 {
+        return c
+    }
+    if k == 305 {
+        return "I"                # ı (la i sin punto)
+    }
+    if k == 329 {
+        return chr(700) + "N"     # ŉ -> ʼN
+    }
+    if k == 383 {
+        return "S"                # ſ (la s larga)
+    }
+    if (k <= 311 or (k >= 330 and k <= 375)) and k % 2 == 1 {
+        return chr(k - 1)
+    }
+    if ((k >= 313 and k <= 328) or (k >= 377 and k <= 382)) and k % 2 == 0 {
+        return chr(k - 1)
+    }
+    return c
+}
+
+fn _minuscula(c: str) -> str {
+    let k = ord(c)
+    if k < 65 {
+        return c
+    }
+    if k <= 90 {
+        return chr(k + 32)
+    }
+    if k < 192 {
+        return c
+    }
+    if k <= 222 and k != 215 {
+        return chr(k + 32)
+    }
+    if k < 256 or k > 383 {
+        return c
+    }
+    if k == 304 {
+        return "i" + chr(775)     # İ -> i con el punto que se combina, como Python
+    }
+    if k == 376 {
+        return chr(255)           # Ÿ -> ÿ
+    }
+    if (k <= 311 or (k >= 330 and k <= 375)) and k % 2 == 0 {
+        return chr(k + 1)
+    }
+    if ((k >= 313 and k <= 328) or (k >= 377 and k <= 382)) and k % 2 == 1 {
+        return chr(k + 1)
+    }
+    return c
+}
+
+# En mayúsculas, también con tildes y ñ (s.upper(), ver los límites arriba).
+fn mayusculas(s: str) -> str {
+    let mut v: Vec<str> = vec_new()
+    for i in 0..len(s) {
+        v.push(_mayuscula(s[i]))
+    }
+    return _juntar(v, false)
+}
+
+# En minúsculas, también con tildes y ñ (s.lower(), ver los límites arriba).
+fn minusculas(s: str) -> str {
+    let mut v: Vec<str> = vec_new()
+    for i in 0..len(s) {
+        v.push(_minuscula(s[i]))
+    }
+    return _juntar(v, false)
+}
+
+# Una letra: ASCII, Latin-1 (á, ñ, ü, ç...) o Latin extendido A (ł, ő, š...).
+fn es_letra(c: str) -> bool {
+    if len(c) != 1 {
+        return false
+    }
+    let k = ord(c)
+    if (k >= 65 and k <= 90) or (k >= 97 and k <= 122) {
+        return true
+    }
+    if k == 170 or k == 181 or k == 186 {
+        return true
+    }
+    return k >= 192 and k <= 383 and k != 215 and k != 247
+}
+
+# Un dígito del 0 al 9.
+fn es_digito(c: str) -> bool {
+    if len(c) != 1 {
+        return false
+    }
+    let k = ord(c)
+    return k >= 48 and k <= 57
+}
+
+# ---- números como texto ----------------------------------------------------
+#
+# decimales(x, n) es exactamente f"{x:.{n}f}" de Python: redondea el valor
+# exacto del f64 (no el que se imprime) al más cercano, y en un empate exacto
+# al par. Para eso arma el número entero m·2^e·10^n con cifras de a 4 (un
+# f64 es m·2^e, con m entero de 53 bits) y lo divide por 2 sin perder nada.
+
+# Un entero grande, en cifras de a 4 (base 10000), la menos significativa
+# primero. Solo para decimales; no es parte de lo que se usa de afuera.
+struct Cifras {
+    d: Vec<i32>
+}
+
+fn _cifras(m: i64) -> Cifras {
+    let c = Cifras { d: vec_new() }
+    let mut r = m
+    if r == 0 {
+        c.d.push(0)
+    }
+    while r > 0 {
+        c.d.push(to_i32(r % 10000))
+        r = r / 10000
+    }
+    return c
+}
+
+# c = c * k, con 0 < k <= 10000.
+fn _por(c: Cifras, k: i32) {
+    let mut acarreo = 0
+    let n = c.d.len()
+    for i in 0..n {
+        let v = c.d.get(i).unwrap_or(0) * k + acarreo
+        c.d.set(i, v % 10000)
+        acarreo = v / 10000
+    }
+    while acarreo > 0 {
+        c.d.push(acarreo % 10000)
+        acarreo = acarreo / 10000
+    }
+}
+
+# c = c / 2^bits (bits <= 13); devuelve el resto.
+fn _dividir_pot2(c: Cifras, bits: i32) -> i32 {
+    let mut divisor = 1
+    for i in 0..bits {
+        divisor = divisor * 2
+    }
+    let mut resto = 0
+    let mut i = c.d.len() - 1
+    while i >= 0 {
+        let v = resto * 10000 + c.d.get(i).unwrap_or(0)
+        c.d.set(i, v / divisor)
+        resto = v % divisor
+        i = i - 1
+    }
+    while c.d.len() > 1 and c.d.get(c.d.len() - 1).unwrap_or(0) == 0 {
+        c.d.pop()
+    }
+    return resto
+}
+
+fn _es_cero(c: Cifras) -> bool {
+    return c.d.len() == 1 and c.d.get(0).unwrap_or(0) == 0
+}
+
+fn _mas_uno(c: Cifras) {
+    let mut i = 0
+    let mut sigue = true
+    while sigue {
+        if i == c.d.len() {
+            c.d.push(1)
+            sigue = false
+        } else {
+            let v = c.d.get(i).unwrap_or(0) + 1
+            if v == 10000 {
+                c.d.set(i, 0)
+                i = i + 1
+            } else {
+                c.d.set(i, v)
+                sigue = false
+            }
+        }
+    }
+}
+
+fn _cifras_texto(c: Cifras) -> str {
+    let n = c.d.len()
+    let mut v: Vec<str> = vec_new()
+    v.push(a_texto(c.d.get(n - 1).unwrap_or(0)))
+    let mut i = n - 2
+    while i >= 0 {
+        v.push(rellenar_izq(a_texto(c.d.get(i).unwrap_or(0)), 4, "0"))
+        i = i - 1
+    }
+    return _juntar(v, false)
+}
+
+# x con n decimales, redondeado como f"{x:.{n}f}" de Python: decimales(2.675, 2)
+# es "2.67" (el f64 de 2.675 es un poco menos), decimales(0.125, 2) es "0.12"
+# (empate exacto: al par), decimales(-0.001, 2) es "-0.00". nan e inf salen
+# como "nan", "inf" y "-inf". Con n <= 0, sin punto.
+fn decimales(x: f64, n: i32) -> str {
+    if x != x {
+        return "nan"
+    }
+    let negativo = x < 0.0 or (x == 0.0 and 1.0 / x < 0.0)
+    let signo = if negativo { "-" } else { "" }
+    let mut v = abs(x)
+    if v > 1.7976931348623157e308 {
+        return signo + "inf"
+    }
+    let nd = max(n, 0)
+    let mut cifras = "0"
+    if v > 0.0 {
+        # v = m * 2^e, con m entero en [2^52, 2^53)
+        let mut e = 0
+        while v >= 9007199254740992.0 {
+            v = v / 2.0
+            e = e + 1
+        }
+        while v < 4503599627370496.0 {
+            v = v * 2.0
+            e = e - 1
+        }
+        let c = _cifras(to_i64(v))
+        let mut k = nd
+        while k >= 4 {
+            _por(c, 10000)
+            k = k - 4
+        }
+        while k > 0 {
+            _por(c, 10)
+            k = k - 1
+        }
+        if e >= 0 {
+            let mut b = e
+            while b >= 13 {
+                _por(c, 8192)
+                b = b - 13
+            }
+            while b > 0 {
+                _por(c, 2)
+                b = b - 1
+            }
+        } else {
+            # c / 2^-e, redondeado al más cercano y en empate al par: el último
+            # bit que sale decide, y los de antes dicen si era empate exacto.
+            let mut b = 0 - e
+            let mut redondeo = 0
+            let mut resto = false
+            while b > 0 {
+                let paso = min(b, 13)
+                if _es_cero(c) {
+                    resto = resto or redondeo == 1
+                    redondeo = 0
+                    b = 0
+                } else {
+                    let r = _dividir_pot2(c, paso)
+                    let mut mitad = 1
+                    for i in 0..paso - 1 {
+                        mitad = mitad * 2
+                    }
+                    resto = resto or redondeo == 1 or r % mitad != 0
+                    redondeo = r / mitad
+                    b = b - paso
+                }
+            }
+            if redondeo == 1 and (resto or c.d.get(0).unwrap_or(0) % 2 == 1) {
+                _mas_uno(c)
+            }
+        }
+        cifras = _cifras_texto(c)
+    }
+    if nd == 0 {
+        return signo + cifras
+    }
+    let todo = rellenar_izq(cifras, nd + 1, "0")
+    let largo = len(todo)
+    return signo + _pedazo(todo, 0, largo - nd) + "." + _pedazo(todo, largo - nd, largo)
+}
+
+fn _agrupar(cifras: str, sep: str) -> str {
+    let n = len(cifras)
+    if n <= 3 {
+        return cifras
+    }
+    let mut v: Vec<str> = vec_new()
+    let primero = n % 3
+    if primero > 0 {
+        v.push(_pedazo(cifras, 0, primero))
+    }
+    let mut i = primero
+    while i < n {
+        if i > 0 {
+            v.push(sep)
+        }
+        v.push(_pedazo(cifras, i, i + 3))
+        i = i + 3
+    }
+    return _juntar(v, false)
+}
+
+# Un entero con separador de miles: con_miles(1234567, ".") es "1.234.567"
+# (f"{n:,}" de Python con "," cambiada por sep).
+fn con_miles(n: i64, sep: str) -> str {
+    let t = a_texto(n)
+    if t.starts_with("-") {
+        return "-" + _agrupar(_pedazo(t, 1, len(t)), sep)
+    }
+    return _agrupar(t, sep)
+}
+
+# x con n decimales y separador de miles: decimales_miles(1234567.891, 2, ".", ",")
+# es "1.234.567,89" (f"{x:,.{n}f}" de Python, con los separadores elegidos).
+fn decimales_miles(x: f64, n: i32, sep_miles: str, sep_decimal: str) -> str {
+    let t = decimales(x, n)
+    if t == "nan" or t == "inf" or t == "-inf" {
+        return t
+    }
+    let negativo = t.starts_with("-")
+    let signo = if negativo { "-" } else { "" }
+    let resto = if negativo { _pedazo(t, 1, len(t)) } else { t }
+    let punto = buscar(resto, ".")
+    if punto < 0 {
+        return signo + _agrupar(resto, sep_miles)
+    }
+    return signo + _agrupar(_pedazo(resto, 0, punto), sep_miles) + sep_decimal
+        + _pedazo(resto, punto + 1, len(resto))
+}
+
+# ---- texto como número ------------------------------------------------------
+
+# Las potencias de 10 que un f64 guarda exactas (10^0 a 10^22).
+fn _pot10(k: i32) -> f64 {
+    let mut p = 1.0
+    for i in 0..k {
+        p = p * 10.0
+    }
+    return p
+}
+
+# Un f64 escrito en texto: "3.25", "-0.5", "1e-3", "6.02E+23", ".5", "7.",
+# "inf", "-inf", "nan" (con espacios alrededor, como float() de Python).
+# Cuando el número es un entero de hasta 15 cifras por 10^k con k entre -22 y
+# 22 (lo de casi todos los archivos de datos: "0.125", "3.25e5", "-12.75") da
+# exactamente el f64 más cercano, igual que float(); si no, puede errar en el
+# último bit.
+fn a_f64(s: str) -> Result<f64> {
+    let t = minusculas(recortar(s))
+    let n = len(t)
+    if n == 0 {
+        return Err("no se pudo convertir '" + s + "' a f64")
+    }
+    let mut i = 0
+    let mut negativo = false
+    if t[0] == "+" or t[0] == "-" {
+        negativo = t[0] == "-"
+        i = 1
+    }
+    let resto = _pedazo(t, i, n)
+    if resto == "inf" or resto == "infinity" {
+        return Ok(if negativo { 0.0 - 1.0 / 0.0 } else { 1.0 / 0.0 })
+    }
+    if resto == "nan" {
+        return Ok(sqrt(0.0 - 1.0))
+    }
+    # cifras: hasta 18 en un i64; las que sobran solo corren el exponente
+    let mut m: i64 = 0
+    let mut cifras = 0
+    let mut exp10 = 0
+    let mut vio_cifra = false
+    let mut perdio = false
+    while i < n and es_digito(t[i]) {
+        vio_cifra = true
+        if cifras < 18 {
+            if m > 0 or t[i] != "0" {
+                m = m * 10 + to_i64(ord(t[i]) - 48)
+                cifras = cifras + 1
+            }
+        } else {
+            exp10 = exp10 + 1
+            if t[i] != "0" {
+                perdio = true
+            }
+        }
+        i = i + 1
+    }
+    if i < n and t[i] == "." {
+        i = i + 1
+        while i < n and es_digito(t[i]) {
+            vio_cifra = true
+            if cifras < 18 {
+                if m > 0 or t[i] != "0" {
+                    m = m * 10 + to_i64(ord(t[i]) - 48)
+                    cifras = cifras + 1
+                }
+                exp10 = exp10 - 1
+            } else if t[i] != "0" {
+                perdio = true
+            }
+            i = i + 1
+        }
+    }
+    if not vio_cifra {
+        return Err("no se pudo convertir '" + s + "' a f64")
+    }
+    if i < n and t[i] == "e" {
+        i = i + 1
+        let mut neg_e = false
+        if i < n and (t[i] == "+" or t[i] == "-") {
+            neg_e = t[i] == "-"
+            i = i + 1
+        }
+        let mut e = 0
+        let mut cifras_e = 0
+        while i < n and es_digito(t[i]) {
+            if e < 100000 {
+                e = e * 10 + ord(t[i]) - 48
+            }
+            cifras_e = cifras_e + 1
+            i = i + 1
+        }
+        if cifras_e == 0 {
+            return Err("no se pudo convertir '" + s + "' a f64")
+        }
+        exp10 = exp10 + (if neg_e { 0 - e } else { e })
+    }
+    if i != n {
+        return Err("no se pudo convertir '" + s + "' a f64")
+    }
+    # los ceros del final no son cifras: 12.50 es 125 · 10^-1
+    while m > 0 and m % 10 == 0 {
+        m = m / 10
+        exp10 = exp10 + 1
+    }
+    let mut v = to_f64(m)
+    if m == 0 {
+        v = 0.0
+    } else if not perdio and m < 9007199254740992 and exp10 >= 0 - 22 and exp10 <= 22 {
+        # el camino rápido de Clinger: m y 10^k son exactos en un f64, así que
+        # una sola multiplicación o división redondea bien
+        v = if exp10 >= 0 { to_f64(m) * _pot10(exp10) } else { to_f64(m) / _pot10(0 - exp10) }
+    } else if exp10 > 308 + 18 {
+        v = 1.0 / 0.0
+    } else if exp10 < 0 - 324 - 18 {
+        v = 0.0
+    } else {
+        # de a pasos que no se salgan del rango
+        let mut e = exp10
+        while e > 22 {
+            v = v * 1e22
+            e = e - 22
+        }
+        while e < 0 - 22 {
+            v = v / 1e22
+            e = e + 22
+        }
+        v = if e >= 0 { v * _pot10(e) } else { v / _pot10(0 - e) }
+    }
+    return Ok(if negativo { (0.0 - 1.0) * v } else { v })
+}

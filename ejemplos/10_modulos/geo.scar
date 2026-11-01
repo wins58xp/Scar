@@ -1,0 +1,39 @@
+# Un módulo: se usa con `use "geo"` desde un archivo de esta misma carpeta.
+# Todo lo que declara se ve desde afuera (geo.Punto, geo.distancia), salvo lo
+# que empieza con _ (geo._cuadrado no se puede llamar desde programa.scar).
+
+struct Punto {
+    x: f64
+    y: f64
+}
+
+fn punto(x: f64, y: f64) -> Punto {
+    return Punto { x: x, y: y }
+}
+
+fn distancia(a: Punto, b: Punto) -> f64 {
+    return sqrt(_cuadrado(a.x - b.x) + _cuadrado(a.y - b.y))
+}
+
+fn perimetro(puntos: Vec<Punto>) -> f64 {
+    let mut total = 0.0
+    let n = puntos.len()
+    for i in 0..n {
+        match puntos.get(i) {
+            Some(a) => {
+                match puntos.get((i + 1) % n) {
+                    Some(b) => {
+                        total = total + distancia(a, b)
+                    }
+                    None => {}
+                }
+            }
+            None => {}
+        }
+    }
+    return total
+}
+
+fn _cuadrado(x: f64) -> f64 {
+    return x * x
+}

@@ -1,0 +1,184 @@
+# lib/neuronalgames para pruebas/test_neuronalgames_python.py: arma redes, las calcula, las entrena, las muta, las
+# cruza y las guarda, y escribe todo con todos los decimales.
+use "mate"
+use "neuronalgames"
+
+fn pesos(r: neuronalgames.Red) -> str {
+    let mut s = ""
+    for k in 0..neuronalgames.pesos_totales(r) {
+        s = s + " " + a_texto(neuronalgames.peso(r, k))
+    }
+    s = s + " |"
+    for k in 0..neuronalgames.sesgos_totales(r) {
+        s = s + " " + a_texto(neuronalgames.sesgo(r, k))
+    }
+    return s
+}
+
+fn salidas(r: neuronalgames.Red) -> str {
+    let mut s = ""
+    for j in 0..neuronalgames.salidas(r) {
+        s = s + " " + a_texto(neuronalgames.salida(r, j))
+    }
+    return s
+}
+
+fn leer(s: str) -> Result<neuronalgames.Red> {
+    let r = neuronalgames.desde_texto(s)?
+    return Ok(r)
+}
+
+fn probar_lectura(nombre: str, s: str) {
+    let r = neuronalgames.desde_texto(s)
+    if r.is_err() {
+        print("LEER_MAL", nombre, "ERR")
+    } else {
+        print("LEER_MAL", nombre, "OK")
+    }
+}
+
+fn ronda(r2: neuronalgames.Red, txt: str, g: mate.Azar) -> Result<i32> {
+    let r3 = neuronalgames.desde_texto(txt)?
+    let txt2 = neuronalgames.a_texto_red(r3)
+    print("RELEER", txt2 == txt)
+    let mut iguales = true
+    for q in 0..5 {
+        for i in 0..neuronalgames.entradas(r2) {
+            let x = mate.azar_entre(g, 0.0 - 3.0, 3.0)
+            neuronalgames.entrada(r2, i, x)
+            neuronalgames.entrada(r3, i, x)
+        }
+        neuronalgames.calcular(r2)
+        neuronalgames.calcular(r3)
+        for j in 0..neuronalgames.salidas(r2) {
+            if neuronalgames.salida(r2, j) != neuronalgames.salida(r3, j) {
+                iguales = false
+            }
+        }
+    }
+    print("RELEIDA_CALCULA_IGUAL", iguales)
+    return Ok(0)
+}
+
+fn enorme(z: neuronalgames.Red) -> Result<i32> {
+    let txt = neuronalgames.a_texto_red(z)
+    let z2 = neuronalgames.desde_texto(txt)?
+    print("ENORME", neuronalgames.peso(z2, 0) == 1.0e300, neuronalgames.peso(z2, 1) == 0.0 - 3.0e-300, neuronalgames.sesgo(z2, 2) == 123456789012345680000.0)
+    return Ok(0)
+}
+
+fn main() {
+    let g = mate.azar(4242)
+    for caso in 0..16 {
+        let n_in = mate.azar_entero(g, 1, 4)
+        let semilla = mate.azar_entero(g, 1, 100000)
+        let r = neuronalgames.red(n_in, semilla)
+        let capas = mate.azar_entero(g, 1, 3)
+        let mut forma = "" + a_texto(n_in)
+        let mut ultima = 0
+        for l in 0..capas {
+            let n = mate.azar_entero(g, 1, 5)
+            let f = mate.azar_entero(g, 0, 3)
+            neuronalgames.capa(r, n, f)
+            forma = forma + " " + a_texto(n) + ":" + a_texto(f)
+            ultima = n
+        }
+        let mom = if caso % 3 == 0 { 0.0 } else { mate.azar_entre(g, 0.0, 0.9) }
+        neuronalgames.momento(r, mom)
+        let mezcla = caso % 4 == 3
+        neuronalgames.mezclar(r, mezcla)
+        print("RED", caso, semilla, mom, mezcla, "|", forma)
+        print("INICIO", pesos(r))
+        # calcular con entradas al azar
+        for q in 0..3 {
+            let mut xs = ""
+            for i in 0..n_in {
+                let x = mate.azar_entre(g, 0.0 - 2.0, 2.0)
+                neuronalgames.entrada(r, i, x)
+                xs = xs + " " + a_texto(x)
+            }
+            neuronalgames.calcular(r)
+            print("CALC", xs, "|", salidas(r), "|", neuronalgames.mayor_salida(r))
+        }
+        # datos al azar y entrenamiento
+        let d = neuronalgames.datos(n_in, ultima)
+        let ne = mate.azar_entero(g, 1, 7)
+        for k in 0..ne {
+            let mut s = ""
+            for i in 0..n_in {
+                let x = mate.azar_entre(g, 0.0 - 1.0, 1.0)
+                neuronalgames.ejemplo_entrada(d, x)
+                s = s + " " + a_texto(x)
+            }
+            s = s + " |"
+            for j in 0..ultima {
+                let y = mate.azar_entre(g, 0.0, 1.0)
+                neuronalgames.ejemplo_salida(d, y)
+                s = s + " " + a_texto(y)
+            }
+            print("EJEMPLO", s)
+        }
+        let vueltas = mate.azar_entero(g, 1, 12)
+        let tasa = mate.azar_entre(g, 0.01, 0.4)
+        let e0 = neuronalgames.error(r, d)
+        let e = neuronalgames.entrenar(r, d, vueltas, tasa)
+        print("ENTRENO", vueltas, tasa, e0, e, neuronalgames.aciertos(r, d))
+        print("FINAL", pesos(r))
+        # una copia sigue entrenando igual que la original (se copia también el momento)
+        let gemela = neuronalgames.copiar(r, semilla)
+        let rg = neuronalgames.copiar(r, semilla)
+        neuronalgames.entrenar(gemela, d, 2, tasa)
+        neuronalgames.entrenar(rg, d, 2, tasa)
+        print("GEMELA", pesos(gemela) == pesos(rg))
+        let c0 = neuronalgames.copiar(r, 1)
+        neuronalgames.entrenar(c0, d, 1, tasa)
+        neuronalgames.entrenar(r, d, 0, tasa)
+        print("SIGUE", pesos(c0))
+        # neuroevolución
+        let c = neuronalgames.copiar(r, semilla + 1)
+        print("COPIA", pesos(c) == pesos(r))
+        let p = mate.azar_entre(g, 0.0, 1.0)
+        let fz = mate.azar_entre(g, 0.0, 0.5)
+        neuronalgames.mutar(c, p, fz)
+        print("MUTADA", p, fz, "|", pesos(c))
+        print("ORIGINAL_INTACTA", pesos(r))
+        let h = neuronalgames.cruzar(r, c, semilla + 2)
+        print("HIJA", pesos(h))
+        # guardar y leer
+        let txt = neuronalgames.a_texto_red(c)
+        let rr = ronda(c, txt, g)
+        if rr.is_err() {
+            print("RELEER ERR", rr.err())
+        }
+    }
+    # XOR: tiene que aprender
+    let x = neuronalgames.red(2, 7)
+    neuronalgames.capa(x, 4, neuronalgames.tanh())
+    neuronalgames.capa(x, 1, neuronalgames.sigmoide())
+    let d = neuronalgames.datos(2, 1)
+    neuronalgames.ejemplo(d, [0.0, 0.0], [0.0])
+    neuronalgames.ejemplo(d, [0.0, 1.0], [1.0])
+    neuronalgames.ejemplo(d, [1.0, 0.0], [1.0])
+    neuronalgames.ejemplo(d, [1.0, 1.0], [0.0])
+    let e = neuronalgames.entrenar(x, d, 3000, 0.5)
+    print("XOR", e, neuronalgames.aciertos(x, d))
+    # pesos enormes y diminutos también vuelven exactos
+    let z = neuronalgames.red(1, 3)
+    neuronalgames.capa(z, 3, neuronalgames.lineal())
+    neuronalgames.poner_peso(z, 0, 1.0e300)
+    neuronalgames.poner_peso(z, 1, 0.0 - 3.0e-300)
+    neuronalgames.poner_sesgo(z, 2, 123456789012345680000.0)
+    let zr = enorme(z)
+    if zr.is_err() {
+        print("ENORME ERR")
+    }
+    # textos mal formados
+    probar_lectura("vacio", "")
+    probar_lectura("cabecera", "neuronalgames 2\ncapas 1 1\nactivaciones 0\npesos 0:0\nsesgos 0:0\n")
+    probar_lectura("bien", "neuronalgames 1\ncapas 1 1\nactivaciones 0\npesos 3:-1\nsesgos -5:0\n")
+    probar_lectura("faltan_pesos", "neuronalgames 1\ncapas 2 1\nactivaciones 0\npesos 3:-1\nsesgos 0:0\n")
+    probar_lectura("sobran_pesos", "neuronalgames 1\ncapas 1 1\nactivaciones 0\npesos 3:-1 4:0\nsesgos 0:0\n")
+    probar_lectura("activacion", "neuronalgames 1\ncapas 1 1\nactivaciones 9\npesos 3:-1\nsesgos 0:0\n")
+    probar_lectura("numero", "neuronalgames 1\ncapas 1 1\nactivaciones 0\npesos 3.5\nsesgos 0:0\n")
+    probar_lectura("sin_capas", "neuronalgames 1\ncapas 3\nactivaciones\npesos\nsesgos\n")
+}

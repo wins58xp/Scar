@@ -1,0 +1,470 @@
+# lib/fisica.scar: cuerpos rígidos en 2D, con gravedad y choques (use "fisica").
+#
+#   use "fisica"
+#
+#   let m = fisica.mundo(0.0, 0.0 - 9.8)                    # gravedad hacia abajo (y crece hacia arriba)
+#   let piso = fisica.caja(m, 0.0, 0.0 - 0.5, 20.0, 1.0, 0.0)   # masa 0: fijo
+#   let pelota = fisica.circulo(m, 0.0, 5.0, 0.5, 1.0)
+#   fisica.restitucion(m, pelota, 0.8)                      # rebota
+#   for i in 0..600 {
+#       fisica.paso(m, 1.0 / 60.0)
+#   }
+#   print(fisica.y(m, pelota))
+#
+# Pensado para juegos (pong, snake, river raid), no para ingeniería:
+# - Cuerpos: círculos y cajas alineadas con los ejes (no giran), con masa (0 es
+#   un cuerpo fijo: piso, paredes), restitución (0 no rebota, 1 rebota sin
+#   perder nada) y fricción.
+# - paso(m, dt): Euler semi-implícito (primero la velocidad, después la
+#   posición, con la velocidad nueva), y después cada par de cuerpos que se
+#   toca, en orden (i < j): un impulso que separa las velocidades con la
+#   restitución menor de los dos, otro de fricción (Coulomb, con la raíz del
+#   producto de las dos fricciones), y una corrección de posición del 80 % de
+#   lo que se meten (menos 0,01 de tolerancia), para que no se hundan.
+# - Con el mismo paso, el resultado es el mismo en el intérprete y en el
+#   binario: todo es aritmética de f64 en el mismo orden.
+
+struct Mundo {
+    gx: f64
+    gy: f64
+    forma: Vec<i32>         # 0 círculo, 1 caja
+    x: Vec<f64>
+    y: Vec<f64>
+    vx: Vec<f64>
+    vy: Vec<f64>
+    inv_masa: Vec<f64>      # 0 para los fijos
+    r: Vec<f64>             # radio (círculo)
+    a: Vec<f64>             # medio ancho (caja)
+    b: Vec<f64>             # medio alto (caja)
+    rest: Vec<f64>
+    fric: Vec<f64>
+    choques: i32            # cuántos contactos se resolvieron en el último paso
+}
+
+fn mundo(gx: f64, gy: f64) -> Mundo {
+    return Mundo { gx: gx, gy: gy, forma: vec_new(), x: vec_new(), y: vec_new(), vx: vec_new(), vy: vec_new(),
+        inv_masa: vec_new(), r: vec_new(), a: vec_new(), b: vec_new(), rest: vec_new(),
+        fric: vec_new(), choques: 0 }
+}
+
+fn _agregar(m: Mundo, forma: i32, x: f64, y: f64, r: f64, a: f64, b: f64, masa: f64) -> i32 {
+    m.forma.push(forma)
+    m.x.push(x)
+    m.y.push(y)
+    m.vx.push(0.0)
+    m.vy.push(0.0)
+    m.inv_masa.push(if masa > 0.0 { 1.0 / masa } else { 0.0 })
+    m.r.push(r)
+    m.a.push(a)
+    m.b.push(b)
+    m.rest.push(0.0)
+    m.fric.push(0.0)
+    return m.x.len() - 1
+}
+
+# Un círculo de radio r con centro en (x, y); masa 0 lo deja fijo. Devuelve su número.
+fn circulo(m: Mundo, x: f64, y: f64, r: f64, masa: f64) -> i32 {
+    return _agregar(m, 0, x, y, r, 0.0, 0.0, masa)
+}
+
+# Una caja de ancho x alto con centro en (x, y); masa 0 la deja fija.
+fn caja(m: Mundo, x: f64, y: f64, ancho: f64, alto: f64, masa: f64) -> i32 {
+    return _agregar(m, 1, x, y, 0.0, ancho / 2.0, alto / 2.0, masa)
+}
+
+fn cuerpos(m: Mundo) -> i32 {
+    return m.x.len()
+}
+
+fn x(m: Mundo, c: i32) -> f64 {
+    return m.x.get(c).unwrap_or(0.0)
+}
+
+fn y(m: Mundo, c: i32) -> f64 {
+    return m.y.get(c).unwrap_or(0.0)
+}
+
+fn vx(m: Mundo, c: i32) -> f64 {
+    return m.vx.get(c).unwrap_or(0.0)
+}
+
+fn vy(m: Mundo, c: i32) -> f64 {
+    return m.vy.get(c).unwrap_or(0.0)
+}
+
+fn posicion(m: Mundo, c: i32, x: f64, y: f64) {
+    m.x.set(c, x)
+    m.y.set(c, y)
+}
+
+fn velocidad(m: Mundo, c: i32, vx: f64, vy: f64) {
+    m.vx.set(c, vx)
+    m.vy.set(c, vy)
+}
+
+# Cuánto rebota (0 a 1).
+fn restitucion(m: Mundo, c: i32, e: f64) {
+    m.rest.set(c, e)
+}
+
+# Cuánto frena al rozar (0 nada).
+fn friccion(m: Mundo, c: i32, mu: f64) {
+    m.fric.set(c, mu)
+}
+
+fn masa(m: Mundo, c: i32) -> f64 {
+    let im = m.inv_masa.get(c).unwrap_or(0.0)
+    return if im > 0.0 { 1.0 / im } else { 0.0 }
+}
+
+# La energía cinética de todos los cuerpos que se mueven.
+fn energia_cinetica(m: Mundo) -> f64 {
+    let mut e = 0.0
+    for c in 0..cuerpos(m) {
+        let im = m.inv_masa.get(c).unwrap_or(0.0)
+        if im > 0.0 {
+            e = e + 0.5 / im * (vx(m, c) * vx(m, c) + vy(m, c) * vy(m, c))
+        }
+    }
+    return e
+}
+
+# ---- choques ------------------------------------------------------------------------
+
+# Un contacto: la normal (de i hacia j) y cuánto se meten.
+struct Contacto {
+    nx: f64
+    ny: f64
+    pen: f64
+}
+
+fn _sin_contacto() -> Contacto {
+    return Contacto { nx: 0.0, ny: 0.0, pen: 0.0 }
+}
+
+fn _circulo_circulo(m: Mundo, i: i32, j: i32) -> Contacto {
+    let dx = x(m, j) - x(m, i)
+    let dy = y(m, j) - y(m, i)
+    let rr = m.r.get(i).unwrap_or(0.0) + m.r.get(j).unwrap_or(0.0)
+    let d2 = dx * dx + dy * dy
+    if d2 >= rr * rr {
+        return _sin_contacto()
+    }
+    let d = sqrt(d2)
+    if d == 0.0 {
+        return Contacto { nx: 1.0, ny: 0.0, pen: rr }
+    }
+    return Contacto { nx: dx / d, ny: dy / d, pen: rr - d }
+}
+
+fn _caja_caja(m: Mundo, i: i32, j: i32) -> Contacto {
+    let dx = x(m, j) - x(m, i)
+    let dy = y(m, j) - y(m, i)
+    let px = m.a.get(i).unwrap_or(0.0) + m.a.get(j).unwrap_or(0.0) - abs(dx)
+    let py = m.b.get(i).unwrap_or(0.0) + m.b.get(j).unwrap_or(0.0) - abs(dy)
+    if px <= 0.0 or py <= 0.0 {
+        return _sin_contacto()
+    }
+    if px < py {
+        return Contacto { nx: if dx < 0.0 { 0.0 - 1.0 } else { 1.0 }, ny: 0.0, pen: px }
+    }
+    return Contacto { nx: 0.0, ny: if dy < 0.0 { 0.0 - 1.0 } else { 1.0 }, pen: py }
+}
+
+# Contacto entre el círculo c y la caja k, con la normal del círculo a la caja.
+fn _circulo_caja(m: Mundo, c: i32, k: i32) -> Contacto {
+    let cx = x(m, c)
+    let cy = y(m, c)
+    let r = m.r.get(c).unwrap_or(0.0)
+    let bx = x(m, k)
+    let by = y(m, k)
+    let a = m.a.get(k).unwrap_or(0.0)
+    let b = m.b.get(k).unwrap_or(0.0)
+    # el punto de la caja más cercano al centro del círculo
+    let qx = max(bx - a, min(cx, bx + a))
+    let qy = max(by - b, min(cy, by + b))
+    let dx = qx - cx
+    let dy = qy - cy
+    let d2 = dx * dx + dy * dy
+    if d2 > 0.0 {
+        if d2 >= r * r {
+            return _sin_contacto()
+        }
+        let d = sqrt(d2)
+        return Contacto { nx: dx / d, ny: dy / d, pen: r - d }
+    }
+    # el centro está adentro de la caja: sale por el lado más cercano
+    let izq = cx - (bx - a)
+    let der = bx + a - cx
+    let aba = cy - (by - b)
+    let arr = by + b - cy
+    let menor = min(min(izq, der), min(aba, arr))
+    if menor == izq {
+        return Contacto { nx: 1.0, ny: 0.0, pen: r + izq }
+    }
+    if menor == der {
+        return Contacto { nx: 0.0 - 1.0, ny: 0.0, pen: r + der }
+    }
+    if menor == aba {
+        return Contacto { nx: 0.0, ny: 1.0, pen: r + aba }
+    }
+    return Contacto { nx: 0.0, ny: 0.0 - 1.0, pen: r + arr }
+}
+
+fn _contacto(m: Mundo, i: i32, j: i32) -> Contacto {
+    let fi = m.forma.get(i).unwrap_or(0)
+    let fj = m.forma.get(j).unwrap_or(0)
+    if fi == 0 and fj == 0 {
+        return _circulo_circulo(m, i, j)
+    }
+    if fi == 1 and fj == 1 {
+        return _caja_caja(m, i, j)
+    }
+    if fi == 0 {
+        return _circulo_caja(m, i, j)
+    }
+    let c = _circulo_caja(m, j, i)
+    return Contacto { nx: 0.0 - c.nx, ny: 0.0 - c.ny, pen: c.pen }
+}
+
+fn _resolver(m: Mundo, i: i32, j: i32, c: Contacto) {
+    let imi = m.inv_masa.get(i).unwrap_or(0.0)
+    let imj = m.inv_masa.get(j).unwrap_or(0.0)
+    let suma = imi + imj
+    if suma == 0.0 {
+        return
+    }
+    m.choques = m.choques + 1
+    # corrección de posición
+    let corr = max(c.pen - 0.01, 0.0) / suma * 0.8
+    m.x.set(i, x(m, i) - imi * corr * c.nx)
+    m.y.set(i, y(m, i) - imi * corr * c.ny)
+    m.x.set(j, x(m, j) + imj * corr * c.nx)
+    m.y.set(j, y(m, j) + imj * corr * c.ny)
+    # impulso normal
+    let rvx = vx(m, j) - vx(m, i)
+    let rvy = vy(m, j) - vy(m, i)
+    let vn = rvx * c.nx + rvy * c.ny
+    if vn > 0.0 {
+        return          # ya se separan
+    }
+    let e = min(m.rest.get(i).unwrap_or(0.0), m.rest.get(j).unwrap_or(0.0))
+    let jn = 0.0 - (1.0 + e) * vn / suma
+    m.vx.set(i, vx(m, i) - imi * jn * c.nx)
+    m.vy.set(i, vy(m, i) - imi * jn * c.ny)
+    m.vx.set(j, vx(m, j) + imj * jn * c.nx)
+    m.vy.set(j, vy(m, j) + imj * jn * c.ny)
+    # fricción, a lo largo de la tangente
+    let rvx2 = vx(m, j) - vx(m, i)
+    let rvy2 = vy(m, j) - vy(m, i)
+    let vn2 = rvx2 * c.nx + rvy2 * c.ny
+    let tx = rvx2 - vn2 * c.nx
+    let ty = rvy2 - vn2 * c.ny
+    let lt = sqrt(tx * tx + ty * ty)
+    if lt == 0.0 {
+        return
+    }
+    let ux = tx / lt
+    let uy = ty / lt
+    let mu = sqrt(m.fric.get(i).unwrap_or(0.0) * m.fric.get(j).unwrap_or(0.0))
+    let jt = _recortar(0.0 - (rvx2 * ux + rvy2 * uy) / suma, 0.0 - jn * mu, jn * mu)
+    m.vx.set(i, vx(m, i) - imi * jt * ux)
+    m.vy.set(i, vy(m, i) - imi * jt * uy)
+    m.vx.set(j, vx(m, j) + imj * jt * ux)
+    m.vy.set(j, vy(m, j) + imj * jt * uy)
+}
+
+fn _recortar(v: f64, lo: f64, hi: f64) -> f64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+# Avanza el mundo dt segundos.
+fn paso(m: Mundo, dt: f64) {
+    let n = cuerpos(m)
+    for c in 0..n {
+        if m.inv_masa.get(c).unwrap_or(0.0) > 0.0 {
+            m.vx.set(c, vx(m, c) + m.gx * dt)
+            m.vy.set(c, vy(m, c) + m.gy * dt)
+            m.x.set(c, x(m, c) + vx(m, c) * dt)
+            m.y.set(c, y(m, c) + vy(m, c) * dt)
+        }
+    }
+    m.choques = 0
+    for i in 0..n {
+        for j in i + 1..n {
+            let c = _contacto(m, i, j)
+            if c.pen > 0.0 {
+                _resolver(m, i, j, c)
+            }
+        }
+    }
+}
+
+# Si dos cuerpos se están tocando ahora.
+fn se_tocan(m: Mundo, i: i32, j: i32) -> bool {
+    return _contacto(m, i, j).pen > 0.0
+}
+
+# ---- consultas: rayos, puntos y contactos --------------------------------------------
+
+# impulso(m, c, jx, jy): le da un empujón instantáneo al cuerpo (cambia su velocidad en j / masa).
+# Los cuerpos fijos no se mueven.
+fn impulso(m: Mundo, c: i32, jx: f64, jy: f64) {
+    let im = m.inv_masa.get(c).unwrap_or(0.0)
+    m.vx.set(c, vx(m, c) + jx * im)
+    m.vy.set(c, vy(m, c) + jy * im)
+}
+
+# cuerpo_en(m, x, y) -> i32: el primer cuerpo (el de número menor) que tiene adentro ese punto, o -1.
+fn cuerpo_en(m: Mundo, px: f64, py: f64) -> i32 {
+    for c in 0..cuerpos(m) {
+        let dx = px - x(m, c)
+        let dy = py - y(m, c)
+        if m.forma.get(c).unwrap_or(0) == 0 {
+            let r = m.r.get(c).unwrap_or(0.0)
+            if dx * dx + dy * dy < r * r {
+                return c
+            }
+        } else {
+            if abs(dx) < m.a.get(c).unwrap_or(0.0) and abs(dy) < m.b.get(c).unwrap_or(0.0) {
+                return c
+            }
+        }
+    }
+    return 0 - 1
+}
+
+# contactos_de(m, c) -> Vec<i32>: los cuerpos que están tocando a c ahora, en orden.
+fn contactos_de(m: Mundo, c: i32) -> Vec<i32> {
+    let r: Vec<i32> = vec_new()
+    for j in 0..cuerpos(m) {
+        if j != c and se_tocan(m, c, j) {
+            r.push(j)
+        }
+    }
+    return r
+}
+
+# El resultado de un rayo: `cuerpo` es -1 si no dio en nada; si dio, t es la distancia desde el origen
+# (con la dirección normalizada), (x, y) el punto y (nx, ny) la normal de la superficie ahí.
+struct Rayo {
+    cuerpo: i32
+    t: f64
+    x: f64
+    y: f64
+    nx: f64
+    ny: f64
+}
+
+fn _rayo_nada() -> Rayo {
+    return Rayo { cuerpo: 0 - 1, t: 0.0, x: 0.0, y: 0.0, nx: 0.0, ny: 0.0 }
+}
+
+# t del choque del rayo (origen o, dirección unitaria d) con el cuerpo c, o -1.0 si no hay (o si está más
+# lejos que `maximo`). Si el origen está adentro del cuerpo, el choque es en t = 0.
+fn _rayo_t(m: Mundo, c: i32, ox: f64, oy: f64, dx: f64, dy: f64, maximo: f64) -> f64 {
+    let cx = x(m, c)
+    let cy = y(m, c)
+    if m.forma.get(c).unwrap_or(0) == 0 {
+        let r = m.r.get(c).unwrap_or(0.0)
+        let fx = ox - cx
+        let fy = oy - cy
+        let k = fx * dx + fy * dy
+        let q = fx * fx + fy * fy - r * r
+        if q <= 0.0 {
+            return 0.0
+        }
+        let disc = k * k - q
+        if disc < 0.0 {
+            return 0.0 - 1.0
+        }
+        let t = 0.0 - k - sqrt(disc)
+        if t < 0.0 or t > maximo {
+            return 0.0 - 1.0
+        }
+        return t
+    }
+    let a = m.a.get(c).unwrap_or(0.0)
+    let b = m.b.get(c).unwrap_or(0.0)
+    let mut t_ent = 0.0 - 1.0e30
+    let mut t_sal = 1.0e30
+    for eje in 0..2 {
+        let o = if eje == 0 { ox - cx } else { oy - cy }
+        let d = if eje == 0 { dx } else { dy }
+        let h = if eje == 0 { a } else { b }
+        if abs(d) < 1.0e-12 {
+            if abs(o) > h {
+                return 0.0 - 1.0
+            }
+        } else {
+            let t1 = (0.0 - h - o) / d
+            let t2 = (h - o) / d
+            t_ent = max(t_ent, min(t1, t2))
+            t_sal = min(t_sal, max(t1, t2))
+        }
+    }
+    if t_ent > t_sal or t_sal < 0.0 {
+        return 0.0 - 1.0
+    }
+    if t_ent <= 0.0 {
+        return 0.0
+    }
+    if t_ent > maximo {
+        return 0.0 - 1.0
+    }
+    return t_ent
+}
+
+# rayo(m, ox, oy, dx, dy, maximo) -> Rayo: tira un rayo desde (ox, oy) en la dirección (dx, dy) (no hace
+# falta que sea unitaria; si es (0, 0) no da en nada) hasta `maximo` de distancia, y devuelve el primer
+# cuerpo que toca (si dos están a la misma distancia, el de número menor). Si el origen está adentro de un
+# cuerpo, da en él con t = 0 y la normal opuesta al rayo.
+fn rayo(m: Mundo, ox: f64, oy: f64, dx0: f64, dy0: f64, maximo: f64) -> Rayo {
+    let largo = sqrt(dx0 * dx0 + dy0 * dy0)
+    if largo == 0.0 {
+        return _rayo_nada()
+    }
+    let dx = dx0 / largo
+    let dy = dy0 / largo
+    let mut mejor = 0.0 - 1.0
+    let mut quien = 0 - 1
+    for c in 0..cuerpos(m) {
+        let t = _rayo_t(m, c, ox, oy, dx, dy, maximo)
+        if t >= 0.0 and (quien < 0 or t < mejor) {
+            mejor = t
+            quien = c
+        }
+    }
+    if quien < 0 {
+        return _rayo_nada()
+    }
+    let px = ox + dx * mejor
+    let py = oy + dy * mejor
+    let mut nx = 0.0 - dx
+    let mut ny = 0.0 - dy
+    if mejor > 0.0 {
+        if m.forma.get(quien).unwrap_or(0) == 0 {
+            let r = m.r.get(quien).unwrap_or(1.0)
+            nx = (px - x(m, quien)) / r
+            ny = (py - y(m, quien)) / r
+        } else {
+            # la cara por la que entró: la que está más cerca del punto, en proporción a la mitad de cada lado
+            let ex = abs(px - x(m, quien)) / m.a.get(quien).unwrap_or(1.0)
+            let ey = abs(py - y(m, quien)) / m.b.get(quien).unwrap_or(1.0)
+            if ex >= ey {
+                nx = if px > x(m, quien) { 1.0 } else { 0.0 - 1.0 }
+                ny = 0.0
+            } else {
+                nx = 0.0
+                ny = if py > y(m, quien) { 1.0 } else { 0.0 - 1.0 }
+            }
+        }
+    }
+    return Rayo { cuerpo: quien, t: mejor, x: px, y: py, nx: nx, ny: ny }
+}

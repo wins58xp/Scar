@@ -1,0 +1,243 @@
+# lib/https contra un servidor HTTPS de Python: lo corre pruebas/test_https_python.py.
+# Lee "casos.json" (las URLs y los archivos de certificados) y escribe una línea por escenario,
+# "N detalle". Los cuerpos binarios van en hexadecimal.
+
+use "json"
+use "https"
+use "web"
+use "codigos"
+
+fn t(d: json.Doc, k: str) -> str {
+    return json.texto(d, k)
+}
+
+fn resumen(r: web.Respuesta) -> str {
+    return a_texto(r.codigo) + " " + r.motivo
+}
+
+fn texto_de(r: web.Respuesta) -> Result<str> {
+    return https.cuerpo_texto(r)
+}
+
+fn s1(d: json.Doc) -> Result<i32> {
+    let o = web.opciones()
+    web.cabecera(o, "X-Prueba", "hola mundo")
+    let r = https.obtener_con(t(d, "base") + "/eco?a=1&b=dos%20tres", o)?
+    let doc = https.json_de(r)?
+    print("1 " + resumen(r) + " | " + web.cabecera_de(r, "Content-Type") + " | " + json.texto(doc, "metodo") + " " + json.texto(doc, "ruta") + " " + json.texto(doc, "x_prueba") + " | " + web.cabecera_de(r, "x-servidor"))
+    return Ok(0)
+}
+
+fn s2(d: json.Doc) -> Result<i32> {
+    let doc = json.nuevo_objeto()
+    json.poner_texto(doc, 0, "nombre", "añejo ñandú")
+    json.poner_entero(doc, 0, "n", 42)
+    let r = https.enviar_json(t(d, "base") + "/eco", doc, web.opciones())?
+    let eco = https.json_de(r)?
+    print("2 " + resumen(r) + " | " + json.texto(eco, "metodo") + " " + json.texto(eco, "tipo") + " " + json.texto(eco, "cuerpo"))
+    return Ok(0)
+}
+
+fn s3(d: json.Doc) -> Result<i32> {
+    let cuerpo = codigos.vacio()
+    for rep in 0..3 {
+        for b in 0..256 {
+            codigos.agregar(cuerpo, b)
+        }
+    }
+    let r = https.enviar("POST", t(d, "base") + "/binario", web.opciones(), cuerpo)?
+    print("3 " + resumen(r) + " " + a_texto(r.cuerpo.v.len()) + " " + web.cabecera_de(r, "Content-Type") + " " + codigos.hex(r.cuerpo))
+    return Ok(0)
+}
+
+fn redir(d: json.Doc, metodo: str, ruta: str, cuerpo: str, max: i32) -> Result<str> {
+    let o = web.opciones()
+    o.redirecciones = max
+    let r = https.enviar(metodo, t(d, "base") + ruta, o, codigos.de_texto(cuerpo))?
+    let mut eco = ""
+    if r.codigo == 200 {
+        let doc = https.json_de(r)?
+        eco = json.texto(doc, "metodo") + " " + json.texto(doc, "ruta") + " [" + json.texto(doc, "cuerpo") + "]"
+    }
+    return Ok(resumen(r) + " | " + eco + " | loc=" + web.cabecera_de(r, "Location") + " | " + r.url)
+}
+
+fn s4(d: json.Doc) -> Result<i32> {
+    let r4a = redir(d, "GET", "/r301", "", 5)?
+    print("4a " + r4a)
+    let r4b = redir(d, "POST", "/r302", "datos", 5)?
+    print("4b " + r4b)
+    let r4c = redir(d, "POST", "/r303", "datos", 5)?
+    print("4c " + r4c)
+    let r4d = redir(d, "POST", "/r307", "datos", 5)?
+    print("4d " + r4d)
+    let r4e = redir(d, "PUT", "/r308", "datos", 5)?
+    print("4e " + r4e)
+    let r4f = redir(d, "GET", "/cadena", "", 5)?
+    print("4f " + r4f)
+    let r4g = redir(d, "GET", "/r301", "", 0)?
+    print("4g " + r4g)
+    return Ok(0)
+}
+
+fn s4h(d: json.Doc) -> Result<i32> {
+    let r = redir(d, "GET", "/bucle", "", 5)
+    if r.is_err() {
+        print("4h ERR " + r.err())
+    } else {
+        print("4h OK ?")
+    }
+    return Ok(0)
+}
+
+fn s5(d: json.Doc) -> Result<i32> {
+    let r = https.obtener(t(d, "base") + "/trozos")?
+    let tr = texto_de(r)?
+    print("5 " + resumen(r) + " " + tr + " " + a_texto(r.cuerpo.v.len()))
+    let g = https.obtener(t(d, "base") + "/gzip")?
+    let tg = texto_de(g)?
+    print("6 " + resumen(g) + " " + tg)
+    return Ok(0)
+}
+
+fn s7(d: json.Doc) -> Result<i32> {
+    let r = https.obtener(t(d, "base") + "/nada")?
+    let tn = texto_de(r)?
+    print("7 " + resumen(r) + " " + tn + " " + a_texto(https.exito(r)))
+    let h = https.enviar("HEAD", t(d, "base") + "/eco", web.opciones(), codigos.vacio())?
+    print("9 " + resumen(h) + " " + a_texto(h.cuerpo.v.len()) + " cl=" + web.cabecera_de(h, "Content-Length"))
+    let v = https.obtener(t(d, "base") + "/vacio")?
+    print("11 " + resumen(v) + " " + a_texto(v.cuerpo.v.len()))
+    return Ok(0)
+}
+
+fn s8(d: json.Doc) -> Result<i32> {
+    let o = web.opciones()
+    o.reintentos = 3
+    o.pausa = 0.01
+    let r = https.obtener_con(t(d, "base") + "/inestable", o)?
+    let ti = texto_de(r)?
+    print("8a " + resumen(r) + " " + ti)
+    let o2 = web.opciones()
+    o2.reintentos = 3
+    o2.pausa = 0.01
+    let p = https.enviar("POST", t(d, "base") + "/inestable_post", o2, codigos.de_texto("x"))?
+    print("8b " + resumen(p))
+    let o3 = web.opciones()
+    let n = https.obtener_con(t(d, "base") + "/inestable_sin", o3)?
+    print("8c " + resumen(n))
+    return Ok(0)
+}
+
+fn s10(d: json.Doc) -> Result<i32> {
+    let r = https.obtener(t(d, "base") + "/grande")?
+    let mut suma = 0
+    for i in 0..r.cuerpo.v.len() {
+        suma = (suma * 31 + r.cuerpo.v.get(i).unwrap_or(0)) % 1000003
+    }
+    print("10 " + resumen(r) + " " + a_texto(r.cuerpo.v.len()) + " " + a_texto(suma))
+    return Ok(0)
+}
+
+fn malo(d: json.Doc, n: str, url: str, ca: str) {
+    let r = https.enviar_con_ca("GET", url, web.opciones(), codigos.vacio(), ca)
+    if r.is_err() {
+        let e = r.err()
+        let mut k = "otro"
+        if e.contains("certificate") or e.contains("SSL") {
+            k = "tls"
+        }
+        if e.starts_with("conexión:") {
+            k = "conexion"
+        }
+        print(n + " ERR " + k)
+    } else {
+        print(n + " OK ?")
+    }
+}
+
+fn s12(d: json.Doc) {
+    malo(d, "12a", t(d, "base") + "/eco", t(d, "ca_otro"))
+    malo(d, "12b", t(d, "base_otro") + "/eco", t(d, "ca_otro"))
+    malo(d, "12c", t(d, "base") + "/eco", "/no/existe/ca.pem")
+    malo(d, "12d", t(d, "base") + "/eco", "")
+}
+
+fn s13(d: json.Doc) -> Result<i32> {
+    let r = https.obtener(t(d, "plano") + "/eco?via=web")?
+    let doc = https.json_de(r)?
+    print("13 " + resumen(r) + " " + json.texto(doc, "ruta"))
+    let h = https.obtener(t(d, "base") + "/a_http")?
+    let doc2 = https.json_de(h)?
+    print("14 " + resumen(h) + " " + json.texto(doc2, "ruta") + " " + h.url)
+    return Ok(0)
+}
+
+fn s15(d: json.Doc) {
+    let o = web.opciones()
+    o.reintentos = 2
+    o.pausa = 0.01
+    let r = https.obtener_con(t(d, "cerrado") + "/", o)
+    if r.is_err() {
+        let e = r.err()
+        let mut k = "otro"
+        if e.starts_with("conexión:") {
+            k = "conexion"
+        }
+        print("15 ERR " + k)
+    } else {
+        print("15 OK ?")
+    }
+    let o2 = web.opciones()
+    web.cabecera(o2, "X-Malo", "a\r\nInyectada: 1")
+    let r2 = https.obtener_con(t(d, "base") + "/eco", o2)
+    if r2.is_err() {
+        print("16 ERR " + r2.err())
+    } else {
+        print("16 OK ?")
+    }
+    let r3 = https.obtener("ftp://127.0.0.1/x")
+    if r3.is_err() {
+        print("18 ERR " + r3.err())
+    }
+}
+
+fn s17(d: json.Doc) -> Result<i32> {
+    let r = https.obtener(t(d, "base") + "/cabeceras")?
+    let mut s = ""
+    for i in 0..web.cantidad(r.cabeceras) {
+        let n = web.nombre_en(r.cabeceras, i)
+        if n.starts_with("X-") or n.starts_with("x-") {
+            s = s + n + "=" + web.valor_en(r.cabeceras, i) + ";"
+        }
+    }
+    print("17 " + resumen(r) + " " + s)
+    return Ok(0)
+}
+
+fn correr() -> Result<i32> {
+    let d = json.leer_archivo("casos.json")?
+    s1(d)?
+    s2(d)?
+    s3(d)?
+    s4(d)?
+    s4h(d)?
+    s5(d)?
+    s7(d)?
+    s8(d)?
+    s10(d)?
+    s12(d)
+    s13(d)?
+    s15(d)
+    s17(d)?
+    return Ok(0)
+}
+
+fn main() -> i32 {
+    let r = correr()
+    if r.is_err() {
+        print("ERROR " + r.err())
+        return 1
+    }
+    return 0
+}

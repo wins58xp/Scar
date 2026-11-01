@@ -1,0 +1,167 @@
+# lib/texto contra Python: lo corre pruebas/test_texto_python.py. Arma textos
+# al azar (con tildes, ñ, emojis, espacios raros) y escribe cada entrada y
+# cada resultado como códigos de carácter, para que Python calcule lo mismo
+# con str y compare. Cada línea: una etiqueta, un número y los datos.
+
+use "mate"
+use "texto"
+
+fn cod(s: str) -> str {
+    let mut v: Vec<str> = vec_new()
+    for i in 0..len(s) {
+        v.push(a_texto(ord(s[i])))
+    }
+    return "=" + texto.unir(v, ".")
+}
+
+fn cods(v: Vec<str>) -> str {
+    let n = v.len()
+    let mut out: Vec<str> = vec_new()
+    for i in 0..n {
+        match v.get(i) {
+            Some(x) => { out.push(cod(x)) }
+            None => {}
+        }
+    }
+    return a_texto(n) + " " + texto.unir(out, " ")
+}
+
+fn al_azar(g: mate.Azar, alfabeto: Vec<i32>, largo: i32) -> str {
+    let n = alfabeto.len()
+    let mut v: Vec<str> = vec_new()
+    for i in 0..largo {
+        v.push(chr(alfabeto.get(mate.azar_entero(g, 0, n - 1)).unwrap_or(97)))
+    }
+    return texto.unir(v, "")
+}
+
+fn main() {
+    let g = mate.azar(20261026)
+    let alfabeto = [97, 98, 99, 120, 65, 66, 90, 48, 49, 57, 32, 32, 32, 44, 46, 45, 9, 10, 13,
+                    225, 233, 241, 209, 252, 220, 231, 223, 255, 181, 321, 322, 338, 339, 304,
+                    305, 329, 383, 312, 376, 129444, 128512, 8364, 20013, 160, 8195, 11, 12, 28,
+                    133, 8232, 12288]
+    let n_alfa = alfabeto.len()
+    for k in 0..300 {
+        let largo = mate.azar_entero(g, 0, 30)
+        let mut cs: Vec<i32> = vec_new()
+        for i in 0..largo {
+            cs.push(alfabeto.get(mate.azar_entero(g, 0, n_alfa - 1)).unwrap_or(97))
+        }
+        let mut pv: Vec<str> = vec_new()
+        for i in 0..largo {
+            pv.push(chr(cs.get(i).unwrap_or(97)))
+        }
+        let s = texto.unir(pv, "")
+        print("T", k, cod(s))
+        print("MAY", k, cod(texto.mayusculas(s)))
+        print("MIN", k, cod(texto.minusculas(s)))
+        print("STRIP", k, cod(texto.recortar(s)))
+        print("LSTRIP", k, cod(texto.recortar_izq(s)))
+        print("RSTRIP", k, cod(texto.recortar_der(s)))
+        print("INV", k, cod(texto.invertir(s)))
+        print("SPLITWS", k, cods(texto.dividir_espacios(s)))
+        let a = mate.azar_entero(g, 0, largo)
+        let b = mate.azar_entero(g, a, min(largo, a + 3))
+        print("SUB", k, a, b, cod(texto.subtexto(s, a, b)))
+        let mut sub = texto.subtexto(s, a, b)
+        if len(sub) == 0 {
+            sub = chr(alfabeto.get(mate.azar_entero(g, 0, n_alfa - 1)).unwrap_or(97))
+        }
+        print("FIND", k, cod(sub), texto.buscar(s, sub))
+        let d = mate.azar_entero(g, 0, largo + 2)
+        print("FINDFROM", k, cod(sub), d, texto.buscar_desde(s, sub, d))
+        print("RFIND", k, cod(sub), texto.buscar_ultimo(s, sub))
+        print("COUNT", k, cod(sub), texto.contar(s, sub))
+        print("REPL", k, cod(sub), cod(texto.reemplazar(s, sub, "<ñ>")))
+        print("SPLIT", k, cod(sub), cods(texto.dividir(s, sub)))
+        let w = mate.azar_entero(g, 0, 40)
+        let relleno = chr(alfabeto.get(mate.azar_entero(g, 0, n_alfa - 1)).unwrap_or(97))
+        print("RJUST", k, w, cod(relleno), cod(texto.rellenar_izq(s, w, relleno)))
+        print("LJUST", k, w, cod(relleno), cod(texto.rellenar_der(s, w, relleno)))
+        print("CENTER", k, w, cod(relleno), cod(texto.centrar(s, w, relleno)))
+        let veces = mate.azar_entero(g, 0 - 1, 4)
+        print("REP", k, veces, cod(texto.repetir(s, veces)))
+        let partes = texto.dividir_espacios(s)
+        print("JOIN", k, cod(texto.unir(partes, "--")))
+    }
+
+    # líneas: solo con "\n" y "\r\n" (lo que lineas() reconoce)
+    for k in 0..100 {
+        let n = mate.azar_entero(g, 0, 5)
+        let mut v: Vec<str> = vec_new()
+        for i in 0..n {
+            v.push(al_azar(g, [97, 98, 241, 32, 128512, 9], mate.azar_entero(g, 0, 4)))
+            let fin = mate.azar_entero(g, 0, 2)
+            v.push(if fin == 0 { "\n" } else if fin == 1 { "\r\n" } else { "" })
+        }
+        let s = texto.unir(v, "")
+        print("LIN", k, cod(s), cods(texto.lineas(s)))
+    }
+
+    # números
+    for k in 0..400 {
+        let u = mate.azar_entre(g, 0.0 - 1.0, 1.0)
+        let e = mate.azar_entero(g, 0 - 12, 22)
+        let x = u * pow(10.0, to_f64(e))
+        let nd = mate.azar_entero(g, 0, 12)
+        print("DEC", k, x, nd, texto.decimales(x, nd))
+        print("DECM", k, x, nd, texto.decimales_miles(x, nd, ",", "."))
+    }
+    let especiales = [0.0, 0.0 - 0.0, 0.5, 1.5, 2.5, 0.125, 0.375, 2.675, 1.005, 1e22, 1e300,
+                      0.0 - 1e300, 5e-324, 2.2250738585072014e-308, 1.7976931348623157e308,
+                      123456789.125, 0.0 - 0.001, 9.995, 99.995, 1e15, 1e16 + 2.0]
+    for k in 0..especiales.len() {
+        let x = especiales.get(k).unwrap_or(0.0)
+        let nds = [0, 1, 2, 3, 6, 15, 20]
+        for j in 0..nds.len() {
+            let nd = nds.get(j).unwrap_or(0)
+            print("DEC", 1000 + k * 100 + nd, x, nd, texto.decimales(x, nd))
+        }
+    }
+    let enteros: Vec<i64> = [0, 7, 999, 1000, 0 - 1000, 1234567, 0 - 1234567, 9223372036854775807,
+                             0 - 9223372036854775807 - 1, 100000, 0 - 99]
+    for k in 0..enteros.len() {
+        let n = enteros.get(k).unwrap_or(0)
+        print("MILES", k, n, texto.con_miles(n, ","))
+    }
+
+    # texto a f64: casos fijos y números al azar escritos de varias formas
+    let fijos = ["0", "-0", "3.25", "-0.5e-3", " 6.02E+23 ", ".5", "7.", "1e22", "1e23", "123456789012345",
+                 "0.1", "0.30000000000000004", "2.2250738585072014e-308", "5e-324", "1.7976931348623157e308",
+                 "1e400", "-1e-400", "inf", "-Infinity", "nan", "x", "", "1e", "--1", "1.2.3", "+.5e+2",
+                 "00012.50", "1_000"]
+    for k in 0..fijos.len() {
+        let mut f = ""
+        match fijos.get(k) {
+            Some(x) => { f = x + "" }
+            None => {}
+        }
+        match texto.a_f64(f) {
+            Ok(v) => { print("AF64", k, cod(f), v) }
+            Err(e) => { print("AF64", k, cod(f), "ERR") }
+        }
+    }
+    for k in 0..300 {
+        let u = mate.azar_entre(g, 0.0 - 1.0, 1.0)
+        let e = mate.azar_entero(g, 0 - 30, 30)
+        let x = u * pow(10.0, to_f64(e))
+        let forma = k % 3
+        let s = if forma == 0 { texto.decimales(x, mate.azar_entero(g, 0, 12)) } else if forma == 1 { a_texto(x) } else { a_texto(x * 1000000.0) }
+        match texto.a_f64(s) {
+            Ok(v) => { print("AF64", 100 + k, cod(s), v) }
+            Err(e) => { print("AF64", 100 + k, cod(s), "ERR") }
+        }
+    }
+
+    # clases de caracteres
+    for c in 1..13000 {
+        let ch = chr(c)
+        let l = if texto.es_letra(ch) { 1 } else { 0 }
+        let d = if texto.es_digito(ch) { 1 } else { 0 }
+        let e = if texto.es_espacio(ch) { 1 } else { 0 }
+        if c < 400 or e == 1 {
+            print("CLS", c, l, d, e)
+        }
+    }
+}

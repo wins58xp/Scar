@@ -1,0 +1,603 @@
+# lib/imagen.scar: leer y guardar imágenes (use "imagen").
+#
+#   use "lienzo"
+use "zlib"
+#   use "imagen"
+#
+#   let l = lienzo.nuevo(64, 48, lienzo.negro())
+#   lienzo.circulo_lleno(l, 32, 24, 20, lienzo.rojo())
+#   imagen.guardar_bmp(l, "/tmp/circulo.bmp")?       # 24 bits, sin alfa
+#   imagen.guardar_bmp32(l, "/tmp/circulo32.bmp")?   # 32 bits, con alfa
+#   let otra = imagen.leer_bmp("/tmp/circulo.bmp")?  # un lienzo.Lienzo
+#
+# Una imagen en memoria es un lienzo.Lienzo (ARGB). Por ahora, BMP:
+# - guardar_bmp: 24 bits por píxel, de abajo hacia arriba, sin compresión (lo
+#   que abre cualquier programa); el alfa se pierde.
+# - guardar_bmp32: 32 bits con canal alfa (encabezado BITMAPV4 con máscaras),
+#   como lo lee Pillow en modo RGBA.
+# - leer_bmp: 24 y 32 bits sin compresión (BI_RGB) o con máscaras (BI_BITFIELDS),
+#   de abajo hacia arriba o de arriba hacia abajo. Un BMP de 32 bits sin máscara
+#   de alfa es opaco (el cuarto byte no se usa, dice el formato). Otra cosa
+#   (paleta, 16 bits, RLE) da un Err que dice qué es.
+# a_bmp/a_bmp32 y de_bmp hacen lo mismo con los bytes en un Vec<i32> (0..255).
+#
+# Y PNG, con el DEFLATE de lib/zlib (todo en SCAR):
+# - guardar_png: RGB, o RGBA si algún píxel no es opaco, 8 bits por canal, con
+#   el filtro de cada fila elegido como libpng (el que deja la suma de
+#   diferencias más chica).
+# - leer_png: 8 bits por canal, en gris, gris con alfa, RGB, RGBA o paleta
+#   (con la transparencia de tRNS), sin entrelazar, con los cinco filtros;
+#   comprueba el CRC de cada chunk y el Adler-32 de los datos. 1, 2, 4 o 16
+#   bits por canal y Adam7 dan un Err que dice qué es.
+
+use "lienzo"
+
+# ---- bytes ---------------------------------------------------------------------
+
+fn _u16(v: Vec<i32>, n: i32) -> Vec<i32> {
+    let mut w = v
+    w.push(n & 255)
+    w.push((n >> 8) & 255)
+    return w
+}
+
+fn _u32(v: Vec<i32>, n: i32) -> Vec<i32> {
+    let mut w = v
+    w.push(n & 255)
+    w.push((n >> 8) & 255)
+    w.push((n >> 16) & 255)
+    w.push((n >> 24) & 255)
+    return w
+}
+
+# Un entero de 16 o 32 bits en orden little-endian que empieza en b[i]. El de
+# 32 bits sale como i32 (un valor de 2^31 o más queda negativo, como una máscara
+# 0xFF000000).
+struct Bytes {
+    b: Vec<i32>
+}
+
+fn _le16(d: Bytes, i: i32) -> i32 {
+    return _byte_de(d, i) | (_byte_de(d, i + 1) << 8)
+}
+
+fn _le32(d: Bytes, i: i32) -> i32 {
+    return _byte_de(d, i) | (_byte_de(d, i + 1) << 8) | (_byte_de(d, i + 2) << 16) | (_byte_de(d, i + 3) << 24)
+}
+
+fn _byte_de(d: Bytes, i: i32) -> i32 {
+    return d.b.get(i).unwrap_or(0)
+}
+
+# ---- guardar ---------------------------------------------------------------------
+
+fn _encabezado(b: Vec<i32>, tam_archivo: i32, desde_pixeles: i32) -> Vec<i32> {
+    let mut v = b
+    v.push(66)          # 'B'
+    v.push(77)          # 'M'
+    v = _u32(v, tam_archivo)
+    v = _u32(v, 0)
+    v = _u32(v, desde_pixeles)
+    return v
+}
+
+# Los bytes de un BMP de 24 bits con la imagen de l (el alfa se pierde).
+fn a_bmp(l: lienzo.Lienzo) -> Vec<i32> {
+    let w = lienzo.ancho(l)
+    let h = lienzo.alto(l)
+    let fila = ((w * 3 + 3) / 4) * 4
+    let datos = fila * h
+    let mut v: Vec<i32> = vec_new(54 + datos)
+    v = _encabezado(v, 54 + datos, 54)
+    v = _u32(v, 40)         # BITMAPINFOHEADER
+    v = _u32(v, w)
+    v = _u32(v, h)          # positivo: la primera fila guardada es la de abajo
+    v = _u16(v, 1)          # planos
+    v = _u16(v, 24)
+    v = _u32(v, 0)          # BI_RGB
+    v = _u32(v, datos)
+    v = _u32(v, 2835)       # 72 puntos por pulgada
+    v = _u32(v, 2835)
+    v = _u32(v, 0)
+    v = _u32(v, 0)
+    let mut y = h - 1
+    while y >= 0 {
+        for x in 0..w {
+            let p = lienzo.leer(l, x, y)
+            v.push(lienzo.canal_b(p))
+            v.push(lienzo.canal_g(p))
+            v.push(lienzo.canal_r(p))
+        }
+        for k in 0..fila - w * 3 {
+            v.push(0)
+        }
+        y = y - 1
+    }
+    return v
+}
+
+# Los bytes de un BMP de 32 bits con alfa (BITMAPV4HEADER, BI_BITFIELDS).
+fn a_bmp32(l: lienzo.Lienzo) -> Vec<i32> {
+    let w = lienzo.ancho(l)
+    let h = lienzo.alto(l)
+    let datos = w * 4 * h
+    let mut v: Vec<i32> = vec_new(122 + datos)
+    v = _encabezado(v, 122 + datos, 122)
+    v = _u32(v, 108)        # BITMAPV4HEADER
+    v = _u32(v, w)
+    v = _u32(v, h)
+    v = _u16(v, 1)
+    v = _u16(v, 32)
+    v = _u32(v, 3)          # BI_BITFIELDS
+    v = _u32(v, datos)
+    v = _u32(v, 2835)
+    v = _u32(v, 2835)
+    v = _u32(v, 0)
+    v = _u32(v, 0)
+    v = _u32(v, 16711680)   # rojo   0x00FF0000
+    v = _u32(v, 65280)      # verde  0x0000FF00
+    v = _u32(v, 255)        # azul   0x000000FF
+    v = _u32(v, 0 - 16777216)   # alfa   0xFF000000
+    v = _u32(v, 1934772034) # LCS_sRGB ("sRGB")
+    for k in 0..12 {
+        v = _u32(v, 0)      # extremos del espacio de color y gammas: sin usar con sRGB
+    }
+    let mut y = h - 1
+    while y >= 0 {
+        for x in 0..w {
+            let p = lienzo.leer(l, x, y)
+            v.push(lienzo.canal_b(p))
+            v.push(lienzo.canal_g(p))
+            v.push(lienzo.canal_r(p))
+            v.push(lienzo.canal_a(p))
+        }
+        y = y - 1
+    }
+    return v
+}
+
+fn _escribir(ruta: str, bytes: Vec<i32>) -> Result<i32> {
+    let f = file_open(ruta, "w")?
+    f.write_bytes(bytes)?
+    f.close()
+    return Ok(bytes.len())
+}
+
+# Guarda l como BMP de 24 bits; devuelve cuántos bytes escribió.
+fn guardar_bmp(l: lienzo.Lienzo, ruta: str) -> Result<i32> {
+    return _escribir(ruta, a_bmp(l))
+}
+
+# Guarda l como BMP de 32 bits con alfa; devuelve cuántos bytes escribió.
+fn guardar_bmp32(l: lienzo.Lienzo, ruta: str) -> Result<i32> {
+    return _escribir(ruta, a_bmp32(l))
+}
+
+# ---- leer -----------------------------------------------------------------------
+
+# Todos los bytes de un archivo.
+fn leer_bytes(ruta: str) -> Result<Vec<i32>> {
+    let f = file_open(ruta, "r")?
+    let mut todo: Vec<i32> = vec_new()
+    let mut sigue = true
+    while sigue {
+        let trozo = f.read_bytes(65536)?
+        let n = trozo.len()
+        if n == 0 {
+            sigue = false
+        }
+        for i in 0..n {
+            todo.push(trozo.get(i).unwrap_or(0))
+        }
+    }
+    f.close()
+    return Ok(todo)
+}
+
+# Cuántos ceros tiene la máscara a la derecha y cuántos unos seguidos.
+fn _corrimiento(m: i32) -> i32 {
+    if m == 0 {
+        return 0
+    }
+    let mut k = 0
+    while (m >> k) & 1 == 0 {
+        k = k + 1
+    }
+    return k
+}
+
+fn _ancho_mascara(m: i32) -> i32 {
+    if m == 0 {
+        return 0
+    }
+    let k = _corrimiento(m)
+    let mut n = 0
+    while k + n < 32 and (m >> (k + n)) & 1 == 1 {
+        n = n + 1
+    }
+    return n
+}
+
+# El canal que dice la máscara, llevado a 0..255.
+fn _canal(p: i32, m: i32, defecto: i32) -> i32 {
+    if m == 0 {
+        return defecto
+    }
+    let k = _corrimiento(m)
+    let n = _ancho_mascara(m)
+    let tope = if n >= 31 { 2147483647 } else { (1 << n) - 1 }
+    let v = (p >> k) & tope
+    if n == 8 {
+        return v
+    }
+    return to_i32(floor(to_f64(v) * 255.0 / to_f64(tope) + 0.5))
+}
+
+# La imagen de los bytes de un BMP. Como toda fn que recibe un Vec, se queda
+# con él.
+fn de_bmp(bytes: Vec<i32>) -> Result<lienzo.Lienzo> {
+    let d = Bytes { b: bytes }
+    let n = d.b.len()
+    if n < 26 or _byte_de(d, 0) != 66 or _byte_de(d, 1) != 77 {
+        return Err("imagen: no es un BMP (no empieza con 'BM')")
+    }
+    let desde = _le32(d, 10)
+    let dib = _le32(d, 14)
+    if dib < 40 {
+        return Err("imagen: BMP con encabezado de OS/2 (" + a_texto(dib) + " bytes) todavía no")
+    }
+    if n < 14 + dib {
+        return Err("imagen: BMP cortado (el encabezado no entra)")
+    }
+    let w = _le32(d, 18)
+    let h_crudo = _le32(d, 22)
+    let bpp = _le16(d, 28)
+    let comp = _le32(d, 30)
+    let de_arriba = h_crudo < 0
+    let h = abs(h_crudo)
+    if w <= 0 or h == 0 {
+        return Err("imagen: BMP sin píxeles (" + a_texto(w) + " x " + a_texto(h_crudo) + ")")
+    }
+    if bpp != 24 and bpp != 32 {
+        return Err("imagen: BMP de " + a_texto(bpp) + " bits todavía no (solo 24 y 32)")
+    }
+    let mut mr = 16711680
+    let mut mg = 65280
+    let mut mb = 255
+    let mut ma = 0
+    if comp == 3 or comp == 6 {
+        if bpp != 32 {
+            return Err("imagen: BI_BITFIELDS con " + a_texto(bpp) + " bits todavía no")
+        }
+        mr = _le32(d, 54)
+        mg = _le32(d, 58)
+        mb = _le32(d, 62)
+        if dib >= 56 or comp == 6 {
+            ma = _le32(d, 66)
+        }
+    } else if comp != 0 {
+        return Err("imagen: BMP comprimido (método " + a_texto(comp) + ") todavía no")
+    }
+    let por_pixel = bpp / 8
+    let fila = ((w * por_pixel + 3) / 4) * 4
+    if desde < 0 or desde + fila * (h - 1) + w * por_pixel > n {
+        return Err("imagen: BMP cortado (faltan píxeles)")
+    }
+    let l = lienzo.nuevo(w, h, 0)
+    for y in 0..h {
+        let fila_archivo = if de_arriba { y } else { h - 1 - y }
+        let base = desde + fila_archivo * fila
+        for x in 0..w {
+            let i = base + x * por_pixel
+            if bpp == 24 {
+                lienzo.poner(l, x, y, lienzo.color(_byte_de(d, i + 2), _byte_de(d, i + 1), _byte_de(d, i)))
+            } else {
+                let p = _le32(d, i)
+                lienzo.poner(l, x, y, lienzo.color_a(_canal(p, mr, 0), _canal(p, mg, 0), _canal(p, mb, 0),
+                                                     _canal(p, ma, 255)))
+            }
+        }
+    }
+    return Ok(l)
+}
+
+# Lee un BMP de 24 o 32 bits.
+fn leer_bmp(ruta: str) -> Result<lienzo.Lienzo> {
+    let bytes = leer_bytes(ruta)?
+    return de_bmp(bytes)
+}
+
+# ---- PNG ---------------------------------------------------------------------------
+
+fn _be32(v: Vec<i32>, n: i32) -> Vec<i32> {
+    let mut w = v
+    w.push((n >> 24) & 255)
+    w.push((n >> 16) & 255)
+    w.push((n >> 8) & 255)
+    w.push(n & 255)
+    return w
+}
+
+# Agrega un chunk (largo, tipo, datos, CRC del tipo y los datos) al PNG.
+fn _chunk(png: zlib.Bytes, tipo: str, datos: Vec<i32>) {
+    let d = zlib.Bytes { v: datos }
+    let n = d.v.len()
+    png.v = _be32(png.v, n)
+    let desde = png.v.len()
+    for i in 0..4 {
+        png.v.push(ord(tipo[i]))
+    }
+    for i in 0..n {
+        png.v.push(d.v.get(i).unwrap_or(0))
+    }
+    png.v = _be32(png.v, zlib.crc32_parte(png, desde, png.v.len()))
+}
+
+fn _paeth(a: i32, b: i32, c: i32) -> i32 {
+    let p = a + b - c
+    let pa = abs(p - a)
+    let pb = abs(p - b)
+    let pc = abs(p - c)
+    if pa <= pb and pa <= pc {
+        return a
+    }
+    if pb <= pc {
+        return b
+    }
+    return c
+}
+
+# El byte i de la fila con el filtro f (bpp: bytes por píxel).
+fn _filtrado(f: i32, fila: zlib.Bytes, previa: zlib.Bytes, i: i32, bpp: i32) -> i32 {
+    let x = fila.v.get(i).unwrap_or(0)
+    let a = if i >= bpp { fila.v.get(i - bpp).unwrap_or(0) } else { 0 }
+    let b = previa.v.get(i).unwrap_or(0)
+    let c = if i >= bpp { previa.v.get(i - bpp).unwrap_or(0) } else { 0 }
+    let pred = if f == 0 { 0 } else if f == 1 { a } else if f == 2 { b } else if f == 3 { (a + b) / 2 } else { _paeth(a, b, c) }
+    return (x - pred) & 255
+}
+
+# Los bytes de un PNG con la imagen de l.
+fn a_png(l: lienzo.Lienzo) -> Vec<i32> {
+    let w = lienzo.ancho(l)
+    let h = lienzo.alto(l)
+    let mut con_alfa = false
+    for y in 0..h {
+        for x in 0..w {
+            if lienzo.canal_a(lienzo.leer(l, x, y)) != 255 {
+                con_alfa = true
+            }
+        }
+    }
+    let bpp = if con_alfa { 4 } else { 3 }
+    let crudo: Vec<i32> = vec_new(h * (w * bpp + 1))
+    let datos = zlib.Bytes { v: crudo }
+    let previa = zlib.Bytes { v: vec_new(w * bpp) }
+    for i in 0..w * bpp {
+        previa.v.push(0)
+    }
+    let fila = zlib.Bytes { v: vec_new(w * bpp) }
+    for y in 0..h {
+        while fila.v.len() > 0 {
+            fila.v.pop()
+        }
+        for x in 0..w {
+            let p = lienzo.leer(l, x, y)
+            fila.v.push(lienzo.canal_r(p))
+            fila.v.push(lienzo.canal_g(p))
+            fila.v.push(lienzo.canal_b(p))
+            if con_alfa {
+                fila.v.push(lienzo.canal_a(p))
+            }
+        }
+        # el filtro que deja la menor suma de |byte| (como bytes con signo)
+        let mut mejor = 0
+        let mut mejor_suma = 0 - 1
+        for f in 0..5 {
+            let mut suma = 0
+            for i in 0..w * bpp {
+                let v = _filtrado(f, fila, previa, i, bpp)
+                suma = suma + (if v < 128 { v } else { 256 - v })
+            }
+            if mejor_suma < 0 or suma < mejor_suma {
+                mejor = f
+                mejor_suma = suma
+            }
+        }
+        datos.v.push(mejor)
+        for i in 0..w * bpp {
+            datos.v.push(_filtrado(mejor, fila, previa, i, bpp))
+        }
+        for i in 0..w * bpp {
+            previa.v.set(i, fila.v.get(i).unwrap_or(0))
+        }
+    }
+    let png = zlib.Bytes { v: [137, 80, 78, 71, 13, 10, 26, 10] }
+    let mut ihdr: Vec<i32> = vec_new(13)
+    ihdr = _be32(ihdr, w)
+    ihdr = _be32(ihdr, h)
+    ihdr.push(8)                            # bits por canal
+    ihdr.push(if con_alfa { 6 } else { 2 }) # RGBA o RGB
+    ihdr.push(0)                            # compresión: DEFLATE
+    ihdr.push(0)                            # filtros por fila
+    ihdr.push(0)                            # sin entrelazar
+    _chunk(png, "IHDR", ihdr)
+    let mut crudos: Vec<i32> = vec_new(datos.v.len())
+    for i in 0..datos.v.len() {
+        crudos.push(datos.v.get(i).unwrap_or(0))
+    }
+    _chunk(png, "IDAT", zlib.comprimir(crudos))
+    _chunk(png, "IEND", vec_new())
+    let mut salida: Vec<i32> = vec_new(png.v.len())
+    for i in 0..png.v.len() {
+        salida.push(png.v.get(i).unwrap_or(0))
+    }
+    return salida
+}
+
+# Guarda l como PNG; devuelve cuántos bytes escribió.
+fn guardar_png(l: lienzo.Lienzo, ruta: str) -> Result<i32> {
+    return _escribir(ruta, a_png(l))
+}
+
+fn _be32_de(d: Bytes, i: i32) -> i32 {
+    return (_byte_de(d, i) << 24) | (_byte_de(d, i + 1) << 16) | (_byte_de(d, i + 2) << 8) | _byte_de(d, i + 3)
+}
+
+fn _tipo_chunk(d: Bytes, i: i32) -> str {
+    let mut t = ""
+    for k in 0..4 {
+        let c = _byte_de(d, i + k)
+        t = t + (if c >= 32 and c < 127 { chr(c) } else { "?" })
+    }
+    return t
+}
+
+# La imagen de los bytes de un PNG. Como toda fn que recibe un Vec, se queda
+# con él.
+fn de_png(bytes: Vec<i32>) -> Result<lienzo.Lienzo> {
+    let d = Bytes { b: bytes }
+    let n = d.b.len()
+    let firma = [137, 80, 78, 71, 13, 10, 26, 10]
+    for i in 0..8 {
+        if _byte_de(d, i) != firma.get(i).unwrap_or(0) {
+            return Err("imagen: no es un PNG (la firma no coincide)")
+        }
+    }
+    # una copia para el CRC (zlib.crc32_parte presta un zlib.Bytes)
+    let mut copia: Vec<i32> = vec_new(n)
+    for i in 0..n {
+        copia.push(_byte_de(d, i))
+    }
+    let todo = zlib.Bytes { v: copia }
+    let mut w = 0
+    let mut h = 0
+    let mut tipo_color = 0 - 1
+    let mut paleta: Vec<i32> = vec_new()
+    let mut trns: Vec<i32> = vec_new()
+    let mut idat: Vec<i32> = vec_new()
+    let mut pos = 8
+    let mut fin = false
+    let mut vio_ihdr = false
+    while not fin {
+        if pos + 12 > n {
+            return Err("imagen: PNG cortado (falta el chunk IEND)")
+        }
+        let largo = _be32_de(d, pos)
+        let tipo = _tipo_chunk(d, pos + 4)
+        if largo < 0 or pos + 12 + largo > n {
+            return Err("imagen: PNG cortado (el chunk " + tipo + " no entra)")
+        }
+        let crc = _be32_de(d, pos + 8 + largo)
+        if zlib.crc32_parte(todo, pos + 4, pos + 8 + largo) != crc {
+            return Err("imagen: PNG dañado (el CRC del chunk " + tipo + " no coincide)")
+        }
+        let dat = pos + 8
+        if tipo == "IHDR" {
+            w = _be32_de(d, dat)
+            h = _be32_de(d, dat + 4)
+            let prof = _byte_de(d, dat + 8)
+            tipo_color = _byte_de(d, dat + 9)
+            if _byte_de(d, dat + 10) != 0 or _byte_de(d, dat + 11) != 0 {
+                return Err("imagen: PNG con un método de compresión o de filtro desconocido")
+            }
+            if _byte_de(d, dat + 12) != 0 {
+                return Err("imagen: PNG entrelazado (Adam7) todavía no")
+            }
+            if prof != 8 {
+                return Err("imagen: PNG de " + a_texto(prof) + " bits por canal todavía no (solo 8)")
+            }
+            if tipo_color != 0 and tipo_color != 2 and tipo_color != 3 and tipo_color != 4 and tipo_color != 6 {
+                return Err("imagen: PNG con tipo de color " + a_texto(tipo_color) + " inválido")
+            }
+            if w <= 0 or h <= 0 {
+                return Err("imagen: PNG sin píxeles")
+            }
+            vio_ihdr = true
+        } else if tipo == "PLTE" {
+            for k in 0..largo {
+                paleta.push(_byte_de(d, dat + k))
+            }
+        } else if tipo == "tRNS" {
+            for k in 0..largo {
+                trns.push(_byte_de(d, dat + k))
+            }
+        } else if tipo == "IDAT" {
+            for k in 0..largo {
+                idat.push(_byte_de(d, dat + k))
+            }
+        } else if tipo == "IEND" {
+            fin = true
+        }
+        pos = pos + 12 + largo
+    }
+    if not vio_ihdr {
+        return Err("imagen: PNG sin IHDR")
+    }
+    let crudo = zlib.descomprimir(idat)?
+    let bpp = if tipo_color == 0 or tipo_color == 3 { 1 } else if tipo_color == 4 { 2 } else if tipo_color == 2 { 3 } else { 4 }
+    let ancho_fila = w * bpp
+    if crudo.len() != h * (ancho_fila + 1) {
+        return Err("imagen: PNG con " + a_texto(crudo.len()) + " bytes de imagen, se esperaban "
+                   + a_texto(h * (ancho_fila + 1)))
+    }
+    if tipo_color == 3 and paleta.len() == 0 {
+        return Err("imagen: PNG con paleta pero sin PLTE")
+    }
+    let c = zlib.Bytes { v: crudo }
+    # sacar los filtros, fila por fila, en el lugar
+    for y in 0..h {
+        let base = y * (ancho_fila + 1)
+        let f = c.v.get(base).unwrap_or(0)
+        if f > 4 {
+            return Err("imagen: PNG con un filtro inválido (" + a_texto(f) + ") en la fila " + a_texto(y))
+        }
+        for i in 0..ancho_fila {
+            let p = base + 1 + i
+            let a = if i >= bpp { c.v.get(p - bpp).unwrap_or(0) } else { 0 }
+            let b = if y > 0 { c.v.get(p - ancho_fila - 1).unwrap_or(0) } else { 0 }
+            let cc = if y > 0 and i >= bpp { c.v.get(p - ancho_fila - 1 - bpp).unwrap_or(0) } else { 0 }
+            let pred = if f == 0 { 0 } else if f == 1 { a } else if f == 2 { b } else if f == 3 { (a + b) / 2 } else { _paeth(a, b, cc) }
+            c.v.set(p, (c.v.get(p).unwrap_or(0) + pred) & 255)
+        }
+    }
+    let l = lienzo.nuevo(w, h, 0)
+    let tp = zlib.Bytes { v: trns }
+    let pal = zlib.Bytes { v: paleta }
+    for y in 0..h {
+        let base = y * (ancho_fila + 1) + 1
+        for x in 0..w {
+            let i = base + x * bpp
+            let v0 = c.v.get(i).unwrap_or(0)
+            if tipo_color == 0 {
+                let a = if tp.v.len() >= 2 and v0 == tp.v.get(1).unwrap_or(0 - 1) { 0 } else { 255 }
+                lienzo.poner(l, x, y, lienzo.color_a(v0, v0, v0, a))
+            } else if tipo_color == 2 {
+                let g = c.v.get(i + 1).unwrap_or(0)
+                let b = c.v.get(i + 2).unwrap_or(0)
+                let a = if tp.v.len() >= 6 and v0 == tp.v.get(1).unwrap_or(0 - 1) and g == tp.v.get(3).unwrap_or(0 - 1)
+                            and b == tp.v.get(5).unwrap_or(0 - 1) { 0 } else { 255 }
+                lienzo.poner(l, x, y, lienzo.color_a(v0, g, b, a))
+            } else if tipo_color == 3 {
+                if v0 * 3 + 2 >= pal.v.len() {
+                    return Err("imagen: PNG con un índice de paleta fuera de la paleta")
+                }
+                let a = if v0 < tp.v.len() { tp.v.get(v0).unwrap_or(255) } else { 255 }
+                lienzo.poner(l, x, y, lienzo.color_a(pal.v.get(v0 * 3).unwrap_or(0), pal.v.get(v0 * 3 + 1).unwrap_or(0),
+                                                     pal.v.get(v0 * 3 + 2).unwrap_or(0), a))
+            } else if tipo_color == 4 {
+                lienzo.poner(l, x, y, lienzo.color_a(v0, v0, v0, c.v.get(i + 1).unwrap_or(0)))
+            } else {
+                lienzo.poner(l, x, y, lienzo.color_a(v0, c.v.get(i + 1).unwrap_or(0), c.v.get(i + 2).unwrap_or(0),
+                                                     c.v.get(i + 3).unwrap_or(0)))
+            }
+        }
+    }
+    return Ok(l)
+}
+
+# Lee un PNG (ver arriba qué tipos).
+fn leer_png(ruta: str) -> Result<lienzo.Lienzo> {
+    let bytes = leer_bytes(ruta)?
+    return de_png(bytes)
+}

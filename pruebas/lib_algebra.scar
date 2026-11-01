@@ -1,0 +1,60 @@
+# lib/algebra: un sistema de ecuaciones (cuánto cuesta cada fruta), la recta y la parábola que mejor
+# pasan por unos datos (mínimos cuadrados), una inversa, y los ejes principales de una figura (valores y
+# vectores propios).
+
+use "algebra"
+
+fn correr() -> Result<i32> {
+    # 2 manzanas + 3 peras = 1300; 4 manzanas + 1 pera = 1100; ¿cuánto cuesta cada una?
+    let a = algebra.desde_texto("2 3; 4 1")?
+    let b = algebra.desde_texto("1300; 1100")?
+    let x = algebra.resolver(a, b)?
+    print("precios: " + algebra.a_texto_mat(algebra.transpuesta(x), 0) + "  (manzana pera)")
+    print("determinante: " + a_texto(algebra.determinante(a)))
+    let inv = algebra.inversa(a)?
+    print("inversa: " + algebra.a_texto_mat(inv, 3))
+    print("a por su inversa: " + algebra.a_texto_mat(algebra.producto(a, inv), 3))
+    # una matriz singular no se resuelve: la segunda ecuación es el doble de la primera
+    let s = algebra.desde_texto("1 2; 2 4")?
+    let r = algebra.resolver(s, algebra.desde_texto("3; 6")?)
+    if r.is_err() {
+        print("sistema sin solución única: " + r.err() + " (rango " + a_texto(algebra.rango(s)) + ")")
+    }
+    # mínimos cuadrados: temperatura (y) a distintas horas (t); recta y = c0 + c1 t
+    let horas = "6 8 10 12 14 16 18"
+    let temps = "9.8; 12.1; 16.3; 19.0; 20.4; 19.1; 15.2"
+    let recta = algebra.desde_texto("1 6; 1 8; 1 10; 1 12; 1 14; 1 16; 1 18")?
+    let y = algebra.desde_texto(temps)?
+    let c = algebra.minimos_cuadrados(recta, y)?
+    print("recta que mejor pasa (horas " + horas + "): y = " + algebra.a_texto_mat(algebra.transpuesta(c), 3) + "  (c0 c1)")
+    # parábola y = c0 + c1 t + c2 t^2: mejor para una temperatura que sube y baja
+    let par = algebra.matriz(7, 3)
+    for i in 0..7 {
+        let t = to_f64(6 + 2 * i)
+        algebra.poner(par, i, 0, 1.0)
+        algebra.poner(par, i, 1, t)
+        algebra.poner(par, i, 2, t * t)
+    }
+    let p = algebra.minimos_cuadrados(par, algebra.desde_texto(temps)?)?
+    print("parábola: y = " + algebra.a_texto_mat(algebra.transpuesta(p), 4) + "  (c0 c1 c2)")
+    let error_recta = algebra.norma(algebra.resta(algebra.producto(recta, c), algebra.desde_texto(temps)?))
+    let error_par = algebra.norma(algebra.resta(algebra.producto(par, p), algebra.desde_texto(temps)?))
+    print("error de la recta: " + algebra.decimales(error_recta, 3) + ", de la parábola: " + algebra.decimales(error_par, 3))
+    let hora_max = 0.0 - algebra.get(p, 1, 0) / (2.0 * algebra.get(p, 2, 0))
+    print("según la parábola, la hora más calurosa es a las " + algebra.decimales(hora_max, 1))
+    # ejes principales de una nube de puntos estirada en diagonal (su matriz de covarianza)
+    let cov = algebra.desde_texto("5 4; 4 5")?
+    let ej = algebra.propios(cov)?
+    print("valores propios: " + algebra.a_texto_mat(algebra.transpuesta(ej.valores), 3))
+    print("ejes (columnas): " + algebra.a_texto_mat(ej.vectores, 3))
+    return Ok(0)
+}
+
+fn main() -> i32 {
+    let r = correr()
+    if r.is_err() {
+        print("error: " + r.err())
+        return 1
+    }
+    return 0
+}

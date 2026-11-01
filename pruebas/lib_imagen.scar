@@ -1,0 +1,162 @@
+# lib/imagen, BMP, probada con
+# lib/prueba.
+#
+# Ida y vuelta en memoria (a_bmp/a_bmp32 y de_bmp) con anchos que obligan a
+# rellenar las filas, los campos del encabezado byte por byte, el alfa que se
+# pierde en 24 bits y se queda en 32, un BMP de arriba hacia abajo, los
+# errores (no es BMP, cortado, 8 bits), y guardar y leer un archivo de verdad.
+# La comparación con Pillow está en pruebas/test_imagen_pillow.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "lienzo"
+use "imagen"
+
+fn escena(w: i32, h: i32) -> lienzo.Lienzo {
+    let l = lienzo.nuevo(w, h, lienzo.color_a(5, 10, 15, 0))
+    lienzo.rect_lleno(l, 0, 0, w / 2, h / 2, lienzo.color(200, 100, 50))
+    lienzo.linea(l, 0, h - 1, w - 1, 0, lienzo.blanco())
+    lienzo.poner(l, w - 1, h - 1, lienzo.color_a(1, 2, 3, 77))
+    return l
+}
+
+fn le32(v: Vec<i32>, i: i32) -> i32 {
+    return v.get(i).unwrap_or(0) | (v.get(i + 1).unwrap_or(0) << 8) | (v.get(i + 2).unwrap_or(0) << 16)
+        | (v.get(i + 3).unwrap_or(0) << 24)
+}
+
+# Igual a l, pero con todo el alfa en 255 (lo que vuelve de un BMP de 24 bits).
+fn opaco(l: lienzo.Lienzo) -> lienzo.Lienzo {
+    let w = lienzo.ancho(l)
+    let h = lienzo.alto(l)
+    let o = lienzo.nuevo(w, h, 0)
+    for y in 0..h {
+        for x in 0..w {
+            let p = lienzo.leer(l, x, y)
+            lienzo.poner(o, x, y, lienzo.color(lienzo.canal_r(p), lienzo.canal_g(p), lienzo.canal_b(p)))
+        }
+    }
+    return o
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("imagen")
+
+    prueba.seccion(t, "encabezado de 24 bits")
+    let b = imagen.a_bmp(escena(5, 3))
+    # cada fila: 5 píxeles x 3 bytes = 15, rellenada a 16
+    prueba.afirmar_igual_i32(t, b.len(), 54 + 16 * 3, "largo con relleno")
+    prueba.afirmar_igual_i32(t, b.get(0).unwrap_or(0), 66, "B")
+    prueba.afirmar_igual_i32(t, b.get(1).unwrap_or(0), 77, "M")
+    let b2 = imagen.a_bmp(escena(5, 3))
+    prueba.afirmar_igual_i32(t, le32(b2, 2), 102, "tamaño del archivo")
+    let b3 = imagen.a_bmp(escena(5, 3))
+    prueba.afirmar_igual_i32(t, le32(b3, 10), 54, "dónde empiezan los píxeles")
+    let b4 = imagen.a_bmp(escena(5, 3))
+    prueba.afirmar_igual_i32(t, le32(b4, 18), 5, "ancho")
+    let b5 = imagen.a_bmp(escena(5, 3))
+    prueba.afirmar_igual_i32(t, le32(b5, 22), 3, "alto (positivo: de abajo hacia arriba)")
+    let b6 = imagen.a_bmp(escena(5, 3))
+    prueba.afirmar_igual_i32(t, b6.get(28).unwrap_or(0), 24, "24 bits")
+    # el primer píxel guardado es el de abajo a la izquierda: la línea blanca
+    let b7 = imagen.a_bmp(escena(5, 3))
+    prueba.afirmar_igual_i32(t, b7.get(54).unwrap_or(0) + b7.get(55).unwrap_or(0) + b7.get(56).unwrap_or(0),
+                             765, "la primera fila es la de abajo")
+    let b8 = imagen.a_bmp(escena(5, 3))
+    prueba.afirmar_igual_i32(t, b8.get(54 + 15).unwrap_or(0 - 1), 0, "el byte de relleno es 0")
+
+    prueba.seccion(t, "ida y vuelta")
+    let anchos = [1, 2, 3, 4, 5, 7, 13]
+    let mut bien24 = true
+    let mut bien32 = true
+    for i in 0..anchos.len() {
+        let w = anchos.get(i).unwrap_or(1)
+        let l = escena(w, 4)
+        match imagen.de_bmp(imagen.a_bmp(l)) {
+            Ok(m) => {
+                if lienzo.suma(m) != lienzo.suma(opaco(l)) {
+                    bien24 = false
+                }
+            }
+            Err(e) => { bien24 = false }
+        }
+        match imagen.de_bmp(imagen.a_bmp32(l)) {
+            Ok(m) => {
+                if lienzo.suma(m) != lienzo.suma(l) {
+                    bien32 = false
+                }
+            }
+            Err(e) => { bien32 = false }
+        }
+    }
+    prueba.afirmar(t, bien24, "24 bits: vuelve igual, opaco (anchos de 1 a 13)")
+    prueba.afirmar(t, bien32, "32 bits: vuelve igual, con el alfa")
+    let b32 = imagen.a_bmp32(escena(3, 2))
+    prueba.afirmar_igual_i32(t, b32.len(), 122 + 3 * 4 * 2, "32 bits: sin relleno, encabezado V4")
+
+    prueba.seccion(t, "de arriba hacia abajo")
+    # el mismo BMP de 24 bits, con el alto negativo y las filas al revés
+    let l = escena(4, 3)
+    let normal = imagen.a_bmp(l)
+    let mut dado_vuelta: Vec<i32> = vec_new()
+    for i in 0..54 {
+        dado_vuelta.push(normal.get(i).unwrap_or(0))
+    }
+    for f in 0..3 {
+        let fila = 2 - f
+        for k in 0..12 {
+            dado_vuelta.push(normal.get(54 + fila * 12 + k).unwrap_or(0))
+        }
+    }
+    let menos3 = 0 - 3
+    dado_vuelta.set(22, menos3 & 255)
+    dado_vuelta.set(23, (menos3 >> 8) & 255)
+    dado_vuelta.set(24, (menos3 >> 16) & 255)
+    dado_vuelta.set(25, (menos3 >> 24) & 255)
+    match imagen.de_bmp(dado_vuelta) {
+        Ok(m) => { prueba.afirmar_igual_i64(t, lienzo.suma(m), lienzo.suma(opaco(l)), "alto negativo") }
+        Err(e) => { prueba.afirmar(t, false, "alto negativo: " + e) }
+    }
+
+    prueba.seccion(t, "errores")
+    let mut texto: Vec<i32> = vec_new()
+    for i in 0..40 {
+        texto.push(65 + i % 26)
+    }
+    prueba.afirmar(t, imagen.de_bmp(texto).is_err(), "no es BMP")
+    let mut corto: Vec<i32> = vec_new()
+    let entero = imagen.a_bmp(escena(6, 6))
+    for i in 0..entero.len() - 10 {
+        corto.push(entero.get(i).unwrap_or(0))
+    }
+    prueba.afirmar(t, imagen.de_bmp(corto).is_err(), "cortado")
+    let ocho = imagen.a_bmp(escena(2, 2))
+    ocho.set(28, 8)
+    match imagen.de_bmp(ocho) {
+        Ok(m) => { prueba.afirmar(t, false, "8 bits tenía que dar Err") }
+        Err(e) => { prueba.afirmar_igual_str(t, e, "imagen: BMP de 8 bits todavía no (solo 24 y 32)", "8 bits") }
+    }
+    prueba.afirmar(t, imagen.leer_bmp("/no/existe/esta.bmp").is_err(), "un archivo que no existe")
+
+    prueba.seccion(t, "archivos")
+    let dibujo = escena(9, 7)
+    lienzo.circulo_lleno(dibujo, 4, 3, 2, lienzo.color_a(0, 255, 0, 128))
+    match imagen.guardar_bmp32(dibujo, "/tmp/scar_274_lib_imagen.bmp") {
+        Ok(n) => { prueba.afirmar_igual_i32(t, n, 122 + 9 * 7 * 4, "guardar_bmp32 devuelve los bytes") }
+        Err(e) => { prueba.afirmar(t, false, "guardar: " + e) }
+    }
+    match imagen.leer_bmp("/tmp/scar_274_lib_imagen.bmp") {
+        Ok(m) => { prueba.afirmar_igual_i64(t, lienzo.suma(m), lienzo.suma(dibujo), "leer lo guardado") }
+        Err(e) => { prueba.afirmar(t, false, "leer: " + e) }
+    }
+    match imagen.guardar_bmp(dibujo, "/tmp/scar_274_lib_imagen.bmp") {
+        Ok(n) => { prueba.afirmar_igual_i32(t, n, 54 + 28 * 7, "guardar_bmp encima") }
+        Err(e) => { prueba.afirmar(t, false, "guardar 24: " + e) }
+    }
+    match imagen.leer_bmp("/tmp/scar_274_lib_imagen.bmp") {
+        Ok(m) => { prueba.afirmar_igual_i64(t, lienzo.suma(m), lienzo.suma(opaco(dibujo)), "y leerlo") }
+        Err(e) => { prueba.afirmar(t, false, "leer 24: " + e) }
+    }
+
+    return prueba.terminar(t)
+}

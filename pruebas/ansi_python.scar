@@ -1,0 +1,96 @@
+# lib/ansi contra una referencia en Python: lo corre pruebas/test_ansi_python.py.
+# Lee "casos.json" (en la carpeta donde corre) con las listas "colores", "textos",
+# "degradados" y "barras" y escribe cada resultado en una línea "ETIQUETA k texto".
+
+use "json"
+use "texto"
+use "colores"
+use "ansi"
+
+fn num(d: json.Doc, ruta: str) -> f64 {
+    match texto.a_f64(json.texto(d, ruta)) {
+        Ok(x) => {
+            return x
+        }
+        Err(e) => {
+            return 0.0 / 0.0
+        }
+    }
+    return 0.0
+}
+
+fn col(d: json.Doc, ruta: str) -> i32 {
+    return colores.rgb(to_i32(num(d, ruta + ".0")), to_i32(num(d, ruta + ".1")), to_i32(num(d, ruta + ".2")))
+}
+
+fn sal(etiqueta: str, k: i32, valor: str) {
+    print(etiqueta + " " + a_texto(k) + " " + valor)
+}
+
+fn caso_color(d: json.Doc, k: i32) {
+    let c = col(d, "colores." + a_texto(k))
+    sal("FG", k, ansi.fg(c))
+    sal("BG", k, ansi.bg(c))
+    sal("A256", k, a_texto(ansi.a_256(c)))
+    sal("A16", k, a_texto(ansi.a_16(c)))
+    sal("P", k, ansi.pintar("x", c))
+    sal("PF", k, ansi.pintar_fondo("x", c))
+    sal("P256", k, ansi.pintar_256("x", c))
+    sal("P16", k, ansi.pintar_16("x", c))
+}
+
+fn caso_texto(d: json.Doc, k: i32) {
+    let t = json.texto(d, "textos." + a_texto(k))
+    sal("NEG", k, ansi.negrita(t))
+    sal("TEN", k, ansi.tenue(t))
+    sal("CUR", k, ansi.cursiva(t))
+    sal("SUB", k, ansi.subrayado(t))
+    sal("INV", k, ansi.invertido(t))
+    sal("TAC", k, ansi.tachado(t))
+    sal("QUITAR", k, ansi.quitar(t))
+    sal("LARGO", k, a_texto(ansi.largo_visible(t)))
+    sal("RELLENO", k, ansi.rellenar_der(t, 12) + "|")
+}
+
+fn caso_degradado(d: json.Doc, k: i32) {
+    let r = "degradados." + a_texto(k)
+    sal("DEG", k, ansi.degradado_texto(json.texto(d, r + ".s"), col(d, r + ".a"), col(d, r + ".b")))
+}
+
+fn caso_barra(d: json.Doc, k: i32) {
+    let r = "barras." + a_texto(k)
+    sal("BARRA", k, ansi.barra(num(d, r + ".f"), to_i32(num(d, r + ".w")), col(d, r + ".a"), col(d, r + ".b")))
+}
+
+fn main() {
+    match json.leer_archivo("casos.json") {
+        Err(e) => {
+            print("ERROR no se pudo leer casos.json")
+        }
+        Ok(d) => {
+            for k in 0..json.largo(d, "colores") {
+                caso_color(d, k)
+            }
+            for k in 0..json.largo(d, "textos") {
+                caso_texto(d, k)
+            }
+            for k in 0..json.largo(d, "degradados") {
+                caso_degradado(d, k)
+            }
+            for k in 0..json.largo(d, "barras") {
+                caso_barra(d, k)
+            }
+            for i in 0..256 {
+                sal("R256", i, colores.a_hex(ansi.rgb_de_256(i)))
+                sal("F256", i, ansi.fg_256(i) + ansi.bg_256(i))
+            }
+            for i in 0..16 {
+                sal("R16", i, colores.a_hex(ansi.rgb_de_16(i)))
+                sal("F16", i, ansi.fg_16(i) + ansi.bg_16(i))
+            }
+            sal("REI", 0, ansi.reiniciar())
+            sal("ESC", 0, a_texto(ord(ansi.esc())))
+            sal("FUERA", 0, ansi.fg_256(999) + ansi.bg_256(0 - 4) + ansi.fg_16(99) + ansi.bg_16(0 - 1))
+        }
+    }
+}

@@ -1,0 +1,467 @@
+# lib/csv.scar: CSV completo (use "csv"): leer y escribir con comillas, separador
+# configurable, encabezados y columnas por nombre. Probada contra el módulo csv
+# de Python.
+#
+#   let t = csv.leer_archivo("ventas.csv", ",")?
+#   csv.filas(t)                      # cuántas filas (el encabezado cuenta)
+#   csv.celda(t, 1, 2)                # fila 1, columna 2 ("" si no existe)
+#   csv.dato(t, 0, "monto")           # primera fila de datos, columna "monto"
+#   csv.numero(t, 1, 2, 0.0)          # la celda como f64 (0.0 si no es número)
+#
+#   let s = csv.nueva()
+#   csv.agregar_celda(s, "lugar")
+#   csv.agregar_celda(s, "mag")
+#   csv.cerrar_fila(s)
+#   csv.guardar(s, "salida.csv", ";")?
+#
+# Lee como csv.reader (dialecto excel, sin modo estricto): campos entre comillas
+# con comillas dobladas (""), separador, saltos de línea (\n, \r o \r\n) dentro
+# de las comillas, una línea vacía es una fila sin celdas, y una comilla en
+# medio de un campo sin comillas es un carácter más. Escribe como csv.writer
+# (QUOTE_MINIMAL): solo pone comillas si el campo tiene el separador, comillas o
+# un salto de línea, y termina cada fila con \r\n. El texto es UTF-8.
+#
+# Una tabla guarda todas las celdas en una sola lista y, por fila, dónde
+# termina: las filas pueden tener distinto número de celdas, como en Python.
+
+use "texto"
+
+struct Tabla {
+    celdas: Vec<str>
+    fin: Vec<i32>
+}
+
+fn nueva() -> Tabla {
+    let c: Vec<str> = vec_new()
+    let f: Vec<i32> = vec_new()
+    return Tabla { celdas: c, fin: f }
+}
+
+fn _celda_en(t: Tabla, i: i32) -> str {
+    let mut s = ""
+    let mut o = t.celdas.get(i)
+    while let Some(e) = o {
+        s = e + ""
+        o = None
+    }
+    return s
+}
+
+fn _fin_de(t: Tabla, fila: i32) -> i32 {
+    return t.fin.get(fila).unwrap_or(0 - 1)
+}
+
+# ---------- armar ----------
+
+fn agregar_celda(t: Tabla, valor: str) {
+    t.celdas.push(valor)
+}
+
+# Termina la fila con las celdas agregadas desde la anterior (puede quedar sin celdas).
+fn cerrar_fila(t: Tabla) {
+    t.fin.push(t.celdas.len())
+}
+
+# Una fila entera de una vez.
+fn agregar_fila(t: Tabla, valores: Vec<str>) {
+    for i in 0..valores.len() {
+        match valores.get(i) {
+            Some(v) => { t.celdas.push(v + "") }
+            None => {}
+        }
+    }
+    t.fin.push(t.celdas.len())
+}
+
+# ---------- consultar ----------
+
+fn filas(t: Tabla) -> i32 {
+    return t.fin.len()
+}
+
+# Cuántas celdas tiene la fila (0 si no existe).
+fn columnas(t: Tabla, fila: i32) -> i32 {
+    if fila < 0 or fila >= t.fin.len() {
+        return 0
+    }
+    let mut ini = 0
+    if fila > 0 {
+        ini = _fin_de(t, fila - 1)
+    }
+    return _fin_de(t, fila) - ini
+}
+
+# La celda (fila, columna), o "" si no existe.
+fn celda(t: Tabla, fila: i32, columna: i32) -> str {
+    if columna < 0 or columna >= columnas(t, fila) {
+        return ""
+    }
+    let mut ini = 0
+    if fila > 0 {
+        ini = _fin_de(t, fila - 1)
+    }
+    return _celda_en(t, ini + columna)
+}
+
+fn existe(t: Tabla, fila: i32, columna: i32) -> bool {
+    return columna >= 0 and columna < columnas(t, fila)
+}
+
+# La columna cuyo encabezado (fila 0) se llama así; -1 si no hay.
+fn indice(t: Tabla, nombre: str) -> i32 {
+    let n = columnas(t, 0)
+    for c in 0..n {
+        if celda(t, 0, c) == nombre {
+            return c
+        }
+    }
+    return 0 - 1
+}
+
+# La celda de la fila de datos número `fila` (0 es la primera después del
+# encabezado) en la columna de ese nombre; "" si no existe.
+fn dato(t: Tabla, fila: i32, nombre: str) -> str {
+    let c = indice(t, nombre)
+    if c < 0 {
+        return ""
+    }
+    return celda(t, fila + 1, c)
+}
+
+fn dato_numero(t: Tabla, fila: i32, nombre: str, defecto: f64) -> f64 {
+    let c = indice(t, nombre)
+    if c < 0 {
+        return defecto
+    }
+    return numero(t, fila + 1, c, defecto)
+}
+
+# La celda como número ("3.25", "-1e3", ".5", con espacios alrededor); `defecto`
+# si no es un número.
+fn numero(t: Tabla, fila: i32, columna: i32, defecto: f64) -> f64 {
+    match texto.a_f64(celda(t, fila, columna)) {
+        Ok(x) => {
+            if x != x {
+                return defecto
+            }
+            return x
+        }
+        Err(e) => {
+            return defecto
+        }
+    }
+    return defecto
+}
+
+# ---------- leer ----------
+
+fn _unir(partes: Vec<str>) -> str {
+    let mut actual = partes
+    while actual.len() > 1 {
+        let sig: Vec<str> = vec_new()
+        let n = actual.len()
+        let mut i = 0
+        while i < n {
+            let mut s = ""
+            let mut a = actual.get(i)
+            while let Some(e) = a {
+                s = e + ""
+                a = None
+            }
+            if i + 1 < n {
+                let mut b = actual.get(i + 1)
+                while let Some(e) = b {
+                    s = s + e
+                    b = None
+                }
+            }
+            sig.push(s)
+            i = i + 2
+        }
+        actual = sig
+    }
+    let mut r = ""
+    let mut a = actual.get(0)
+    while let Some(e) = a {
+        r = e + ""
+        a = None
+    }
+    return r
+}
+
+# Los bytes UTF-8 de un campo, a texto.
+fn _decodificar(v: Vec<i32>) -> str {
+    let partes: Vec<str> = vec_new()
+    let n = v.len()
+    let mut tramo = ""
+    let mut cuenta = 0
+    let mut i = 0
+    while i < n {
+        let b = v.get(i).unwrap_or(0)
+        let mut cp = b
+        let mut extra = 0
+        if b >= 240 {
+            cp = b & 7
+            extra = 3
+        } else {
+            if b >= 224 {
+                cp = b & 15
+                extra = 2
+            } else {
+                if b >= 192 {
+                    cp = b & 31
+                    extra = 1
+                } else {
+                    if b >= 128 {
+                        cp = 65533
+                    }
+                }
+            }
+        }
+        i = i + 1
+        let mut k = 0
+        while k < extra and i < n {
+            cp = (cp << 6) | (v.get(i).unwrap_or(0) & 63)
+            i = i + 1
+            k = k + 1
+        }
+        tramo = tramo + chr(cp)
+        cuenta = cuenta + 1
+        if cuenta >= 64 {
+            partes.push(tramo)
+            tramo = ""
+            cuenta = 0
+        }
+    }
+    partes.push(tramo)
+    return _unir(partes)
+}
+
+fn _guardar_campo(t: Tabla, campo: Vec<i32>) {
+    t.celdas.push(_decodificar(campo))
+}
+
+# Lee los bytes UTF-8 de un CSV. `separador` es un solo carácter ("," ";" "\t" "|").
+fn analizar(b: Vec<i32>, separador: str) -> Result<Tabla> {
+    if separador.len() != 1 {
+        return Err("csv: el separador tiene que ser un solo carácter")
+    }
+    let d = ord(separador)
+    if d == 34 or d == 10 or d == 13 {
+        return Err("csv: el separador no puede ser una comilla ni un salto de línea")
+    }
+    let t = nueva()
+    let n = b.len()
+    let mut campo: Vec<i32> = vec_new()
+    # 0 inicio de fila, 1 inicio de campo, 2 dentro de un campo,
+    # 3 dentro de comillas, 4 comilla dentro de comillas
+    let mut estado = 0
+    let mut i = 0
+    while i < n {
+        let c = b.get(i).unwrap_or(0)
+        i = i + 1
+        let fin = c == 10 or c == 13
+        let mut listo = false
+        if fin and (estado == 0 or estado == 1 or estado == 2 or estado == 4) {
+            if c == 13 and b.get(i).unwrap_or(0) == 10 {
+                i = i + 1
+            }
+            if estado != 0 {
+                _guardar_campo(t, campo)
+                campo = vec_new()
+            }
+            cerrar_fila(t)
+            estado = 0
+            listo = true
+        }
+        if listo == false {
+            if estado == 0 {
+                estado = 1
+            }
+            if estado == 1 {
+                if c == 34 {
+                    estado = 3
+                } else {
+                    if c == d {
+                        _guardar_campo(t, campo)
+                        campo = vec_new()
+                    } else {
+                        campo.push(c)
+                        estado = 2
+                    }
+                }
+            } else {
+                if estado == 2 {
+                    if c == d {
+                        _guardar_campo(t, campo)
+                        campo = vec_new()
+                        estado = 1
+                    } else {
+                        campo.push(c)
+                    }
+                } else {
+                    if estado == 3 {
+                        if c == 34 {
+                            estado = 4
+                        } else {
+                            campo.push(c)
+                        }
+                    } else {
+                        if c == 34 {
+                            campo.push(34)
+                            estado = 3
+                        } else {
+                            if c == d {
+                                _guardar_campo(t, campo)
+                                campo = vec_new()
+                                estado = 1
+                            } else {
+                                campo.push(c)
+                                estado = 2
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if estado != 0 {
+        _guardar_campo(t, campo)
+        cerrar_fila(t)
+    }
+    return Ok(t)
+}
+
+# Los bytes UTF-8 de un str.
+fn bytes_de(s: str) -> Vec<i32> {
+    let v: Vec<i32> = vec_new()
+    for i in 0..s.len() {
+        let c = ord(s[i])
+        if c < 128 {
+            v.push(c)
+        } else {
+            if c < 2048 {
+                v.push(192 | (c >> 6))
+                v.push(128 | (c & 63))
+            } else {
+                if c < 65536 {
+                    v.push(224 | (c >> 12))
+                    v.push(128 | ((c >> 6) & 63))
+                    v.push(128 | (c & 63))
+                } else {
+                    v.push(240 | (c >> 18))
+                    v.push(128 | ((c >> 12) & 63))
+                    v.push(128 | ((c >> 6) & 63))
+                    v.push(128 | (c & 63))
+                }
+            }
+        }
+    }
+    return v
+}
+
+fn analizar_texto(s: str, separador: str) -> Result<Tabla> {
+    return analizar(bytes_de(s), separador)
+}
+
+fn bytes_de_archivo(ruta: str) -> Result<Vec<i32>> {
+    let f = file_open(ruta, "r")?
+    let todo: Vec<i32> = vec_new(4096)
+    let mut seguir = true
+    while seguir {
+        let trozo = f.read_bytes(4096)?
+        if trozo.len() == 0 {
+            seguir = false
+        }
+        let mut i = 0
+        while i < trozo.len() {
+            let mut o = trozo.get(i)
+            while let Some(x) = o {
+                todo.push(x)
+                o = None
+            }
+            i = i + 1
+        }
+    }
+    f.close()
+    return Ok(todo)
+}
+
+fn leer_archivo(ruta: str, separador: str) -> Result<Tabla> {
+    return analizar(bytes_de_archivo(ruta)?, separador)
+}
+
+# ---------- escribir ----------
+
+# El campo, entre comillas si hace falta (tiene el separador, comillas o un
+# salto de línea). `a_una_celda`: es la única celda de una fila vacía, que
+# Python escribe como "" para que no se confunda con una línea en blanco.
+fn _campo(s: str, d: i32, sola: bool) -> str {
+    let n = s.len()
+    if n == 0 {
+        if sola {
+            return "\"\""
+        }
+        return ""
+    }
+    let mut necesita = false
+    for i in 0..n {
+        let c = ord(s[i])
+        if c == d or c == 34 or c == 10 or c == 13 {
+            necesita = true
+        }
+    }
+    if necesita == false {
+        return s
+    }
+    let partes: Vec<str> = vec_new()
+    partes.push("\"")
+    let mut tramo = ""
+    for i in 0..n {
+        let c = s[i]
+        if ord(c) == 34 {
+            tramo = tramo + "\"\""
+        } else {
+            tramo = tramo + c
+        }
+        if tramo.len() > 200 {
+            partes.push(tramo)
+            tramo = ""
+        }
+    }
+    partes.push(tramo)
+    partes.push("\"")
+    return _unir(partes)
+}
+
+# La tabla como texto, con `terminador` al final de cada fila.
+fn escribir_con(t: Tabla, separador: str, terminador: str) -> str {
+    let d = ord(separador)
+    let partes: Vec<str> = vec_new()
+    let nf = filas(t)
+    for f in 0..nf {
+        let nc = columnas(t, f)
+        for c in 0..nc {
+            if c > 0 {
+                partes.push(separador)
+            }
+            partes.push(_campo(celda(t, f, c), d, nc == 1))
+        }
+        partes.push(terminador)
+    }
+    partes.push("")
+    return _unir(partes)
+}
+
+# Como csv.writer: filas terminadas en \r\n.
+fn escribir(t: Tabla, separador: str) -> str {
+    return escribir_con(t, separador, "\r\n")
+}
+
+fn guardar(t: Tabla, ruta: str, separador: str) -> Result<i32> {
+    let bytes = bytes_de(escribir(t, separador))
+    let f = file_open(ruta, "w")?
+    f.write_bytes(bytes)?
+    f.close()
+    return Ok(bytes.len())
+}

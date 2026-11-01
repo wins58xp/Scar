@@ -1,0 +1,713 @@
+# lib/lienzo.scar: un lienzo de píxeles para dibujar (use "lienzo").
+#
+#   use "lienzo"
+#
+#   let l = lienzo.nuevo(160, 120, lienzo.negro())
+#   lienzo.linea(l, 0, 0, 159, 119, lienzo.blanco())
+#   lienzo.circulo_lleno(l, 80, 60, 30, lienzo.color_a(255, 0, 0, 128))  # rojo a medias
+#   lienzo.poligono_lleno(l, [10, 50, 30], [100, 100, 70], lienzo.verde())
+#   lienzo.texto(l, 4, 4, "Año 2026", lienzo.amarillo())
+#
+# Todo el dibujo es SCAR: un Lienzo es un Vec<i32> de ancho·alto píxeles, uno
+# por fila, en ARGB (0xAARRGGBB: el alfa en los 8 bits de arriba). Lo que cae
+# fuera del lienzo no se dibuja. Cada primitiva pinta cada píxel una sola vez
+# y mezcla por alfa (pintar), así que un color a medias se ve parejo.
+#
+# Cómo se decide qué píxeles van, para que sea predecible:
+# - linea: Bresenham, con los dos extremos.
+# - circulo: el algoritmo del punto medio; circulo_lleno: los (x, y) con
+#   (x-cx)² + (y-cy)² <= r².
+# - poligono_lleno: un píxel va si su centro (x+0.5, y+0.5) está adentro, con
+#   la regla par-impar (un polígono que se cruza deja huecos donde se pisa).
+#   El borde izquierdo y el de arriba se incluyen, el derecho y el de abajo no,
+#   así que dos polígonos que comparten un lado no se pisan.
+# - texto: la fuente de 8x8 de la BIOS de IBM (dominio público, de
+#   github.com/dhepper/font8x8), con ASCII y Latin-1 (á, ñ, ü, ¿, ¡...); un
+#   carácter que no está sale como '?'.
+#
+# Este lienzo es distinto del de gui (gui.lienzo), que dibuja directo en la
+# ventana con SDL2: este es un buffer en memoria, que no necesita pantalla, se
+# puede probar y guardar. Para mostrarlo en la ventana de gui está
+# pantalla.mostrar(ui, l, escala) (lib/pantalla.scar).
+
+struct Lienzo {
+    ancho: i32
+    alto: i32
+    pixeles: Vec<i32>
+    fuente: Vec<i32>
+}
+
+# ---- colores -----------------------------------------------------------------
+
+# Un color opaco con rojo, verde y azul de 0 a 255.
+fn color(r: i32, g: i32, b: i32) -> i32 {
+    return color_a(r, g, b, 255)
+}
+
+# Un color con alfa (0 transparente, 255 opaco).
+fn color_a(r: i32, g: i32, b: i32, a: i32) -> i32 {
+    return ((a & 255) << 24) | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255)
+}
+
+fn canal_r(c: i32) -> i32 {
+    return (c >> 16) & 255
+}
+
+fn canal_g(c: i32) -> i32 {
+    return (c >> 8) & 255
+}
+
+fn canal_b(c: i32) -> i32 {
+    return c & 255
+}
+
+fn canal_a(c: i32) -> i32 {
+    return (c >> 24) & 255
+}
+
+fn negro() -> i32 {
+    return color(0, 0, 0)
+}
+
+fn blanco() -> i32 {
+    return color(255, 255, 255)
+}
+
+fn rojo() -> i32 {
+    return color(255, 0, 0)
+}
+
+fn verde() -> i32 {
+    return color(0, 255, 0)
+}
+
+fn azul() -> i32 {
+    return color(0, 0, 255)
+}
+
+fn amarillo() -> i32 {
+    return color(255, 255, 0)
+}
+
+fn gris(v: i32) -> i32 {
+    return color(v, v, v)
+}
+
+fn transparente() -> i32 {
+    return 0
+}
+
+# c pintado encima de fondo ("over" con alfa sin premultiplicar, redondeado):
+# con c opaco da c, con c transparente da fondo.
+fn mezclar(fondo: i32, c: i32) -> i32 {
+    let sa = canal_a(c)
+    if sa == 255 {
+        return c
+    }
+    if sa == 0 {
+        return fondo
+    }
+    let da = canal_a(fondo)
+    let resto = da * (255 - sa)          # alfa del fondo que se ve, por 255
+    let oa = sa * 255 + resto            # alfa de salida, por 255
+    let r = (canal_r(c) * sa * 255 + canal_r(fondo) * resto + oa / 2) / oa
+    let g = (canal_g(c) * sa * 255 + canal_g(fondo) * resto + oa / 2) / oa
+    let b = (canal_b(c) * sa * 255 + canal_b(fondo) * resto + oa / 2) / oa
+    return color_a(r, g, b, (oa + 127) / 255)
+}
+
+# ---- el lienzo -----------------------------------------------------------------
+
+# Un lienzo de ancho x alto, pintado entero de fondo.
+fn nuevo(ancho: i32, alto: i32, fondo: i32) -> Lienzo {
+    if ancho <= 0 or alto <= 0 {
+        panic("lienzo.nuevo: el ancho y el alto tienen que ser positivos")
+    }
+    let l = Lienzo { ancho: ancho, alto: alto, pixeles: vec_new(ancho * alto), fuente: _fuente() }
+    for i in 0..ancho * alto {
+        l.pixeles.push(fondo)
+    }
+    return l
+}
+
+fn ancho(l: Lienzo) -> i32 {
+    return l.ancho
+}
+
+fn alto(l: Lienzo) -> i32 {
+    return l.alto
+}
+
+# Todo el lienzo de un color (sin mezclar).
+fn limpiar(l: Lienzo, c: i32) {
+    for i in 0..l.ancho * l.alto {
+        l.pixeles.set(i, c)
+    }
+}
+
+fn adentro(l: Lienzo, x: i32, y: i32) -> bool {
+    return x >= 0 and y >= 0 and x < l.ancho and y < l.alto
+}
+
+# El color del píxel (x, y); 0 (transparente) fuera del lienzo.
+fn leer(l: Lienzo, x: i32, y: i32) -> i32 {
+    if not adentro(l, x, y) {
+        return 0
+    }
+    return l.pixeles.get(y * l.ancho + x).unwrap_or(0)
+}
+
+# Pone c en (x, y) tal cual, sin mezclar.
+fn poner(l: Lienzo, x: i32, y: i32, c: i32) {
+    if adentro(l, x, y) {
+        l.pixeles.set(y * l.ancho + x, c)
+    }
+}
+
+# Pinta c encima de lo que hay en (x, y), mezclando por alfa.
+fn pintar(l: Lienzo, x: i32, y: i32, c: i32) {
+    if adentro(l, x, y) {
+        let i = y * l.ancho + x
+        l.pixeles.set(i, mezclar(l.pixeles.get(i).unwrap_or(0), c))
+    }
+}
+
+# Una suma de control del lienzo entero (para comparar dos dibujos sin mirar
+# cada píxel): h = h·31 + píxel (como entero sin signo), módulo 2^31 - 1.
+fn suma(l: Lienzo) -> i64 {
+    let mut h: i64 = 0
+    for i in 0..l.ancho * l.alto {
+        let p = to_i64(l.pixeles.get(i).unwrap_or(0))
+        let u = if p < 0 { p + 4294967296 } else { p }
+        h = (h * 31 + u) % 2147483647
+    }
+    return h
+}
+
+# ---- líneas y rectángulos --------------------------------------------------------
+
+# Una fila de x0 a x1 (incluidos) en y.
+fn _fila(l: Lienzo, x0: i32, x1: i32, y: i32, c: i32) {
+    if y < 0 or y >= l.alto {
+        return
+    }
+    let a = max(x0, 0)
+    let b = min(x1, l.ancho - 1)
+    let mut x = a
+    while x <= b {
+        pintar(l, x, y, c)
+        x = x + 1
+    }
+}
+
+# Los píxeles ya pintados por una primitiva hecha de varias líneas (el borde de
+# un polígono): con un color a medias, un píxel donde se tocan dos lados se
+# pinta una sola vez. Con un color opaco no hace falta (pintarlo dos veces da
+# lo mismo) y queda vacía.
+struct Marcas {
+    m: Vec<i32>
+    activa: bool
+}
+
+# La línea de (x0, y0) a (x1, y1), con los dos extremos (Bresenham).
+fn linea(l: Lienzo, x0: i32, y0: i32, x1: i32, y1: i32, c: i32) {
+    _linea(l, x0, y0, x1, y1, c, Marcas { m: vec_new(), activa: false })
+}
+
+fn _linea(l: Lienzo, x0: i32, y0: i32, x1: i32, y1: i32, c: i32, marcas: Marcas) {
+    let dx = abs(x1 - x0)
+    let dy = 0 - abs(y1 - y0)
+    let sx = if x0 < x1 { 1 } else { 0 - 1 }
+    let sy = if y0 < y1 { 1 } else { 0 - 1 }
+    let mut err = dx + dy
+    let mut x = x0
+    let mut y = y0
+    while true {
+        if not marcas.activa {
+            pintar(l, x, y, c)
+        } else if adentro(l, x, y) and marcas.m.get(y * l.ancho + x).unwrap_or(0) == 0 {
+            marcas.m.set(y * l.ancho + x, 1)
+            pintar(l, x, y, c)
+        }
+        if x == x1 and y == y1 {
+            break
+        }
+        let e2 = 2 * err
+        if e2 >= dy {
+            err = err + dy
+            x = x + sx
+        }
+        if e2 <= dx {
+            err = err + dx
+            y = y + sy
+        }
+    }
+}
+
+# El borde de un rectángulo de w x h con la esquina de arriba a la izquierda en (x, y).
+fn rect(l: Lienzo, x: i32, y: i32, w: i32, h: i32, c: i32) {
+    if w <= 0 or h <= 0 {
+        return
+    }
+    _fila(l, x, x + w - 1, y, c)
+    if h > 1 {
+        _fila(l, x, x + w - 1, y + h - 1, c)
+    }
+    let mut yy = y + 1
+    while yy < y + h - 1 {
+        pintar(l, x, yy, c)
+        if w > 1 {
+            pintar(l, x + w - 1, yy, c)
+        }
+        yy = yy + 1
+    }
+}
+
+# Un rectángulo lleno de w x h con la esquina de arriba a la izquierda en (x, y).
+fn rect_lleno(l: Lienzo, x: i32, y: i32, w: i32, h: i32, c: i32) {
+    let a = max(y, 0)
+    let b = min(y + h, l.alto)
+    let mut yy = a
+    while yy < b {
+        _fila(l, x, x + w - 1, yy, c)
+        yy = yy + 1
+    }
+}
+
+# ---- círculos ------------------------------------------------------------------
+
+# El borde de un círculo de radio r con centro en (cx, cy) (punto medio).
+fn circulo(l: Lienzo, cx: i32, cy: i32, r: i32, c: i32) {
+    if r < 0 {
+        return
+    }
+    if r == 0 {
+        pintar(l, cx, cy, c)
+        return
+    }
+    let mut x = r
+    let mut y = 0
+    let mut err = 1 - r
+    while x >= y {
+        if y == 0 {
+            pintar(l, cx + x, cy, c)
+            pintar(l, cx - x, cy, c)
+            pintar(l, cx, cy + x, c)
+            pintar(l, cx, cy - x, c)
+        } else if x == y {
+            pintar(l, cx + x, cy + y, c)
+            pintar(l, cx - x, cy + y, c)
+            pintar(l, cx + x, cy - y, c)
+            pintar(l, cx - x, cy - y, c)
+        } else {
+            pintar(l, cx + x, cy + y, c)
+            pintar(l, cx - x, cy + y, c)
+            pintar(l, cx + x, cy - y, c)
+            pintar(l, cx - x, cy - y, c)
+            pintar(l, cx + y, cy + x, c)
+            pintar(l, cx - y, cy + x, c)
+            pintar(l, cx + y, cy - x, c)
+            pintar(l, cx - y, cy - x, c)
+        }
+        y = y + 1
+        if err < 0 {
+            err = err + 2 * y + 1
+        } else {
+            x = x - 1
+            err = err + 2 * (y - x) + 1
+        }
+    }
+}
+
+# La raíz cuadrada entera (la más grande k con k² <= n).
+fn _raiz(n: i32) -> i32 {
+    let mut k = to_i32(sqrt(to_f64(n)))
+    while k * k > n {
+        k = k - 1
+    }
+    while (k + 1) * (k + 1) <= n {
+        k = k + 1
+    }
+    return k
+}
+
+# Un círculo lleno: los píxeles (x, y) con (x-cx)² + (y-cy)² <= r².
+fn circulo_lleno(l: Lienzo, cx: i32, cy: i32, r: i32, c: i32) {
+    if r < 0 {
+        return
+    }
+    let mut dy = 0 - r
+    while dy <= r {
+        let dx = _raiz(r * r - dy * dy)
+        _fila(l, cx - dx, cx + dx, cy + dy, c)
+        dy = dy + 1
+    }
+}
+
+# ---- polígonos ------------------------------------------------------------------
+
+# El borde del polígono de vértices (xs[i], ys[i]), cerrado. Como toda fn que
+# recibe un Vec, se queda con las listas.
+fn poligono(l: Lienzo, xs: Vec<i32>, ys: Vec<i32>, c: i32) {
+    let n = min(xs.len(), ys.len())
+    if n == 0 {
+        return
+    }
+    if n == 1 {
+        pintar(l, xs.get(0).unwrap_or(0), ys.get(0).unwrap_or(0), c)
+        return
+    }
+    let marcas = Marcas { m: vec_new(), activa: canal_a(c) != 255 }
+    if marcas.activa {
+        for i in 0..l.ancho * l.alto {
+            marcas.m.push(0)
+        }
+    }
+    for i in 0..n {
+        let j = (i + 1) % n
+        _linea(l, xs.get(i).unwrap_or(0), ys.get(i).unwrap_or(0),
+               xs.get(j).unwrap_or(0), ys.get(j).unwrap_or(0), c, marcas)
+    }
+}
+
+# Un polígono lleno: los píxeles cuyo centro está adentro (regla par-impar).
+fn poligono_lleno(l: Lienzo, xs: Vec<i32>, ys: Vec<i32>, c: i32) {
+    let n = min(xs.len(), ys.len())
+    if n < 3 {
+        return
+    }
+    let mut ymin = ys.get(0).unwrap_or(0)
+    let mut ymax = ymin
+    for i in 1..n {
+        let y = ys.get(i).unwrap_or(0)
+        ymin = min(ymin, y)
+        ymax = max(ymax, y)
+    }
+    let desde = max(ymin, 0)
+    let hasta = min(ymax, l.alto)
+    let mut cortes: Vec<f64> = vec_new()
+    let mut y = desde
+    while y < hasta {
+        let yc = to_f64(y) + 0.5
+        while cortes.len() > 0 {
+            cortes.pop()
+        }
+        for i in 0..n {
+            let j = (i + 1) % n
+            let ya = to_f64(ys.get(i).unwrap_or(0))
+            let yb = to_f64(ys.get(j).unwrap_or(0))
+            if (ya <= yc and yc < yb) or (yb <= yc and yc < ya) {
+                let xa = to_f64(xs.get(i).unwrap_or(0))
+                let xb = to_f64(xs.get(j).unwrap_or(0))
+                cortes.push(xa + (yc - ya) * (xb - xa) / (yb - ya))
+            }
+        }
+        # ordenar (son pocos: inserción)
+        let m = cortes.len()
+        for a in 1..m {
+            let v = cortes.get(a).unwrap_or(0.0)
+            let mut b = a - 1
+            while b >= 0 and cortes.get(b).unwrap_or(0.0) > v {
+                cortes.set(b + 1, cortes.get(b).unwrap_or(0.0))
+                b = b - 1
+            }
+            cortes.set(b + 1, v)
+        }
+        # de a pares: van los x con centro en [xa, xb)
+        let mut k = 0
+        while k + 1 < m {
+            let xa = cortes.get(k).unwrap_or(0.0)
+            let xb = cortes.get(k + 1).unwrap_or(0.0)
+            let x0 = to_i32(0.0 - floor(0.5 - xa))         # ceil(xa - 0.5)
+            let x1 = to_i32(0.0 - floor(0.5 - xb)) - 1
+            _fila(l, x0, x1, y, c)
+            k = k + 2
+        }
+        y = y + 1
+    }
+}
+
+fn triangulo(l: Lienzo, x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32, c: i32) {
+    poligono(l, [x0, x1, x2], [y0, y1, y2], c)
+}
+
+fn triangulo_lleno(l: Lienzo, x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32, c: i32) {
+    poligono_lleno(l, [x0, x1, x2], [y0, y1, y2], c)
+}
+
+# ---- copiar ---------------------------------------------------------------------
+
+# Pinta todo el lienzo origen encima de destino, con su esquina en (x, y).
+fn copiar(destino: Lienzo, origen: Lienzo, x: i32, y: i32) {
+    for oy in 0..origen.alto {
+        for ox in 0..origen.ancho {
+            pintar(destino, x + ox, y + oy, origen.pixeles.get(oy * origen.ancho + ox).unwrap_or(0))
+        }
+    }
+}
+
+# ---- texto ---------------------------------------------------------------------
+
+# Dónde empieza en la fuente el carácter de código k (-1 si no está).
+fn _glifo(k: i32) -> i32 {
+    if k >= 32 and k <= 126 {
+        return (k - 32) * 8
+    }
+    if k >= 160 and k <= 255 {
+        return (95 + k - 160) * 8
+    }
+    return 0 - 1
+}
+
+# Escribe s con la fuente de 8x8 (cada carácter ocupa 8 x 8 píxeles por
+# escala) desde (x, y), la esquina de arriba a la izquierda. Solo pinta los
+# puntos de cada letra: el fondo queda. "\n" sigue en la línea de abajo.
+fn texto_escala(l: Lienzo, x: i32, y: i32, s: str, c: i32, escala: i32) {
+    let e = max(escala, 1)
+    let mut cx = x
+    let mut cy = y
+    for i in 0..len(s) {
+        let ch = s[i]
+        if ch == "\n" {
+            cx = x
+            cy = cy + 8 * e
+        } else {
+            let mut g = _glifo(ord(ch))
+            if g < 0 {
+                g = _glifo(63)       # '?'
+            }
+            for fila in 0..8 {
+                let bits = l.fuente.get(g + fila).unwrap_or(0)
+                for col in 0..8 {
+                    if (bits >> col) & 1 == 1 {
+                        if e == 1 {
+                            pintar(l, cx + col, cy + fila, c)
+                        } else {
+                            rect_lleno(l, cx + col * e, cy + fila * e, e, e, c)
+                        }
+                    }
+                }
+            }
+            cx = cx + 8 * e
+        }
+    }
+}
+
+fn texto(l: Lienzo, x: i32, y: i32, s: str, c: i32) {
+    texto_escala(l, x, y, s, c, 1)
+}
+
+# Cuánto mide s escrito con texto_escala: el ancho de la línea más larga.
+fn ancho_texto(s: str, escala: i32) -> i32 {
+    let e = max(escala, 1)
+    let mut mayor = 0
+    let mut actual = 0
+    for i in 0..len(s) {
+        if s[i] == "\n" {
+            actual = 0
+        } else {
+            actual = actual + 1
+            mayor = max(mayor, actual)
+        }
+    }
+    return mayor * 8 * e
+}
+
+# La fuente: 8 filas por carácter, el bit 0 es el punto de la izquierda.
+# U+0020-U+007E y U+00A0-U+00FF, de font8x8 (Daniel Hepper, dominio público,
+# a partir de las fuentes VGA de IBM).
+fn _fuente() -> Vec<i32> {
+    return [
+        0, 0, 0, 0, 0, 0, 0, 0,   # U+0020 espacio
+        24, 60, 60, 24, 24, 0, 24, 0,   # U+0021 !
+        54, 54, 0, 0, 0, 0, 0, 0,   # U+0022 "
+        54, 54, 127, 54, 127, 54, 54, 0,   # U+0023 #
+        12, 62, 3, 30, 48, 31, 12, 0,   # U+0024 $
+        0, 99, 51, 24, 12, 102, 99, 0,   # U+0025 %
+        28, 54, 28, 110, 59, 51, 110, 0,   # U+0026 &
+        6, 6, 3, 0, 0, 0, 0, 0,   # U+0027 '
+        24, 12, 6, 6, 6, 12, 24, 0,   # U+0028 (
+        6, 12, 24, 24, 24, 12, 6, 0,   # U+0029 )
+        0, 102, 60, 255, 60, 102, 0, 0,   # U+002A *
+        0, 12, 12, 63, 12, 12, 0, 0,   # U+002B +
+        0, 0, 0, 0, 0, 12, 12, 6,   # U+002C ,
+        0, 0, 0, 63, 0, 0, 0, 0,   # U+002D -
+        0, 0, 0, 0, 0, 12, 12, 0,   # U+002E .
+        96, 48, 24, 12, 6, 3, 1, 0,   # U+002F /
+        62, 99, 115, 123, 111, 103, 62, 0,   # U+0030 0
+        12, 14, 12, 12, 12, 12, 63, 0,   # U+0031 1
+        30, 51, 48, 28, 6, 51, 63, 0,   # U+0032 2
+        30, 51, 48, 28, 48, 51, 30, 0,   # U+0033 3
+        56, 60, 54, 51, 127, 48, 120, 0,   # U+0034 4
+        63, 3, 31, 48, 48, 51, 30, 0,   # U+0035 5
+        28, 6, 3, 31, 51, 51, 30, 0,   # U+0036 6
+        63, 51, 48, 24, 12, 12, 12, 0,   # U+0037 7
+        30, 51, 51, 30, 51, 51, 30, 0,   # U+0038 8
+        30, 51, 51, 62, 48, 24, 14, 0,   # U+0039 9
+        0, 12, 12, 0, 0, 12, 12, 0,   # U+003A :
+        0, 12, 12, 0, 0, 12, 12, 6,   # U+003B ;
+        24, 12, 6, 3, 6, 12, 24, 0,   # U+003C <
+        0, 0, 63, 0, 0, 63, 0, 0,   # U+003D =
+        6, 12, 24, 48, 24, 12, 6, 0,   # U+003E >
+        30, 51, 48, 24, 12, 0, 12, 0,   # U+003F ?
+        62, 99, 123, 123, 123, 3, 30, 0,   # U+0040 @
+        12, 30, 51, 51, 63, 51, 51, 0,   # U+0041 A
+        63, 102, 102, 62, 102, 102, 63, 0,   # U+0042 B
+        60, 102, 3, 3, 3, 102, 60, 0,   # U+0043 C
+        31, 54, 102, 102, 102, 54, 31, 0,   # U+0044 D
+        127, 70, 22, 30, 22, 70, 127, 0,   # U+0045 E
+        127, 70, 22, 30, 22, 6, 15, 0,   # U+0046 F
+        60, 102, 3, 3, 115, 102, 124, 0,   # U+0047 G
+        51, 51, 51, 63, 51, 51, 51, 0,   # U+0048 H
+        30, 12, 12, 12, 12, 12, 30, 0,   # U+0049 I
+        120, 48, 48, 48, 51, 51, 30, 0,   # U+004A J
+        103, 102, 54, 30, 54, 102, 103, 0,   # U+004B K
+        15, 6, 6, 6, 70, 102, 127, 0,   # U+004C L
+        99, 119, 127, 127, 107, 99, 99, 0,   # U+004D M
+        99, 103, 111, 123, 115, 99, 99, 0,   # U+004E N
+        28, 54, 99, 99, 99, 54, 28, 0,   # U+004F O
+        63, 102, 102, 62, 6, 6, 15, 0,   # U+0050 P
+        30, 51, 51, 51, 59, 30, 56, 0,   # U+0051 Q
+        63, 102, 102, 62, 54, 102, 103, 0,   # U+0052 R
+        30, 51, 7, 14, 56, 51, 30, 0,   # U+0053 S
+        63, 45, 12, 12, 12, 12, 30, 0,   # U+0054 T
+        51, 51, 51, 51, 51, 51, 63, 0,   # U+0055 U
+        51, 51, 51, 51, 51, 30, 12, 0,   # U+0056 V
+        99, 99, 99, 107, 127, 119, 99, 0,   # U+0057 W
+        99, 99, 54, 28, 28, 54, 99, 0,   # U+0058 X
+        51, 51, 51, 30, 12, 12, 30, 0,   # U+0059 Y
+        127, 99, 49, 24, 76, 102, 127, 0,   # U+005A Z
+        30, 6, 6, 6, 6, 6, 30, 0,   # U+005B [
+        3, 6, 12, 24, 48, 96, 64, 0,   # U+005C \
+        30, 24, 24, 24, 24, 24, 30, 0,   # U+005D ]
+        8, 28, 54, 99, 0, 0, 0, 0,   # U+005E ^
+        0, 0, 0, 0, 0, 0, 0, 255,   # U+005F _
+        12, 12, 24, 0, 0, 0, 0, 0,   # U+0060 `
+        0, 0, 30, 48, 62, 51, 110, 0,   # U+0061 a
+        7, 6, 6, 62, 102, 102, 59, 0,   # U+0062 b
+        0, 0, 30, 51, 3, 51, 30, 0,   # U+0063 c
+        56, 48, 48, 62, 51, 51, 110, 0,   # U+0064 d
+        0, 0, 30, 51, 63, 3, 30, 0,   # U+0065 e
+        28, 54, 6, 15, 6, 6, 15, 0,   # U+0066 f
+        0, 0, 110, 51, 51, 62, 48, 31,   # U+0067 g
+        7, 6, 54, 110, 102, 102, 103, 0,   # U+0068 h
+        12, 0, 14, 12, 12, 12, 30, 0,   # U+0069 i
+        48, 0, 48, 48, 48, 51, 51, 30,   # U+006A j
+        7, 6, 102, 54, 30, 54, 103, 0,   # U+006B k
+        14, 12, 12, 12, 12, 12, 30, 0,   # U+006C l
+        0, 0, 51, 127, 127, 107, 99, 0,   # U+006D m
+        0, 0, 31, 51, 51, 51, 51, 0,   # U+006E n
+        0, 0, 30, 51, 51, 51, 30, 0,   # U+006F o
+        0, 0, 59, 102, 102, 62, 6, 15,   # U+0070 p
+        0, 0, 110, 51, 51, 62, 48, 120,   # U+0071 q
+        0, 0, 59, 110, 102, 6, 15, 0,   # U+0072 r
+        0, 0, 62, 3, 30, 48, 31, 0,   # U+0073 s
+        8, 12, 62, 12, 12, 44, 24, 0,   # U+0074 t
+        0, 0, 51, 51, 51, 51, 110, 0,   # U+0075 u
+        0, 0, 51, 51, 51, 30, 12, 0,   # U+0076 v
+        0, 0, 99, 107, 127, 127, 54, 0,   # U+0077 w
+        0, 0, 99, 54, 28, 54, 99, 0,   # U+0078 x
+        0, 0, 51, 51, 51, 62, 48, 31,   # U+0079 y
+        0, 0, 63, 25, 12, 38, 63, 0,   # U+007A z
+        56, 12, 12, 7, 12, 12, 56, 0,   # U+007B {
+        24, 24, 24, 0, 24, 24, 24, 0,   # U+007C |
+        7, 12, 12, 56, 12, 12, 7, 0,   # U+007D }
+        110, 59, 0, 0, 0, 0, 0, 0,   # U+007E ~
+        0, 0, 0, 0, 0, 0, 0, 0,   # U+00A0 espacio que no corta
+        24, 24, 0, 24, 24, 24, 24, 0,   # U+00A1 ¡
+        24, 24, 126, 3, 3, 126, 24, 24,   # U+00A2 ¢
+        28, 54, 38, 15, 6, 103, 63, 0,   # U+00A3 £
+        0, 0, 99, 62, 54, 62, 99, 0,   # U+00A4 ¤
+        51, 51, 30, 63, 12, 63, 12, 12,   # U+00A5 ¥
+        24, 24, 24, 0, 24, 24, 24, 0,   # U+00A6 ¦
+        124, 198, 28, 54, 54, 28, 51, 30,   # U+00A7 §
+        51, 0, 0, 0, 0, 0, 0, 0,   # U+00A8 ¨
+        60, 66, 153, 133, 133, 153, 66, 60,   # U+00A9 ©
+        60, 54, 54, 124, 0, 0, 0, 0,   # U+00AA ª
+        0, 204, 102, 51, 102, 204, 0, 0,   # U+00AB «
+        0, 0, 0, 63, 48, 48, 0, 0,   # U+00AC ¬
+        0, 0, 0, 0, 0, 0, 0, 0,   # U+00AD guion suave
+        60, 66, 157, 165, 157, 165, 66, 60,   # U+00AE ®
+        126, 0, 0, 0, 0, 0, 0, 0,   # U+00AF ¯
+        28, 54, 54, 28, 0, 0, 0, 0,   # U+00B0 °
+        24, 24, 126, 24, 24, 0, 126, 0,   # U+00B1 ±
+        28, 48, 24, 12, 60, 0, 0, 0,   # U+00B2 ²
+        28, 48, 24, 48, 28, 0, 0, 0,   # U+00B2 ²
+        24, 12, 0, 0, 0, 0, 0, 0,   # U+00B2 ²
+        0, 0, 102, 102, 102, 62, 6, 3,   # U+00B5 µ
+        254, 219, 219, 222, 216, 216, 216, 0,   # U+00B6 ¶
+        0, 0, 0, 24, 24, 0, 0, 0,   # U+00B7 ·
+        0, 0, 0, 0, 0, 24, 48, 30,   # U+00B8 ¸
+        8, 12, 8, 28, 0, 0, 0, 0,   # U+00B9 ¹
+        28, 54, 54, 28, 0, 0, 0, 0,   # U+00BA º
+        0, 51, 102, 204, 102, 51, 0, 0,   # U+00BB »
+        195, 99, 51, 189, 236, 246, 243, 3,   # U+00BC ¼
+        195, 99, 51, 123, 204, 102, 51, 240,   # U+00BD ½
+        3, 196, 99, 180, 219, 172, 230, 128,   # U+00BE ¾
+        12, 0, 12, 6, 3, 51, 30, 0,   # U+00BF ¿
+        7, 0, 28, 54, 99, 127, 99, 0,   # U+00C0 À
+        112, 0, 28, 54, 99, 127, 99, 0,   # U+00C1 Á
+        28, 54, 0, 62, 99, 127, 99, 0,   # U+00C2 Â
+        110, 59, 0, 62, 99, 127, 99, 0,   # U+00C3 Ã
+        99, 28, 54, 99, 127, 99, 99, 0,   # U+00C4 Ä
+        12, 12, 0, 30, 51, 63, 51, 0,   # U+00C5 Å
+        124, 54, 51, 127, 51, 51, 115, 0,   # U+00C6 Æ
+        30, 51, 3, 51, 30, 24, 48, 30,   # U+00C7 Ç
+        7, 0, 63, 6, 30, 6, 63, 0,   # U+00C8 È
+        56, 0, 63, 6, 30, 6, 63, 0,   # U+00C9 É
+        12, 18, 63, 6, 30, 6, 63, 0,   # U+00CA Ê
+        54, 0, 63, 6, 30, 6, 63, 0,   # U+00CB Ë
+        7, 0, 30, 12, 12, 12, 30, 0,   # U+00CC Ì
+        56, 0, 30, 12, 12, 12, 30, 0,   # U+00CD Í
+        12, 18, 0, 30, 12, 12, 30, 0,   # U+00CE Î
+        51, 0, 30, 12, 12, 12, 30, 0,   # U+00CF Ï
+        63, 102, 111, 111, 102, 102, 63, 0,   # U+00D0 Ð
+        63, 0, 51, 55, 63, 59, 51, 0,   # U+00D1 Ñ
+        14, 0, 24, 60, 102, 60, 24, 0,   # U+00D2 Ò
+        112, 0, 24, 60, 102, 60, 24, 0,   # U+00D3 Ó
+        60, 102, 24, 60, 102, 60, 24, 0,   # U+00D4 Ô
+        110, 59, 0, 62, 99, 99, 62, 0,   # U+00D5 Õ
+        195, 24, 60, 102, 102, 60, 24, 0,   # U+00D6 Ö
+        0, 54, 28, 8, 28, 54, 0, 0,   # U+00D7 ×
+        92, 54, 115, 123, 111, 54, 29, 0,   # U+00D8 Ø
+        14, 0, 102, 102, 102, 102, 60, 0,   # U+00D9 Ù
+        112, 0, 102, 102, 102, 102, 60, 0,   # U+00DA Ú
+        60, 102, 0, 102, 102, 102, 60, 0,   # U+00DB Û
+        51, 0, 51, 51, 51, 51, 30, 0,   # U+00DC Ü
+        112, 0, 102, 102, 60, 24, 24, 0,   # U+00DD Ý
+        15, 6, 62, 102, 102, 62, 6, 15,   # U+00DE Þ
+        0, 30, 51, 31, 51, 31, 3, 3,   # U+00DF ß
+        7, 0, 30, 48, 62, 51, 126, 0,   # U+00E0 à
+        56, 0, 30, 48, 62, 51, 126, 0,   # U+00E1 á
+        126, 195, 60, 96, 124, 102, 252, 0,   # U+00E2 â
+        110, 59, 30, 48, 62, 51, 126, 0,   # U+00E3 ã
+        51, 0, 30, 48, 62, 51, 126, 0,   # U+00E4 ä
+        12, 12, 30, 48, 62, 51, 126, 0,   # U+00E5 å
+        0, 0, 254, 48, 254, 51, 254, 0,   # U+00E6 æ
+        0, 0, 30, 3, 3, 30, 48, 28,   # U+00E7 ç
+        7, 0, 30, 51, 63, 3, 30, 0,   # U+00E8 è
+        56, 0, 30, 51, 63, 3, 30, 0,   # U+00E9 é
+        126, 195, 60, 102, 126, 6, 60, 0,   # U+00EA ê
+        51, 0, 30, 51, 63, 3, 30, 0,   # U+00EB ë
+        7, 0, 14, 12, 12, 12, 30, 0,   # U+00EC ì
+        28, 0, 14, 12, 12, 12, 30, 0,   # U+00ED í
+        62, 99, 28, 24, 24, 24, 60, 0,   # U+00EE î
+        51, 0, 14, 12, 12, 12, 30, 0,   # U+00EF ï
+        27, 14, 27, 48, 62, 51, 30, 0,   # U+00F0 ð
+        0, 31, 0, 31, 51, 51, 51, 0,   # U+00F1 ñ
+        0, 7, 0, 30, 51, 51, 30, 0,   # U+00F2 ò
+        0, 56, 0, 30, 51, 51, 30, 0,   # U+00F3 ó
+        30, 51, 0, 30, 51, 51, 30, 0,   # U+00F4 ô
+        110, 59, 0, 30, 51, 51, 30, 0,   # U+00F5 õ
+        0, 51, 0, 30, 51, 51, 30, 0,   # U+00F6 ö
+        24, 24, 0, 126, 0, 24, 24, 0,   # U+00F7 ÷
+        0, 96, 60, 118, 126, 110, 60, 6,   # U+00F8 ø
+        0, 7, 0, 51, 51, 51, 126, 0,   # U+00F9 ù
+        0, 56, 0, 51, 51, 51, 126, 0,   # U+00FA ú
+        30, 51, 0, 51, 51, 51, 126, 0,   # U+00FB û
+        0, 51, 0, 51, 51, 51, 126, 0,   # U+00FC ü
+        0, 56, 0, 51, 51, 62, 48, 31,   # U+00FD ý
+        0, 0, 6, 62, 102, 62, 6, 0,   # U+00FE þ
+        0, 51, 0, 51, 51, 62, 48, 31   # U+00FF ÿ
+    ]
+}

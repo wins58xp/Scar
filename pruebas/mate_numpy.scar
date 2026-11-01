@@ -1,0 +1,62 @@
+# lib/mate contra numpy y scipy: lo corre pruebas/test_mate_numpy.py, que
+# regenera los mismos datos con su propio xorshift32 y compara cada número.
+# Cada línea: una etiqueta y los valores (f64 con todos sus dígitos).
+
+use "mate"
+
+fn imprimir_m4(etq: str, k: i32, m: mate.Mat4) {
+    print(etq, k, mate.m4_get(m, 0, 0), mate.m4_get(m, 0, 1), mate.m4_get(m, 0, 2), mate.m4_get(m, 0, 3), mate.m4_get(m, 1, 0), mate.m4_get(m, 1, 1), mate.m4_get(m, 1, 2), mate.m4_get(m, 1, 3), mate.m4_get(m, 2, 0), mate.m4_get(m, 2, 1), mate.m4_get(m, 2, 2), mate.m4_get(m, 2, 3), mate.m4_get(m, 3, 0), mate.m4_get(m, 3, 1), mate.m4_get(m, 3, 2), mate.m4_get(m, 3, 3))
+}
+
+fn al_azar(g: mate.Azar) -> mate.Mat4 {
+    let m = mate.m4_ceros()
+    for f in 0..4 {
+        for c in 0..4 {
+            mate.m4_set(m, f, c, mate.azar_entre(g, 0.0 - 1.0, 1.0))
+        }
+    }
+    return m
+}
+
+fn v3_al_azar(g: mate.Azar) -> mate.Vec3 {
+    return mate.v3(mate.azar_entre(g, 0.0 - 1.0, 1.0), mate.azar_entre(g, 0.0 - 1.0, 1.0), mate.azar_entre(g, 0.0 - 1.0, 1.0))
+}
+
+fn main() {
+    let g = mate.azar(20261026)
+    for k in 0..20 {
+        let a = al_azar(g)
+        let b = al_azar(g)
+        imprimir_m4("PROD", k, mate.m4_producto(a, b))
+        print("DET", k, mate.m4_determinante(a))
+        match mate.m4_inversa(a) {
+            Some(inv) => imprimir_m4("INV", k, inv)
+            None => print("INV", k, "singular")
+        }
+    }
+    for k in 0..20 {
+        let eje = v3_al_azar(g)
+        let ang = mate.azar_entre(g, 0.0 - 3.0, 3.0)
+        imprimir_m4("ROT", k, mate.m4_rotacion(eje, ang))
+        let q1 = mate.c_desde_eje_angulo(eje, ang)
+        let eje2 = v3_al_azar(g)
+        let ang2 = mate.azar_entre(g, 0.0 - 3.0, 3.0)
+        let q2 = mate.c_desde_eje_angulo(eje2, ang2)
+        imprimir_m4("CPROD", k, mate.c_a_m4(mate.c_producto(q1, q2)))
+        let tt = mate.azar_uniforme(g)
+        imprimir_m4("SLERP", k, mate.c_a_m4(mate.c_slerp(q1, q2, tt)))
+        let ojo = mate.v3_escala(v3_al_azar(g), 10.0)
+        let centro = v3_al_azar(g)
+        imprimir_m4("MIRAR", k, mate.m4_mirar_a(ojo, centro, mate.v3(0.0, 1.0, 0.0)))
+    }
+    for k in 0..10 {
+        let y = mate.azar_entre(g, 0.0 - 5.0, 5.0)
+        let x = mate.azar_entre(g, 0.0 - 5.0, 5.0)
+        let u = mate.azar_entre(g, 0.0 - 1.0, 1.0)
+        print("TRIG", k, mate.atan2(y, x), mate.asin(u), mate.acos(u))
+    }
+    let h = mate.azar(42)
+    for k in 0..1000 {
+        print("AZAR", k, mate.azar_siguiente(h))
+    }
+}

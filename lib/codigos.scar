@@ -1,0 +1,842 @@
+# lib/codigos.scar: codificar y firmar datos (use "codigos").
+#
+#   use "codigos"
+#
+#   let d = codigos.de_texto("hola")                   # los bytes UTF-8
+#   print(codigos.hex(d))                              # 686f6c61
+#   print(codigos.base64(d))                           # aG9sYQ==
+#   print(codigos.sha256_hex(d))                       # b221d9db...
+#   let firma = codigos.hmac_hex("sha256", codigos.de_texto("clave"), d)
+#   print(codigos.url_codificar("a b&c", false))       # a%20b%26c
+#   match codigos.uuid4() {
+#       Ok(u) => print(u)                              # 3b9f0f64-...
+#       Err(e) => print(e)
+#   }
+#
+# Escrita entera en SCAR:
+# - hex, base64 (alfabeto normal y el de URL, con o sin relleno);
+# - SHA-256 (FIPS 180-4), SHA-1 y MD5, estos dos solo para comprobar archivos y firmas
+#   viejas: no son seguros contra quien los ataca;
+# - HMAC (RFC 2104) con cualquiera de los tres;
+# - CRC-32 (el de zlib, PNG y gzip) y Adler-32;
+# - UUID versión 4 (RFC 4122), con los bytes al azar del sistema (/dev/urandom);
+# - escape de URL por ciento (RFC 3986), con espacio como %20 o como + (formularios).
+#
+# Los bytes van en un `Datos` (un Vec<i32> con valores de 0 a 255 adentro de un struct,
+# para poder usarlo varias veces: una fn que recibe un Vec se queda con él, un struct se
+# presta). Los resultados de los hashes son un `Datos` de 32, 20 o 16 bytes y su versión
+# en hexadecimal. Probada contra hashlib, hmac, base64, zlib, uuid y urllib de
+# Python. Compilados, los hashes procesan decenas de MB por segundo.
+
+use "zlib"
+use "texto"
+
+struct Datos {
+    v: Vec<i32>
+}
+
+# ---------- bytes ----------
+
+fn datos(v: Vec<i32>) -> Datos {
+    return Datos { v: v }
+}
+
+fn vacio() -> Datos {
+    let v: Vec<i32> = vec_new()
+    return Datos { v: v }
+}
+
+fn largo(d: Datos) -> i32 {
+    return d.v.len()
+}
+
+fn byte(d: Datos, i: i32) -> i32 {
+    return d.v.get(i).unwrap_or(0)
+}
+
+fn agregar(d: Datos, b: i32) {
+    d.v.push(b & 255)
+}
+
+fn copia(d: Datos) -> Datos {
+    let r = vacio()
+    for i in 0..d.v.len() {
+        r.v.push(d.v.get(i).unwrap_or(0))
+    }
+    return r
+}
+
+# `a` seguido de `b`, como un Datos nuevo.
+fn unir(a: Datos, b: Datos) -> Datos {
+    let r = copia(a)
+    for i in 0..b.v.len() {
+        r.v.push(b.v.get(i).unwrap_or(0))
+    }
+    return r
+}
+
+fn son_iguales(a: Datos, b: Datos) -> bool {
+    if a.v.len() != b.v.len() {
+        return false
+    }
+    # recorre todo aunque encuentre una diferencia, para no dar pistas por el tiempo
+    let mut dif = 0
+    for i in 0..a.v.len() {
+        dif = dif | (a.v.get(i).unwrap_or(0) ^ b.v.get(i).unwrap_or(0))
+    }
+    return dif == 0
+}
+
+# Los bytes UTF-8 de un texto.
+fn de_texto(s: str) -> Datos {
+    let r = vacio()
+    for i in 0..s.len() {
+        let c = ord(s[i])
+        if c < 128 {
+            r.v.push(c)
+        } else {
+            if c < 2048 {
+                r.v.push(192 | (c >> 6))
+                r.v.push(128 | (c & 63))
+            } else {
+                if c < 65536 {
+                    r.v.push(224 | (c >> 12))
+                    r.v.push(128 | ((c >> 6) & 63))
+                    r.v.push(128 | (c & 63))
+                } else {
+                    r.v.push(240 | (c >> 18))
+                    r.v.push(128 | ((c >> 12) & 63))
+                    r.v.push(128 | ((c >> 6) & 63))
+                    r.v.push(128 | (c & 63))
+                }
+            }
+        }
+    }
+    return r
+}
+
+# El texto que escriben esos bytes en UTF-8. Err si no es UTF-8 válido (con la misma
+# regla estricta de Python: sin sustitutos ni formas largas de más).
+fn a_cadena(d: Datos) -> Result<str> {
+    let mut s = ""
+    let n = d.v.len()
+    let mut i = 0
+    while i < n {
+        let b = d.v.get(i).unwrap_or(0)
+        let mut cp = 0
+        let mut extra = 0
+        let mut minimo = 0
+        if b < 128 {
+            cp = b
+        } else {
+            if b >= 194 and b < 224 {
+                cp = b & 31
+                extra = 1
+                minimo = 128
+            } else {
+                if b >= 224 and b < 240 {
+                    cp = b & 15
+                    extra = 2
+                    minimo = 2048
+                } else {
+                    if b >= 240 and b < 245 {
+                        cp = b & 7
+                        extra = 3
+                        minimo = 65536
+                    } else {
+                        return Err("codigos: bytes que no son UTF-8 en la posición " + a_texto(i))
+                    }
+                }
+            }
+        }
+        if i + extra >= n and extra > 0 {
+            return Err("codigos: UTF-8 cortado al final")
+        }
+        for k in 1..extra + 1 {
+            let c = d.v.get(i + k).unwrap_or(0)
+            if c < 128 or c >= 192 {
+                return Err("codigos: bytes que no son UTF-8 en la posición " + a_texto(i + k))
+            }
+            cp = (cp << 6) | (c & 63)
+        }
+        if extra > 0 and cp < minimo {
+            return Err("codigos: UTF-8 con una forma larga de más en la posición " + a_texto(i))
+        }
+        if cp > 1114111 or (cp >= 55296 and cp < 57344) {
+            return Err("codigos: UTF-8 con un valor fuera de rango en la posición " + a_texto(i))
+        }
+        s = s + chr(cp)
+        i = i + 1 + extra
+    }
+    return Ok(s)
+}
+
+# Los bytes de un archivo.
+fn de_archivo(ruta: str) -> Result<Datos> {
+    let f = file_open(ruta, "r")?
+    let todo = vacio()
+    let mut seguir = true
+    while seguir {
+        let trozo = f.read_bytes(65536)?
+        if trozo.len() == 0 {
+            seguir = false
+        }
+        let mut i = 0
+        while i < trozo.len() {
+            let mut o = trozo.get(i)
+            while let Some(x) = o {
+                todo.v.push(x)
+                o = None
+            }
+            i = i + 1
+        }
+    }
+    f.close()
+    return Ok(todo)
+}
+
+# `n` bytes al azar del sistema operativo (/dev/urandom).
+fn aleatorios(n: i32) -> Result<Datos> {
+    let f = file_open("/dev/urandom", "r")?
+    let r = vacio()
+    while r.v.len() < n {
+        let trozo = f.read_bytes(n - r.v.len())?
+        if trozo.len() == 0 {
+            f.close()
+            return Err("codigos: /dev/urandom no dio bytes")
+        }
+        let mut i = 0
+        while i < trozo.len() {
+            let mut o = trozo.get(i)
+            while let Some(x) = o {
+                r.v.push(x)
+                o = None
+            }
+            i = i + 1
+        }
+    }
+    f.close()
+    return Ok(r)
+}
+
+# ---------- hexadecimal ----------
+
+fn _dig_hex(n: i32) -> str {
+    let t = "0123456789abcdef"
+    return t[n]
+}
+
+# Los bytes como texto hexadecimal en minúsculas, dos cifras por byte.
+fn hex(d: Datos) -> str {
+    let mut s = ""
+    for i in 0..d.v.len() {
+        let b = d.v.get(i).unwrap_or(0)
+        s = s + _dig_hex(b >> 4) + _dig_hex(b & 15)
+    }
+    return s
+}
+
+fn _valor_hex(c: str) -> i32 {
+    let k = ord(c)
+    if k >= 48 and k <= 57 {
+        return k - 48
+    }
+    if k >= 97 and k <= 102 {
+        return k - 87
+    }
+    if k >= 65 and k <= 70 {
+        return k - 55
+    }
+    return 0 - 1
+}
+
+# Lo contrario: acepta mayúsculas y minúsculas, y falla con un largo impar o un
+# carácter que no es una cifra.
+fn de_hex(s: str) -> Result<Datos> {
+    let n = s.len()
+    if n % 2 != 0 {
+        return Err("codigos: el hexadecimal tiene un largo impar")
+    }
+    let r = vacio()
+    let mut i = 0
+    while i < n {
+        let a = _valor_hex(s[i])
+        let b = _valor_hex(s[i + 1])
+        if a < 0 or b < 0 {
+            return Err("codigos: carácter que no es hexadecimal en la posición " + a_texto(i))
+        }
+        r.v.push(a * 16 + b)
+        i = i + 2
+    }
+    return Ok(r)
+}
+
+# ---------- base64 ----------
+
+fn _alfabeto(url: bool) -> str {
+    if url {
+        return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    }
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+}
+
+fn _base64(d: Datos, url: bool, relleno: bool) -> str {
+    let a = _alfabeto(url)
+    let n = d.v.len()
+    let mut s = ""
+    let mut i = 0
+    while i < n {
+        let b0 = d.v.get(i).unwrap_or(0)
+        let b1 = d.v.get(i + 1).unwrap_or(0)
+        let b2 = d.v.get(i + 2).unwrap_or(0)
+        let v = (b0 << 16) | (b1 << 8) | b2
+        s = s + a[(v >> 18) & 63] + a[(v >> 12) & 63]
+        if i + 1 < n {
+            s = s + a[(v >> 6) & 63]
+        } else {
+            if relleno {
+                s = s + "="
+            }
+        }
+        if i + 2 < n {
+            s = s + a[v & 63]
+        } else {
+            if relleno {
+                s = s + "="
+            }
+        }
+        i = i + 3
+    }
+    return s
+}
+
+# Base64 (RFC 4648) con el alfabeto de + y / y el relleno con =.
+fn base64(d: Datos) -> str {
+    return _base64(d, false, true)
+}
+
+# Base64 seguro para URL y nombres de archivo: usa - y _ en vez de + y /. Con `relleno`
+# falso se omiten los = del final.
+fn base64_url(d: Datos, relleno: bool) -> str {
+    return _base64(d, true, relleno)
+}
+
+fn _valor_b64(c: str, url: bool) -> i32 {
+    let k = ord(c)
+    if k >= 65 and k <= 90 {
+        return k - 65
+    }
+    if k >= 97 and k <= 122 {
+        return k - 71
+    }
+    if k >= 48 and k <= 57 {
+        return k + 4
+    }
+    if url {
+        if k == 45 {
+            return 62
+        }
+        if k == 95 {
+            return 63
+        }
+    } else {
+        if k == 43 {
+            return 62
+        }
+        if k == 47 {
+            return 63
+        }
+    }
+    return 0 - 1
+}
+
+fn _de_base64(s: str, url: bool, relleno_opcional: bool) -> Result<Datos> {
+    let mut n = s.len()
+    let mut quitados = 0
+    while n > 0 and s[n - 1] == "=" {
+        n = n - 1
+        quitados = quitados + 1
+    }
+    if quitados > 2 {
+        return Err("codigos: base64 con demasiados =")
+    }
+    if relleno_opcional == false and (n + quitados) % 4 != 0 {
+        return Err("codigos: base64 con un largo que no es múltiplo de 4")
+    }
+    if quitados > 0 and (n + quitados) % 4 != 0 {
+        return Err("codigos: base64 con el relleno mal puesto")
+    }
+    if n % 4 == 1 {
+        return Err("codigos: base64 con un largo imposible")
+    }
+    let r = vacio()
+    let mut acum = 0
+    let mut bits = 0
+    for i in 0..n {
+        let v = _valor_b64(s[i], url)
+        if v < 0 {
+            return Err("codigos: carácter que no es base64 en la posición " + a_texto(i))
+        }
+        acum = ((acum << 6) | v) & 16777215
+        bits = bits + 6
+        if bits >= 8 {
+            bits = bits - 8
+            r.v.push((acum >> bits) & 255)
+        }
+    }
+    # los bits que sobran tienen que ser cero (la forma canónica, como Python)
+    if bits > 0 and (acum & ((1 << bits) - 1)) != 0 {
+        return Err("codigos: base64 con bits de sobra distintos de cero")
+    }
+    return Ok(r)
+}
+
+# Decodifica base64 normal. Falla con caracteres de otro alfabeto, espacios, relleno
+# mal puesto o bits sobrantes (es estricto, como b64decode con validate=True).
+fn de_base64(s: str) -> Result<Datos> {
+    return _de_base64(s, false, false)
+}
+
+# Decodifica el base64 de URL; el relleno con = es opcional.
+fn de_base64_url(s: str) -> Result<Datos> {
+    return _de_base64(s, true, true)
+}
+
+# ---------- hashes ----------
+
+struct Estado {
+    h: Vec<i64>
+    w: Vec<i64>
+    k: Vec<i64>
+    s: Vec<i32>
+}
+
+fn _estado(nh: i32, nw: i32) -> Estado {
+    let h: Vec<i64> = vec_new()
+    let w: Vec<i64> = vec_new()
+    let k: Vec<i64> = vec_new()
+    let s: Vec<i32> = vec_new()
+    for i in 0..nh {
+        h.push(0)
+    }
+    for i in 0..nw {
+        w.push(0)
+    }
+    return Estado { h: h, w: w, k: k, s: s }
+}
+
+fn _rotd(x: i64, n: i32) -> i64 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295
+}
+
+fn _rotl(x: i64, n: i32) -> i64 {
+    return ((x << n) | (x >> (32 - n))) & 4294967295
+}
+
+# El mensaje con su relleno: un 1, ceros, y el largo en bits en 8 bytes (grande: SHA,
+# pequeño: MD5), hasta un múltiplo de 64 bytes.
+fn _relleno(d: Datos, grande: bool) -> Datos {
+    let r = vacio()
+    let n = d.v.len()
+    for i in 0..n {
+        r.v.push(d.v.get(i).unwrap_or(0))
+    }
+    r.v.push(128)
+    while r.v.len() % 64 != 56 {
+        r.v.push(0)
+    }
+    let bits: i64 = to_i64(n) * 8
+    for i in 0..8 {
+        let desp = if grande { 8 * (7 - i) } else { 8 * i }
+        r.v.push(to_i32((bits >> desp) & 255))
+    }
+    return r
+}
+
+fn _palabra(m: Datos, i: i32, grande: bool) -> i64 {
+    let a = to_i64(m.v.get(i).unwrap_or(0))
+    let b = to_i64(m.v.get(i + 1).unwrap_or(0))
+    let c = to_i64(m.v.get(i + 2).unwrap_or(0))
+    let d = to_i64(m.v.get(i + 3).unwrap_or(0))
+    if grande {
+        return (a << 24) | (b << 16) | (c << 8) | d
+    }
+    return (d << 24) | (c << 16) | (b << 8) | a
+}
+
+fn _sacar(h: Vec<i64>, nh: i32, grande: bool) -> Datos {
+    let r = vacio()
+    for i in 0..nh {
+        let x = h.get(i).unwrap_or(0)
+        for j in 0..4 {
+            let desp = if grande { 8 * (3 - j) } else { 8 * j }
+            r.v.push(to_i32((x >> desp) & 255))
+        }
+    }
+    return r
+}
+
+# ----- SHA-256 -----
+
+fn _k256() -> Vec<i64> {
+    let k: Vec<i64> = [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986, 2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711, 113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411, 3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344, 430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424, 2428436474, 2756734187, 3204031479, 3329325298]
+    return k
+}
+
+fn _bloque256(e: Estado, m: Datos, base: i32) {
+    for t in 0..16 {
+        e.w.set(t, _palabra(m, base + 4 * t, true))
+    }
+    for t in 16..64 {
+        let x = e.w.get(t - 15).unwrap_or(0)
+        let y = e.w.get(t - 2).unwrap_or(0)
+        let s0 = _rotd(x, 7) ^ _rotd(x, 18) ^ (x >> 3)
+        let s1 = _rotd(y, 17) ^ _rotd(y, 19) ^ (y >> 10)
+        e.w.set(t, (e.w.get(t - 16).unwrap_or(0) + s0 + e.w.get(t - 7).unwrap_or(0) + s1) & 4294967295)
+    }
+    let mut a = e.h.get(0).unwrap_or(0)
+    let mut b = e.h.get(1).unwrap_or(0)
+    let mut c = e.h.get(2).unwrap_or(0)
+    let mut d = e.h.get(3).unwrap_or(0)
+    let mut ee = e.h.get(4).unwrap_or(0)
+    let mut f = e.h.get(5).unwrap_or(0)
+    let mut g = e.h.get(6).unwrap_or(0)
+    let mut h = e.h.get(7).unwrap_or(0)
+    for t in 0..64 {
+        let s1 = _rotd(ee, 6) ^ _rotd(ee, 11) ^ _rotd(ee, 25)
+        let ch = (ee & f) ^ ((ee ^ 4294967295) & g)
+        let t1 = (h + s1 + ch + e.k.get(t).unwrap_or(0) + e.w.get(t).unwrap_or(0)) & 4294967295
+        let s0 = _rotd(a, 2) ^ _rotd(a, 13) ^ _rotd(a, 22)
+        let mj = (a & b) ^ (a & c) ^ (b & c)
+        let t2 = (s0 + mj) & 4294967295
+        h = g
+        g = f
+        f = ee
+        ee = (d + t1) & 4294967295
+        d = c
+        c = b
+        b = a
+        a = (t1 + t2) & 4294967295
+    }
+    e.h.set(0, (e.h.get(0).unwrap_or(0) + a) & 4294967295)
+    e.h.set(1, (e.h.get(1).unwrap_or(0) + b) & 4294967295)
+    e.h.set(2, (e.h.get(2).unwrap_or(0) + c) & 4294967295)
+    e.h.set(3, (e.h.get(3).unwrap_or(0) + d) & 4294967295)
+    e.h.set(4, (e.h.get(4).unwrap_or(0) + ee) & 4294967295)
+    e.h.set(5, (e.h.get(5).unwrap_or(0) + f) & 4294967295)
+    e.h.set(6, (e.h.get(6).unwrap_or(0) + g) & 4294967295)
+    e.h.set(7, (e.h.get(7).unwrap_or(0) + h) & 4294967295)
+}
+
+# El SHA-256 de los bytes: 32 bytes.
+fn sha256(d: Datos) -> Datos {
+    let e = _estado(8, 64)
+    let h0: Vec<i64> = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225]
+    for i in 0..8 {
+        e.h.set(i, h0.get(i).unwrap_or(0))
+    }
+    let k = _k256()
+    for i in 0..64 {
+        e.k.push(k.get(i).unwrap_or(0))
+    }
+    let m = _relleno(d, true)
+    let mut base = 0
+    while base < m.v.len() {
+        _bloque256(e, m, base)
+        base = base + 64
+    }
+    return _sacar(e.h, 8, true)
+}
+
+# ----- SHA-1 -----
+
+fn _bloque1(e: Estado, m: Datos, base: i32) {
+    for t in 0..16 {
+        e.w.set(t, _palabra(m, base + 4 * t, true))
+    }
+    for t in 16..80 {
+        let x = e.w.get(t - 3).unwrap_or(0) ^ e.w.get(t - 8).unwrap_or(0) ^ e.w.get(t - 14).unwrap_or(0) ^ e.w.get(t - 16).unwrap_or(0)
+        e.w.set(t, _rotl(x, 1))
+    }
+    let mut a = e.h.get(0).unwrap_or(0)
+    let mut b = e.h.get(1).unwrap_or(0)
+    let mut c = e.h.get(2).unwrap_or(0)
+    let mut d = e.h.get(3).unwrap_or(0)
+    let mut ee = e.h.get(4).unwrap_or(0)
+    for t in 0..80 {
+        let mut f: i64 = 0
+        let mut k: i64 = 0
+        if t < 20 {
+            f = (b & c) | ((b ^ 4294967295) & d)
+            k = 1518500249
+        } else {
+            if t < 40 {
+                f = b ^ c ^ d
+                k = 1859775393
+            } else {
+                if t < 60 {
+                    f = (b & c) | (b & d) | (c & d)
+                    k = 2400959708
+                } else {
+                    f = b ^ c ^ d
+                    k = 3395469782
+                }
+            }
+        }
+        let tmp = (_rotl(a, 5) + f + ee + k + e.w.get(t).unwrap_or(0)) & 4294967295
+        ee = d
+        d = c
+        c = _rotl(b, 30)
+        b = a
+        a = tmp
+    }
+    e.h.set(0, (e.h.get(0).unwrap_or(0) + a) & 4294967295)
+    e.h.set(1, (e.h.get(1).unwrap_or(0) + b) & 4294967295)
+    e.h.set(2, (e.h.get(2).unwrap_or(0) + c) & 4294967295)
+    e.h.set(3, (e.h.get(3).unwrap_or(0) + d) & 4294967295)
+    e.h.set(4, (e.h.get(4).unwrap_or(0) + ee) & 4294967295)
+}
+
+# El SHA-1 de los bytes: 20 bytes. Ya no es seguro contra ataques: solo para comprobar
+# archivos o firmas que lo piden.
+fn sha1(d: Datos) -> Datos {
+    let e = _estado(5, 80)
+    let h0: Vec<i64> = [1732584193, 4023233417, 2562383102, 271733878, 3285377520]
+    for i in 0..5 {
+        e.h.set(i, h0.get(i).unwrap_or(0))
+    }
+    let m = _relleno(d, true)
+    let mut base = 0
+    while base < m.v.len() {
+        _bloque1(e, m, base)
+        base = base + 64
+    }
+    return _sacar(e.h, 5, true)
+}
+
+# ----- MD5 -----
+
+fn _bloque5(e: Estado, m: Datos, base: i32) {
+    for t in 0..16 {
+        e.w.set(t, _palabra(m, base + 4 * t, false))
+    }
+    let mut a = e.h.get(0).unwrap_or(0)
+    let mut b = e.h.get(1).unwrap_or(0)
+    let mut c = e.h.get(2).unwrap_or(0)
+    let mut d = e.h.get(3).unwrap_or(0)
+    for t in 0..64 {
+        let mut f: i64 = 0
+        let mut g = 0
+        if t < 16 {
+            f = (b & c) | ((b ^ 4294967295) & d)
+            g = t
+        } else {
+            if t < 32 {
+                f = (d & b) | ((d ^ 4294967295) & c)
+                g = (5 * t + 1) % 16
+            } else {
+                if t < 48 {
+                    f = b ^ c ^ d
+                    g = (3 * t + 5) % 16
+                } else {
+                    f = c ^ (b | (d ^ 4294967295))
+                    g = (7 * t) % 16
+                }
+            }
+        }
+        let suma = (a + f + e.k.get(t).unwrap_or(0) + e.w.get(g).unwrap_or(0)) & 4294967295
+        a = d
+        d = c
+        c = b
+        b = (b + _rotl(suma, e.s.get(t).unwrap_or(7))) & 4294967295
+    }
+    e.h.set(0, (e.h.get(0).unwrap_or(0) + a) & 4294967295)
+    e.h.set(1, (e.h.get(1).unwrap_or(0) + b) & 4294967295)
+    e.h.set(2, (e.h.get(2).unwrap_or(0) + c) & 4294967295)
+    e.h.set(3, (e.h.get(3).unwrap_or(0) + d) & 4294967295)
+}
+
+# El MD5 de los bytes: 16 bytes. Roto desde hace años: solo para comprobar archivos
+# que lo publican, nunca para firmar.
+fn md5(d: Datos) -> Datos {
+    let e = _estado(4, 16)
+    let h0: Vec<i64> = [1732584193, 4023233417, 2562383102, 271733878]
+    for i in 0..4 {
+        e.h.set(i, h0.get(i).unwrap_or(0))
+    }
+    let k: Vec<i64> = [3614090360, 3905402710, 606105819, 3250441966, 4118548399, 1200080426, 2821735955, 4249261313, 1770035416, 2336552879, 4294925233, 2304563134, 1804603682, 4254626195, 2792965006, 1236535329, 4129170786, 3225465664, 643717713, 3921069994, 3593408605, 38016083, 3634488961, 3889429448, 568446438, 3275163606, 4107603335, 1163531501, 2850285829, 4243563512, 1735328473, 2368359562, 4294588738, 2272392833, 1839030562, 4259657740, 2763975236, 1272893353, 4139469664, 3200236656, 681279174, 3936430074, 3572445317, 76029189, 3654602809, 3873151461, 530742520, 3299628645, 4096336452, 1126891415, 2878612391, 4237533241, 1700485571, 2399980690, 4293915773, 2240044497, 1873313359, 4264355552, 2734768916, 1309151649, 4149444226, 3174756917, 718787259, 3951481745]
+    for i in 0..64 {
+        e.k.push(k.get(i).unwrap_or(0))
+    }
+    let s: Vec<i32> = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21]
+    for i in 0..64 {
+        e.s.push(s.get(i).unwrap_or(7))
+    }
+    let m = _relleno(d, false)
+    let mut base = 0
+    while base < m.v.len() {
+        _bloque5(e, m, base)
+        base = base + 64
+    }
+    return _sacar(e.h, 4, false)
+}
+
+fn sha256_hex(d: Datos) -> str {
+    return hex(sha256(d))
+}
+
+fn sha1_hex(d: Datos) -> str {
+    return hex(sha1(d))
+}
+
+fn md5_hex(d: Datos) -> str {
+    return hex(md5(d))
+}
+
+# El resumen con el algoritmo por nombre: "sha256", "sha1" o "md5".
+fn resumen(algoritmo: str, d: Datos) -> Result<Datos> {
+    if algoritmo == "sha256" {
+        return Ok(sha256(d))
+    }
+    if algoritmo == "sha1" {
+        return Ok(sha1(d))
+    }
+    if algoritmo == "md5" {
+        return Ok(md5(d))
+    }
+    return Err("codigos: algoritmo desconocido '" + algoritmo + "' (sha256, sha1 o md5)")
+}
+
+# ---------- HMAC ----------
+
+# HMAC (RFC 2104) con "sha256", "sha1" o "md5": la firma de `mensaje` con `clave`.
+fn hmac(algoritmo: str, clave: Datos, mensaje: Datos) -> Result<Datos> {
+    let mut k = copia(clave)
+    if k.v.len() > 64 {
+        k = resumen(algoritmo, clave)?
+    }
+    while k.v.len() < 64 {
+        k.v.push(0)
+    }
+    let interior = vacio()
+    let exterior = vacio()
+    for i in 0..64 {
+        interior.v.push(k.v.get(i).unwrap_or(0) ^ 54)
+        exterior.v.push(k.v.get(i).unwrap_or(0) ^ 92)
+    }
+    let primero = resumen(algoritmo, unir(interior, mensaje))?
+    return resumen(algoritmo, unir(exterior, primero))
+}
+
+fn hmac_sha256(clave: Datos, mensaje: Datos) -> Datos {
+    match hmac("sha256", clave, mensaje) {
+        Ok(r) => {
+            return r
+        }
+        Err(e) => {
+            return vacio()
+        }
+    }
+    return vacio()
+}
+
+# La firma en hexadecimal (la forma en que la piden la mayoría de las APIs).
+fn hmac_hex(algoritmo: str, clave: Datos, mensaje: Datos) -> Result<str> {
+    let r = hmac(algoritmo, clave, mensaje)?
+    return Ok(hex(r))
+}
+
+# ---------- sumas de control ----------
+
+# CRC-32 (zlib, PNG, gzip), como número sin signo de 32 bits (zlib.crc32 de Python).
+fn crc32(d: Datos) -> i64 {
+    return to_i64(zlib.crc32(copia(d).v)) & 4294967295
+}
+
+# Adler-32 (zlib), como número sin signo de 32 bits.
+fn adler32(d: Datos) -> i64 {
+    return to_i64(zlib.adler32(copia(d).v)) & 4294967295
+}
+
+# ---------- UUID ----------
+
+# Un UUID versión 4 hecho con esos 16 bytes (se les pone la versión y la variante de la
+# RFC 4122): "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx". Err si no son 16 bytes.
+fn uuid4_de(d: Datos) -> Result<str> {
+    if d.v.len() != 16 {
+        return Err("codigos: un UUID necesita 16 bytes")
+    }
+    let b = copia(d)
+    b.v.set(6, (b.v.get(6).unwrap_or(0) & 15) | 64)
+    b.v.set(8, (b.v.get(8).unwrap_or(0) & 63) | 128)
+    let h = hex(b)
+    return Ok(texto.subtexto(h, 0, 8) + "-" + texto.subtexto(h, 8, 12) + "-" + texto.subtexto(h, 12, 16) + "-" + texto.subtexto(h, 16, 20) + "-" + texto.subtexto(h, 20, 32))
+}
+
+# Un UUID versión 4 al azar (con los bytes del sistema operativo).
+fn uuid4() -> Result<str> {
+    let d = aleatorios(16)?
+    return uuid4_de(d)
+}
+
+# ---------- escape de URL ----------
+
+fn _sin_reservar(k: i32) -> bool {
+    return (k >= 65 and k <= 90) or (k >= 97 and k <= 122) or (k >= 48 and k <= 57) or k == 45 or k == 46 or k == 95 or k == 126
+}
+
+# Codifica un texto para ir dentro de una URL (RFC 3986): se quedan sin tocar las letras,
+# cifras, - . _ ~ y todo lo demás pasa a %XX con los bytes UTF-8, en mayúsculas.
+# Con `espacio_mas`, el espacio se escribe + (el formato de formularios).
+fn url_codificar(s: str, espacio_mas: bool) -> str {
+    let d = de_texto(s)
+    let h = "0123456789ABCDEF"
+    let mut r = ""
+    for i in 0..d.v.len() {
+        let b = d.v.get(i).unwrap_or(0)
+        if _sin_reservar(b) {
+            r = r + chr(b)
+        } else {
+            if b == 32 and espacio_mas {
+                r = r + "+"
+            } else {
+                r = r + "%" + h[b >> 4] + h[b & 15]
+            }
+        }
+    }
+    return r
+}
+
+# Lo contrario. Err con un % sin dos cifras hexadecimales o si el resultado no es UTF-8.
+# Con `espacio_mas`, un + vale espacio.
+fn url_decodificar(s: str, espacio_mas: bool) -> Result<str> {
+    let r = vacio()
+    let n = s.len()
+    let mut i = 0
+    while i < n {
+        let c = s[i]
+        if c == "%" {
+            if i + 2 >= n {
+                return Err("codigos: un % sin sus dos cifras en la posición " + a_texto(i))
+            }
+            let a = _valor_hex(s[i + 1])
+            let b = _valor_hex(s[i + 2])
+            if a < 0 or b < 0 {
+                return Err("codigos: un % sin sus dos cifras en la posición " + a_texto(i))
+            }
+            r.v.push(a * 16 + b)
+            i = i + 3
+        } else {
+            if c == "+" and espacio_mas {
+                r.v.push(32)
+            } else {
+                let k = de_texto(c)
+                for j in 0..k.v.len() {
+                    r.v.push(k.v.get(j).unwrap_or(0))
+                }
+            }
+            i = i + 1
+        }
+    }
+    return a_cadena(r)
+}

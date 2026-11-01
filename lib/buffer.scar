@@ -1,0 +1,1596 @@
+# lib/buffer.scar -- el texto de un editor: líneas, cursor, selección, deshacer y colores para SCAR.
+#
+# Es solo el modelo (sin ventana): lib/editor lo dibuja y le pasa las teclas, y se puede probar sin
+# pantalla. Las posiciones son (fila, columna) contadas desde 0, y
+# la columna cuenta caracteres, no bytes (una "é" es una columna).
+#
+#     use "buffer"
+#
+#     let b = buffer.nuevo("fn main() {\n}\n")
+#     buffer.insertar(b, "x")            # escribe en el cursor (o reemplaza la selección)
+#     buffer.enter(b)                    # salto de línea con la sangría de la línea
+#     buffer.deshacer(b)
+#     let t = buffer.contenido(b)
+#
+# Cursor y selección: el cursor está en (fila, col); la selección va desde el ancla (af, ac)
+# hasta el cursor. Sin selección, el ancla es el cursor. Los movimientos (izquierda, derecha,
+# arriba, abajo, inicio, fin, pagina, mover_a) toman `extender`: con true el ancla se queda
+# quieta (Mayús + flecha).
+#
+# Deshacer: cada edición queda anotada como "en esta posición se sacó tal texto y se puso tal
+# otro", y deshacer es hacer lo contrario. Lo que se escribe seguido (o se borra seguido, con
+# Retroceso o Supr) se junta en un solo paso.
+#
+# Colores: buffer.clases(linea) da, por cada carácter, una clase: 0 común, 1 palabra clave de
+# SCAR, 2 tipo, 3 texto entre comillas, 4 número, 5 comentario (#), 6 nombre de función.
+
+use "texto"
+
+struct Buffer {
+    lineas: Vec<str>
+    fila: i32
+    col: i32
+    af: i32
+    ac: i32
+    # la columna a la que vuelve el cursor al subir o bajar por líneas más cortas
+    ideal: i32
+    sucio: bool
+    cambios: i32
+    # el cursor se movió desde la última vez que la vista lo miró (para mostrarlo)
+    mover: bool
+    # qué fue lo último que se hizo: 0 otra cosa, 1 escribir, 2 Retroceso, 3 Supr
+    tipo: i32
+    # pila de deshacer (u...) y de rehacer (r...): posición, texto sacado, texto puesto
+    uf: Vec<i32>
+    uc: Vec<i32>
+    udel: Vec<str>
+    uins: Vec<str>
+    rf: Vec<i32>
+    rc: Vec<i32>
+    rdel: Vec<str>
+    rins: Vec<str>
+    # cerrar solo paréntesis, corchetes, llaves y comillas al escribirlos (buffer.cerrar_pares)
+    pares: bool
+}
+
+# ---- texto: partir y juntar -------------------------------------------------------------
+
+fn _espacios(n: i32) -> str {
+    let mut r = ""
+    for i in 0..n {
+        r = r + " "
+    }
+    return r
+}
+
+# Las líneas de un texto: parte en \n, borra los \r y cambia cada tabulador por 4 espacios.
+fn _partir(t: str) -> Vec<str> {
+    let r: Vec<str> = vec_new()
+    let mut actual = ""
+    let n = len(t)
+    for i in 0..n {
+        let c = ord(t[i])
+        if c == 10 {
+            r.push(actual + "")
+            actual = ""
+        } else {
+            if c == 9 {
+                actual = actual + "    "
+            } else {
+                if c != 13 {
+                    actual = actual + t[i]
+                }
+            }
+        }
+    }
+    r.push(actual + "")
+    return r
+}
+
+fn _tiene_salto(t: str) -> bool {
+    let n = len(t)
+    for i in 0..n {
+        if ord(t[i]) == 10 {
+            return true
+        }
+    }
+    return false
+}
+
+# Dónde termina un texto puesto a partir de (f, c): la fila y la columna.
+fn _fin_f(f: i32, t: str) -> i32 {
+    let mut k = f
+    let n = len(t)
+    for i in 0..n {
+        if ord(t[i]) == 10 {
+            k = k + 1
+        }
+    }
+    return k
+}
+
+fn _fin_c(c: i32, t: str) -> i32 {
+    let n = len(t)
+    let mut ultimo = 0 - 1
+    for i in 0..n {
+        if ord(t[i]) == 10 {
+            ultimo = i
+        }
+    }
+    if ultimo < 0 {
+        return c + n
+    }
+    return n - ultimo - 1
+}
+
+# ---- las líneas ------------------------------------------------------------------------------
+
+fn n_lineas(b: Buffer) -> i32 {
+    return b.lineas.len()
+}
+
+# buffer.linea(b, i) -> str: la línea i ("" si no existe).
+fn linea(b: Buffer, i: i32) -> str {
+    let mut r = ""
+    if i >= 0 and i < b.lineas.len() {
+        let mut o = b.lineas.get(i)
+        while let Some(s) = o {
+            r = s + ""
+            o = None
+        }
+    }
+    return r
+}
+
+fn _largo(b: Buffer, i: i32) -> i32 {
+    return len(linea(b, i))
+}
+
+# buffer.contenido(b) -> str: todo el texto, con \n entre líneas.
+fn contenido(b: Buffer) -> str {
+    let n = b.lineas.len()
+    let mut r = ""
+    for i in 0..n {
+        if i > 0 {
+            r = r + "\n"
+        }
+        r = r + linea(b, i)
+    }
+    return r
+}
+
+# buffer.nuevo(texto) -> Buffer
+fn nuevo(t: str) -> Buffer {
+    let b = Buffer {
+        lineas: _partir(t),
+        fila: 0,
+        col: 0,
+        af: 0,
+        ac: 0,
+        ideal: 0,
+        sucio: false,
+        cambios: 0,
+        mover: true,
+        tipo: 0,
+        uf: vec_new(),
+        uc: vec_new(),
+        udel: vec_new(),
+        uins: vec_new(),
+        rf: vec_new(),
+        rc: vec_new(),
+        rdel: vec_new(),
+        rins: vec_new(),
+        pares: false,
+    }
+    return b
+}
+
+# buffer.poner(b, texto): cambia todo el texto (sin poder deshacer), cursor al principio.
+fn poner(b: Buffer, t: str) {
+    b.lineas = _partir(t)
+    b.fila = 0
+    b.col = 0
+    b.af = 0
+    b.ac = 0
+    b.ideal = 0
+    b.sucio = false
+    b.cambios = b.cambios + 1
+    b.mover = true
+    b.tipo = 0
+    _vaciar_pila(b, 0)
+    _vaciar_pila(b, 1)
+}
+
+# buffer.marcar_guardado(b): el texto de ahora es el del archivo.
+fn marcar_guardado(b: Buffer) {
+    b.sucio = false
+}
+
+# ---- pilas de deshacer y rehacer ---------------------------------------------------------------
+# w = 0 es la de deshacer, w = 1 la de rehacer.
+
+fn _pn(b: Buffer, w: i32) -> i32 {
+    if w == 0 {
+        return b.uf.len()
+    }
+    return b.rf.len()
+}
+
+fn _pf(b: Buffer, w: i32, i: i32) -> i32 {
+    let mut r = 0
+    let mut o = b.rf.get(i)
+    if w == 0 {
+        o = b.uf.get(i)
+    }
+    while let Some(x) = o {
+        r = x
+        o = None
+    }
+    return r
+}
+
+fn _pc(b: Buffer, w: i32, i: i32) -> i32 {
+    let mut r = 0
+    let mut o = b.rc.get(i)
+    if w == 0 {
+        o = b.uc.get(i)
+    }
+    while let Some(x) = o {
+        r = x
+        o = None
+    }
+    return r
+}
+
+fn _pdel(b: Buffer, w: i32, i: i32) -> str {
+    let mut r = ""
+    let mut o = b.rdel.get(i)
+    if w == 0 {
+        o = b.udel.get(i)
+    }
+    while let Some(x) = o {
+        r = x + ""
+        o = None
+    }
+    return r
+}
+
+fn _pins(b: Buffer, w: i32, i: i32) -> str {
+    let mut r = ""
+    let mut o = b.rins.get(i)
+    if w == 0 {
+        o = b.uins.get(i)
+    }
+    while let Some(x) = o {
+        r = x + ""
+        o = None
+    }
+    return r
+}
+
+fn _pempujar(b: Buffer, w: i32, f: i32, c: i32, d: str, i: str) {
+    if w == 0 {
+        b.uf.push(f)
+        b.uc.push(c)
+        b.udel.push(d)
+        b.uins.push(i)
+    } else {
+        b.rf.push(f)
+        b.rc.push(c)
+        b.rdel.push(d)
+        b.rins.push(i)
+    }
+}
+
+fn _pquitar(b: Buffer, w: i32) {
+    if w == 0 {
+        let a = b.uf.pop()
+        let c = b.uc.pop()
+        let d = b.udel.pop()
+        let e = b.uins.pop()
+    } else {
+        let a = b.rf.pop()
+        let c = b.rc.pop()
+        let d = b.rdel.pop()
+        let e = b.rins.pop()
+    }
+}
+
+fn _vaciar_pila(b: Buffer, w: i32) {
+    while _pn(b, w) > 0 {
+        _pquitar(b, w)
+    }
+}
+
+# ---- selección ---------------------------------------------------------------------------------
+
+# buffer.hay_sel(b) -> bool: hay texto seleccionado.
+fn hay_sel(b: Buffer) -> bool {
+    return b.af != b.fila or b.ac != b.col
+}
+
+fn _ancla_antes(b: Buffer) -> bool {
+    return b.af < b.fila or (b.af == b.fila and b.ac <= b.col)
+}
+
+# El principio (f1, c1) y el fin (f2, c2) de la selección; sin selección, los dos son el cursor.
+fn sel_f1(b: Buffer) -> i32 {
+    if _ancla_antes(b) {
+        return b.af
+    }
+    return b.fila
+}
+
+fn sel_c1(b: Buffer) -> i32 {
+    if _ancla_antes(b) {
+        return b.ac
+    }
+    return b.col
+}
+
+fn sel_f2(b: Buffer) -> i32 {
+    if _ancla_antes(b) {
+        return b.fila
+    }
+    return b.af
+}
+
+fn sel_c2(b: Buffer) -> i32 {
+    if _ancla_antes(b) {
+        return b.col
+    }
+    return b.ac
+}
+
+# El texto entre dos posiciones (con \n entre líneas).
+fn _extraer(b: Buffer, f1: i32, c1: i32, f2: i32, c2: i32) -> str {
+    if f1 == f2 {
+        return texto.subtexto(linea(b, f1), c1, c2)
+    }
+    let primera = linea(b, f1)
+    let mut r = texto.subtexto(primera, c1, len(primera))
+    let mut k = f1 + 1
+    while k < f2 {
+        r = r + "\n" + linea(b, k)
+        k = k + 1
+    }
+    return r + "\n" + texto.subtexto(linea(b, f2), 0, c2)
+}
+
+# buffer.sel_texto(b) -> str: lo seleccionado ("" si no hay).
+fn sel_texto(b: Buffer) -> str {
+    return _extraer(b, sel_f1(b), sel_c1(b), sel_f2(b), sel_c2(b))
+}
+
+# ---- editar --------------------------------------------------------------------------------------
+
+# Cambia lo que hay entre (f1, c1) y (f2, c2) por `nuevo`, sin anotar nada ni mover el cursor.
+fn _sustituir(b: Buffer, f1: i32, c1: i32, f2: i32, c2: i32, nuevo: str) {
+    let primera = linea(b, f1)
+    let ultima = linea(b, f2)
+    let junto = texto.subtexto(primera, 0, c1) + nuevo + texto.subtexto(ultima, c2, len(ultima))
+    if f1 == f2 and not _tiene_salto(nuevo) {
+        b.lineas.set(f1, junto)
+    } else {
+        let piezas = _partir(junto)
+        let r: Vec<str> = vec_new()
+        for i in 0..f1 {
+            r.push(linea(b, i))
+        }
+        let k = piezas.len()
+        for i in 0..k {
+            let mut o = piezas.get(i)
+            while let Some(s) = o {
+                r.push(s + "")
+                o = None
+            }
+        }
+        let n = b.lineas.len()
+        for i in (f2 + 1)..n {
+            r.push(linea(b, i))
+        }
+        b.lineas = r
+    }
+}
+
+fn _pponer(b: Buffer, w: i32, i: i32, f: i32, c: i32, d: str, ins: str) {
+    if w == 0 {
+        b.uf.set(i, f)
+        b.uc.set(i, c)
+        b.udel.set(i, d)
+        b.uins.set(i, ins)
+    } else {
+        b.rf.set(i, f)
+        b.rc.set(i, c)
+        b.rdel.set(i, d)
+        b.rins.set(i, ins)
+    }
+}
+
+# Hace una edición y la anota para deshacer. `tipo`: 1 escribir, 2 Retroceso, 3 Supr, 0 otra cosa
+# (las de tipo 1, 2 y 3 que siguen una a otra se juntan en un solo paso). El cursor queda al final
+# del texto nuevo.
+fn _editar(b: Buffer, f1: i32, c1: i32, f2: i32, c2: i32, nuevo: str, tipo: i32) {
+    let del = _extraer(b, f1, c1, f2, c2)
+    if len(del) > 0 or len(nuevo) > 0 {
+        let n = _pn(b, 0)
+        let mut juntado = false
+        if n > 0 and b.tipo == tipo and tipo != 0 {
+            let lf = _pf(b, 0, n - 1)
+            let lc = _pc(b, 0, n - 1)
+            let ld = _pdel(b, 0, n - 1)
+            let li = _pins(b, 0, n - 1)
+            if tipo == 1 {
+                if len(del) == 0 and not _tiene_salto(nuevo) and _fin_f(lf, li) == f1 and _fin_c(lc, li) == c1 {
+                    _pponer(b, 0, n - 1, lf, lc, ld, li + nuevo)
+                    juntado = true
+                }
+            }
+            if tipo == 2 {
+                if len(li) == 0 and f1 == f2 and lf == f2 and lc == c2 and not _tiene_salto(ld) {
+                    _pponer(b, 0, n - 1, f1, c1, del + ld, "")
+                    juntado = true
+                }
+            }
+            if tipo == 3 {
+                if len(li) == 0 and f1 == f2 and lf == f1 and lc == c1 and not _tiene_salto(ld) {
+                    _pponer(b, 0, n - 1, lf, lc, ld + del, "")
+                    juntado = true
+                }
+            }
+        }
+        if not juntado {
+            _pempujar(b, 0, f1, c1, del, nuevo)
+        }
+        _vaciar_pila(b, 1)
+        _sustituir(b, f1, c1, f2, c2, nuevo)
+        let nf = _fin_f(f1, nuevo)
+        let nc = _fin_c(c1, nuevo)
+        b.fila = nf
+        b.col = nc
+        b.af = nf
+        b.ac = nc
+        b.ideal = nc
+        b.mover = true
+        b.tipo = tipo
+        b.sucio = true
+        b.cambios = b.cambios + 1
+    }
+}
+
+# ---- mover el cursor -----------------------------------------------------------------------------
+
+# buffer.mover_a(b, fila, col, extender): lleva el cursor a esa posición (ajustada al texto).
+fn mover_a(b: Buffer, f: i32, c: i32, extender: bool) {
+    let nf = max(0, min(f, b.lineas.len() - 1))
+    let nc = max(0, min(c, _largo(b, nf)))
+    b.fila = nf
+    b.col = nc
+    if not extender {
+        b.af = nf
+        b.ac = nc
+    }
+    b.ideal = nc
+    b.mover = true
+    b.tipo = 0
+}
+
+fn _car(l: str, i: i32) -> i32 {
+    if i < 0 or i >= len(l) {
+        return 0 - 1
+    }
+    return ord(l[i])
+}
+
+# 0 espacio (o nada), 1 parte de una palabra, 2 signo
+fn _clase_car(c: i32) -> i32 {
+    if c < 0 or c == 32 {
+        return 0
+    }
+    if (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95 or c >= 128 {
+        return 1
+    }
+    return 2
+}
+
+fn izquierda(b: Buffer, extender: bool, palabra: bool) {
+    if hay_sel(b) and not extender {
+        mover_a(b, sel_f1(b), sel_c1(b), false)
+    } else {
+        let l = linea(b, b.fila)
+        if b.col == 0 {
+            if b.fila > 0 {
+                mover_a(b, b.fila - 1, _largo(b, b.fila - 1), extender)
+            }
+        } else {
+            let mut c = b.col - 1
+            if palabra {
+                while c > 0 and _clase_car(_car(l, c)) == 0 {
+                    c = c - 1
+                }
+                let k = _clase_car(_car(l, c))
+                while c > 0 and _clase_car(_car(l, c - 1)) == k {
+                    c = c - 1
+                }
+            }
+            mover_a(b, b.fila, c, extender)
+        }
+    }
+}
+
+fn derecha(b: Buffer, extender: bool, palabra: bool) {
+    if hay_sel(b) and not extender {
+        mover_a(b, sel_f2(b), sel_c2(b), false)
+    } else {
+        let l = linea(b, b.fila)
+        let n = len(l)
+        if b.col >= n {
+            if b.fila < b.lineas.len() - 1 {
+                mover_a(b, b.fila + 1, 0, extender)
+            }
+        } else {
+            let mut c = b.col + 1
+            if palabra {
+                c = b.col
+                while c < n and _clase_car(_car(l, c)) == 0 {
+                    c = c + 1
+                }
+                if c < n {
+                    let k = _clase_car(_car(l, c))
+                    while c < n and _clase_car(_car(l, c)) == k {
+                        c = c + 1
+                    }
+                }
+            }
+            mover_a(b, b.fila, c, extender)
+        }
+    }
+}
+
+fn arriba(b: Buffer, extender: bool) {
+    let ideal = b.ideal
+    if b.fila > 0 {
+        mover_a(b, b.fila - 1, ideal, extender)
+        b.ideal = ideal
+    } else {
+        mover_a(b, 0, 0, extender)
+    }
+}
+
+fn abajo(b: Buffer, extender: bool) {
+    let ideal = b.ideal
+    if b.fila < b.lineas.len() - 1 {
+        mover_a(b, b.fila + 1, ideal, extender)
+        b.ideal = ideal
+    } else {
+        mover_a(b, b.fila, _largo(b, b.fila), extender)
+    }
+}
+
+# buffer.pagina(b, delta, extender): sube o baja `delta` líneas (RePág / AvPág).
+fn pagina(b: Buffer, delta: i32, extender: bool) {
+    let ideal = b.ideal
+    mover_a(b, b.fila + delta, ideal, extender)
+    b.ideal = ideal
+}
+
+# Inicio: al primer carácter que no es espacio; otra vez, al principio de la línea. Con `doc`,
+# al principio del texto.
+fn inicio(b: Buffer, extender: bool, doc: bool) {
+    if doc {
+        mover_a(b, 0, 0, extender)
+    } else {
+        let l = linea(b, b.fila)
+        let mut k = 0
+        while k < len(l) and ord(l[k]) == 32 {
+            k = k + 1
+        }
+        if b.col == k {
+            k = 0
+        }
+        mover_a(b, b.fila, k, extender)
+    }
+}
+
+# Fin: al final de la línea; con `doc`, al final del texto.
+fn fin(b: Buffer, extender: bool, doc: bool) {
+    if doc {
+        let u = b.lineas.len() - 1
+        mover_a(b, u, _largo(b, u), extender)
+    } else {
+        mover_a(b, b.fila, _largo(b, b.fila), extender)
+    }
+}
+
+fn seleccionar_todo(b: Buffer) {
+    let u = b.lineas.len() - 1
+    mover_a(b, 0, 0, false)
+    mover_a(b, u, _largo(b, u), true)
+}
+
+# buffer.seleccionar_palabra(b): selecciona la palabra (o el signo) donde está el cursor.
+fn seleccionar_palabra(b: Buffer) {
+    let l = linea(b, b.fila)
+    let n = len(l)
+    let mut a = b.col
+    let mut z = b.col
+    let mut k = _clase_car(_car(l, b.col))
+    if k == 0 and b.col > 0 {
+        k = _clase_car(_car(l, b.col - 1))
+        a = b.col - 1
+        z = b.col - 1
+    }
+    if k != 0 {
+        while a > 0 and _clase_car(_car(l, a - 1)) == k {
+            a = a - 1
+        }
+        while z < n and _clase_car(_car(l, z)) == k {
+            z = z + 1
+        }
+    }
+    mover_a(b, b.fila, a, false)
+    mover_a(b, b.fila, z, true)
+}
+
+# ---- escribir y borrar -------------------------------------------------------------------------------
+
+# buffer.insertar(b, s): escribe s en el cursor (reemplaza la selección).
+fn insertar(b: Buffer, s: str) {
+    _editar(b, sel_f1(b), sel_c1(b), sel_f2(b), sel_c2(b), s, 1)
+}
+
+# buffer.escribir(b, s): lo que escribe la persona con el teclado. Igual que insertar, salvo que una
+# } escrita en una línea que solo tiene espacios antes se corre 4 lugares a la izquierda.
+fn escribir(b: Buffer, s: str) {
+    if b.pares and not hay_sel(b) and len(s) == 1 {
+        if _escribir_par(b, s) {
+            return
+        }
+    }
+    let mut solo_espacios = b.col >= 4 and not hay_sel(b)
+    if solo_espacios {
+        let l = linea(b, b.fila)
+        for i in 0..b.col {
+            if _car(l, i) != 32 {
+                solo_espacios = false
+            }
+        }
+    }
+    if s == "}" and solo_espacios {
+        _editar(b, b.fila, b.col - 4, b.fila, b.col, "}", 1)
+    } else {
+        insertar(b, s)
+    }
+}
+
+fn _limpio(t: str) -> str {
+    let mut r = ""
+    let n = len(t)
+    for i in 0..n {
+        let c = ord(t[i])
+        if c == 9 {
+            r = r + "    "
+        } else {
+            if c != 13 {
+                r = r + t[i]
+            }
+        }
+    }
+    return r
+}
+
+# buffer.pegar(b, s): como insertar, para un texto que viene del portapapeles (varias líneas,
+# tabuladores, \r\n); es un solo paso para deshacer.
+fn pegar(b: Buffer, s: str) {
+    _editar(b, sel_f1(b), sel_c1(b), sel_f2(b), sel_c2(b), _limpio(s), 0)
+}
+
+# buffer.borrar_sel(b): borra lo seleccionado.
+fn borrar_sel(b: Buffer) {
+    _editar(b, sel_f1(b), sel_c1(b), sel_f2(b), sel_c2(b), "", 0)
+}
+
+# buffer.enter(b): salto de línea con la sangría de la línea; después de una { suma 4 espacios, y
+# entre { y } deja la } en su propia línea.
+fn enter(b: Buffer) {
+    let f1 = sel_f1(b)
+    let c1 = sel_c1(b)
+    let f2 = sel_f2(b)
+    let c2 = sel_c2(b)
+    let l = linea(b, f1)
+    let mut ind = 0
+    while ind < c1 and _car(l, ind) == 32 {
+        ind = ind + 1
+    }
+    let mut k = c1 - 1
+    while k >= 0 and _car(l, k) == 32 {
+        k = k - 1
+    }
+    let abre = _car(l, k) == 123
+    let cierra = _car(linea(b, f2), c2) == 125
+    if abre and cierra {
+        _editar(b, f1, c1, f2, c2, "\n" + _espacios(ind + 4) + "\n" + _espacios(ind), 0)
+        mover_a(b, f1 + 1, ind + 4, false)
+    } else {
+        let mut extra = 0
+        if abre {
+            extra = 4
+        }
+        _editar(b, f1, c1, f2, c2, "\n" + _espacios(ind + extra), 0)
+    }
+}
+
+# Sangra (o quita la sangría de) las líneas de la selección, y las deja seleccionadas.
+fn _sangrar_lineas(b: Buffer, atras: bool) {
+    let f1 = sel_f1(b)
+    let mut f2 = sel_f2(b)
+    if sel_c2(b) == 0 and f2 > f1 {
+        f2 = f2 - 1
+    }
+    let mut nuevo = ""
+    for k in f1..(f2 + 1) {
+        let l = linea(b, k)
+        let mut s = l + ""
+        if atras {
+            let mut q = 0
+            while q < 4 and _car(l, q) == 32 {
+                q = q + 1
+            }
+            s = texto.subtexto(l, q, len(l))
+        } else {
+            if len(l) > 0 {
+                s = "    " + l
+            }
+        }
+        if k > f1 {
+            nuevo = nuevo + "\n"
+        }
+        nuevo = nuevo + s
+    }
+    _editar(b, f1, 0, f2, _largo(b, f2), nuevo, 0)
+    b.af = f1
+    b.ac = 0
+    b.fila = f2
+    b.col = _largo(b, f2)
+}
+
+# buffer.tab(b, atras): Tab pone espacios hasta la próxima columna múltiplo de 4; con varias líneas
+# seleccionadas las sangra; con atras (Mayús + Tab) quita la sangría.
+fn tab(b: Buffer, atras: bool) {
+    if hay_sel(b) and b.af != b.fila {
+        _sangrar_lineas(b, atras)
+    } else {
+        if atras {
+            let l = linea(b, b.fila)
+            let mut q = 0
+            while q < 4 and _car(l, q) == 32 {
+                q = q + 1
+            }
+            let c = b.col
+            _editar(b, b.fila, 0, b.fila, q, "", 0)
+            mover_a(b, b.fila, max(0, c - q), false)
+        } else {
+            let c = sel_c1(b)
+            insertar(b, _espacios(4 - c % 4))
+        }
+    }
+}
+
+# buffer.borrar_atras(b, palabra): Retroceso (con Ctrl, borra la palabra de atrás).
+fn borrar_atras(b: Buffer, palabra: bool) {
+    if b.pares and not hay_sel(b) and not palabra and b.col > 0 {
+        let l = linea(b, b.fila)
+        if _cierre_de(_car(l, b.col - 1)) == _car(l, b.col) and _cierre_de(_car(l, b.col - 1)) > 0 {
+            # entre un par recién abierto, ( | ), Retroceso borra los dos
+            _editar(b, b.fila, b.col - 1, b.fila, b.col + 1, "", 2)
+            return
+        }
+    }
+    if hay_sel(b) {
+        borrar_sel(b)
+    } else {
+        if b.col > 0 {
+            if palabra {
+                let f = b.fila
+                let c = b.col
+                izquierda(b, true, true)
+                _editar(b, f, b.col, f, c, "", 0)
+            } else {
+                _editar(b, b.fila, b.col - 1, b.fila, b.col, "", 2)
+            }
+        } else {
+            if b.fila > 0 {
+                _editar(b, b.fila - 1, _largo(b, b.fila - 1), b.fila, 0, "", 0)
+            }
+        }
+    }
+}
+
+# buffer.borrar_adelante(b, palabra): Supr (con Ctrl, borra la palabra que sigue).
+fn borrar_adelante(b: Buffer, palabra: bool) {
+    if hay_sel(b) {
+        borrar_sel(b)
+    } else {
+        let n = _largo(b, b.fila)
+        if b.col < n {
+            if palabra {
+                let f = b.fila
+                let c = b.col
+                derecha(b, true, true)
+                _editar(b, f, c, f, b.col, "", 0)
+            } else {
+                _editar(b, b.fila, b.col, b.fila, b.col + 1, "", 3)
+            }
+        } else {
+            if b.fila < b.lineas.len() - 1 {
+                _editar(b, b.fila, n, b.fila + 1, 0, "", 0)
+            }
+        }
+    }
+}
+
+# ---- deshacer y rehacer ------------------------------------------------------------------------------
+
+# buffer.deshacer(b) -> bool: deshace el último paso (false si no hay nada que deshacer).
+fn deshacer(b: Buffer) -> bool {
+    let n = _pn(b, 0)
+    if n == 0 {
+        return false
+    }
+    let f = _pf(b, 0, n - 1)
+    let c = _pc(b, 0, n - 1)
+    let d = _pdel(b, 0, n - 1)
+    let i = _pins(b, 0, n - 1)
+    _sustituir(b, f, c, _fin_f(f, i), _fin_c(c, i), d)
+    _pquitar(b, 0)
+    _pempujar(b, 1, f, c, d, i)
+    b.fila = _fin_f(f, d)
+    b.col = _fin_c(c, d)
+    b.af = b.fila
+    b.ac = b.col
+    b.ideal = b.col
+    b.mover = true
+    b.tipo = 0
+    b.sucio = true
+    b.cambios = b.cambios + 1
+    return true
+}
+
+# buffer.rehacer(b) -> bool: vuelve a hacer lo último que se deshizo.
+fn rehacer(b: Buffer) -> bool {
+    let n = _pn(b, 1)
+    if n == 0 {
+        return false
+    }
+    let f = _pf(b, 1, n - 1)
+    let c = _pc(b, 1, n - 1)
+    let d = _pdel(b, 1, n - 1)
+    let i = _pins(b, 1, n - 1)
+    _sustituir(b, f, c, _fin_f(f, d), _fin_c(c, d), i)
+    _pquitar(b, 1)
+    _pempujar(b, 0, f, c, d, i)
+    b.fila = _fin_f(f, i)
+    b.col = _fin_c(c, i)
+    b.af = b.fila
+    b.ac = b.col
+    b.ideal = b.col
+    b.mover = true
+    b.tipo = 0
+    b.sucio = true
+    b.cambios = b.cambios + 1
+    return true
+}
+
+# ---- buscar ----------------------------------------------------------------------------------------------
+
+fn _bajar(s: str, sensible: bool) -> str {
+    if sensible {
+        return s
+    }
+    return texto.minusculas(s)
+}
+
+# buffer.buscar(b, aguja, adelante, sensible) -> bool: selecciona la próxima aparición de `aguja`
+# (después de la selección, o antes si adelante es false), dando la vuelta al texto. false si no
+# hay ninguna. `sensible`: distingue mayúsculas de minúsculas.
+fn buscar(b: Buffer, aguja: str, adelante: bool, sensible: bool) -> bool {
+    let m = len(aguja)
+    if m == 0 {
+        return false
+    }
+    let a = _bajar(aguja, sensible)
+    let n = b.lineas.len()
+    if adelante {
+        let f0 = sel_f2(b)
+        let c0 = sel_c2(b)
+        for paso in 0..(n + 1) {
+            let f = (f0 + paso) % n
+            let l = _bajar(linea(b, f), sensible)
+            let mut desde = 0
+            if paso == 0 {
+                desde = c0
+            }
+            let k = texto.buscar_desde(l, a, desde)
+            let valido = k >= 0 and (paso < n or k < c0)
+            if valido {
+                b.af = f
+                b.ac = k
+                b.fila = f
+                b.col = k + m
+                b.ideal = b.col
+                b.mover = true
+                b.tipo = 0
+                return true
+            }
+        }
+    } else {
+        let f0 = sel_f1(b)
+        let c0 = sel_c1(b)
+        for paso in 0..(n + 1) {
+            let f = (f0 - paso + n * 2) % n
+            let mut l = _bajar(linea(b, f), sensible)
+            if paso == 0 {
+                l = texto.subtexto(l, 0, c0)
+            }
+            let k = texto.buscar_ultimo(l, a)
+            let valido = k >= 0 and (paso < n or k + m > c0)
+            if valido {
+                b.af = f
+                b.ac = k
+                b.fila = f
+                b.col = k + m
+                b.ideal = b.col
+                b.mover = true
+                b.tipo = 0
+                return true
+            }
+        }
+    }
+    return false
+}
+
+# buffer.reemplazar_todo(b, aguja, nuevo) -> i32: cambia todas las apariciones (distinguiendo
+# mayúsculas) y dice cuántas eran. Es un solo paso para deshacer.
+fn reemplazar_todo(b: Buffer, aguja: str, nuevo: str) -> i32 {
+    let m = len(aguja)
+    let n = b.lineas.len()
+    let mut cuantas = 0
+    if m > 0 {
+        let mut todo = ""
+        for f in 0..n {
+            let l = linea(b, f)
+            let mut desde = 0
+            let mut k = texto.buscar_desde(l, aguja, 0)
+            let mut s = ""
+            while k >= 0 {
+                s = s + texto.subtexto(l, desde, k) + nuevo
+                desde = k + m
+                cuantas = cuantas + 1
+                k = texto.buscar_desde(l, aguja, desde)
+            }
+            s = s + texto.subtexto(l, desde, len(l))
+            if f > 0 {
+                todo = todo + "\n"
+            }
+            todo = todo + s
+        }
+        if cuantas > 0 {
+            _editar(b, 0, 0, n - 1, _largo(b, n - 1), todo, 0)
+            mover_a(b, 0, 0, false)
+        }
+    }
+    return cuantas
+}
+
+# buffer.ajustar(b, cols): parte las líneas de más de `cols` caracteres en varias, y cada continuación
+# empieza con "… " (para mostrar una salida larga sin que se corte). Borra el historial de deshacer y
+# deja el cursor al principio: es para textos que solo se miran.
+fn ajustar(b: Buffer, cols: i32) {
+    let c = max(cols, 8)
+    let r: Vec<str> = vec_new()
+    for i in 0..b.lineas.len() {
+        let l = linea(b, i)
+        let n = len(l)
+        if n <= c {
+            r.push(l)
+        } else {
+            r.push(texto.subtexto(l, 0, c))
+            let mut k = c
+            while k < n {
+                r.push("… " + texto.subtexto(l, k, k + c - 2))
+                k = k + c - 2
+            }
+        }
+    }
+    b.lineas = r
+    b.fila = 0
+    b.col = 0
+    b.af = 0
+    b.ac = 0
+    b.ideal = 0
+    b.mover = true
+    b.tipo = 0
+    _vaciar_pila(b, 0)
+    _vaciar_pila(b, 1)
+}
+
+# buffer.ir_a_linea(b, n): el cursor al principio de la línea n (se cuenta desde 1).
+fn ir_a_linea(b: Buffer, n: i32) {
+    mover_a(b, n - 1, 0, false)
+}
+
+# ---- colores ------------------------------------------------------------------------------------------------
+
+fn _en_lista(lista: str, w: str) -> bool {
+    return texto.buscar(lista, " " + w + " ") >= 0
+}
+
+fn _es_letra(c: i32) -> bool {
+    return (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95 or c >= 128
+}
+
+fn _es_cifra(c: i32) -> bool {
+    return c >= 48 and c <= 57
+}
+
+# buffer.clases(linea) -> Vec<i32>: la clase de cada carácter (0 común, 1 palabra clave, 2 tipo,
+# 3 texto entre comillas, 4 número, 5 comentario, 6 nombre de función).
+fn clases(s: str) -> Vec<i32> {
+    let claves = " fn task spawn let mut return if else while for in struct true false and or not Ok Err Result Chan Some None print extern from type own accepts break enum match use export continue "
+    let tipos = " i32 i64 f64 str bool Vec Option Map Result Chan String "
+    let n = len(s)
+    let r: Vec<i32> = vec_new()
+    let mut i = 0
+    while i < n {
+        let c = ord(s[i])
+        if c == 35 {
+            while i < n {
+                r.push(5)
+                i = i + 1
+            }
+        } else {
+            if c == 34 {
+                r.push(3)
+                i = i + 1
+                let mut cerro = false
+                while i < n and not cerro {
+                    let d = ord(s[i])
+                    r.push(3)
+                    i = i + 1
+                    if d == 92 and i < n {
+                        r.push(3)
+                        i = i + 1
+                    } else {
+                        if d == 34 {
+                            cerro = true
+                        }
+                    }
+                }
+            } else {
+                if _es_letra(c) {
+                    let a = i
+                    while i < n and (_es_letra(ord(s[i])) or _es_cifra(ord(s[i]))) {
+                        i = i + 1
+                    }
+                    let w = texto.subtexto(s, a, i)
+                    let mut cl = 0
+                    if _en_lista(claves, w) {
+                        cl = 1
+                    } else {
+                        if _en_lista(tipos, w) or (c >= 65 and c <= 90) {
+                            cl = 2
+                        } else {
+                            let mut j = i
+                            while j < n and ord(s[j]) == 32 {
+                                j = j + 1
+                            }
+                            if j < n and ord(s[j]) == 40 {
+                                cl = 6
+                            }
+                        }
+                    }
+                    for q in a..i {
+                        r.push(cl)
+                    }
+                } else {
+                    if _es_cifra(c) {
+                        let a = i
+                        while i < n and _es_cifra(ord(s[i])) {
+                            i = i + 1
+                        }
+                        if i + 1 < n and ord(s[i]) == 46 and _es_cifra(ord(s[i + 1])) {
+                            i = i + 1
+                            while i < n and _es_cifra(ord(s[i])) {
+                                i = i + 1
+                            }
+                        }
+                        if i < n and (ord(s[i]) == 101 or ord(s[i]) == 69) {
+                            let mut j = i + 1
+                            if j < n and (ord(s[j]) == 43 or ord(s[j]) == 45) {
+                                j = j + 1
+                            }
+                            if j < n and _es_cifra(ord(s[j])) {
+                                i = j
+                                while i < n and _es_cifra(ord(s[i])) {
+                                    i = i + 1
+                                }
+                            }
+                        }
+                        for q in a..i {
+                            r.push(4)
+                        }
+                    } else {
+                        r.push(0)
+                        i = i + 1
+                    }
+                }
+            }
+        }
+    }
+    return r
+}
+
+# ---- archivos -------------------------------------------------------------------------------------------------
+
+struct Bytes {
+    v: Vec<i32>
+}
+
+fn _byte(w: Bytes, i: i32) -> i32 {
+    let mut r = 0
+    let mut o = w.v.get(i)
+    while let Some(x) = o {
+        r = x
+        o = None
+    }
+    return r
+}
+
+# Las líneas de un archivo UTF-8 (un byte que no es UTF-8 válido se toma como la letra de ese
+# número, que es lo que pasa con un archivo en Latin-1; el NUL se salta; \r se borra y cada
+# tabulador pasa a 4 espacios).
+fn _lineas_de_bytes(bytes: Bytes) -> Vec<str> {
+    let n = bytes.v.len()
+    let r: Vec<str> = vec_new()
+    let mut actual = ""
+    let mut k = 0
+    while k < n {
+        let b0 = _byte(bytes, k)
+        let mut largo = 1
+        if b0 >= 192 and b0 < 224 {
+            largo = 2
+        }
+        if b0 >= 224 and b0 < 240 {
+            largo = 3
+        }
+        if b0 >= 240 and b0 < 248 {
+            largo = 4
+        }
+        let mut cp = b0
+        if largo > 1 {
+            let mut bien = k + largo <= n
+            if bien {
+                cp = b0 & (127 >> largo)
+                for j in 1..largo {
+                    let bj = _byte(bytes, k + j)
+                    if (bj & 192) != 128 {
+                        bien = false
+                    }
+                    cp = (cp << 6) | (bj & 63)
+                }
+            }
+            if bien == false {
+                cp = b0
+                largo = 1
+            }
+        }
+        if cp == 10 {
+            r.push(actual + "")
+            actual = ""
+        } else {
+            if cp == 9 {
+                actual = actual + "    "
+            } else {
+                if cp != 0 and cp != 13 and cp <= 1114111 and not (cp >= 55296 and cp <= 57343) {
+                    actual = actual + chr(cp)
+                }
+            }
+        }
+        k = k + largo
+    }
+    r.push(actual + "")
+    return r
+}
+
+# buffer.poner_bytes(b, bytes): lo mismo que poner(b, texto) con el contenido de un archivo
+# (los bytes que da json.bytes_de_archivo).
+fn poner_bytes(b: Buffer, bytes: Vec<i32>) {
+    let w = Bytes { v: bytes }
+    b.lineas = _lineas_de_bytes(w)
+    b.fila = 0
+    b.col = 0
+    b.af = 0
+    b.ac = 0
+    b.ideal = 0
+    b.sucio = false
+    b.cambios = b.cambios + 1
+    b.mover = true
+    b.tipo = 0
+    _vaciar_pila(b, 0)
+    _vaciar_pila(b, 1)
+}
+
+# ---- código: pares, comentar, duplicar, la llave pareja, el historial ----------------------------------
+
+# buffer.cerrar_pares(b, si): con true, escribir ( [ { o " pone también el que cierra y deja el cursor en
+# el medio (si lo que sigue es un espacio, el final de la línea o algo que cierra; las comillas, además,
+# si lo de antes no es parte de una palabra ni otra comilla); escribir el que cierra justo delante de
+# uno igual solo lo saltea; y Retroceso entre un par vacío borra los dos. Apagado de entrada.
+fn cerrar_pares(b: Buffer, si: bool) {
+    b.pares = si
+}
+
+# el código del que cierra para uno que abre (0 si no abre nada)
+fn _cierre_de(c: i32) -> i32 {
+    if c == 40 {
+        return 41
+    }
+    if c == 91 {
+        return 93
+    }
+    if c == 123 {
+        return 125
+    }
+    if c == 34 {
+        return 34
+    }
+    return 0
+}
+
+# lo que sigue al cursor deja cerrar un par: nada, un espacio o algo que cierra
+fn _deja_cerrar(c: i32) -> bool {
+    return c < 0 or c == 32 or c == 41 or c == 93 or c == 125 or c == 44
+}
+
+# escribir con pares: true si ya se hizo
+fn _escribir_par(b: Buffer, s: str) -> bool {
+    let l = linea(b, b.fila)
+    let c = ord(s)
+    let sig = _car(l, b.col)
+    let ant = _car(l, b.col - 1)
+    if (c == 41 or c == 93 or c == 125 or c == 34) and sig == c {
+        mover_a(b, b.fila, b.col + 1, false)
+        return true
+    }
+    if c == 40 or c == 91 or c == 123 {
+        if _deja_cerrar(sig) {
+            insertar(b, s + chr(_cierre_de(c)))
+            mover_a(b, b.fila, b.col - 1, false)
+            return true
+        }
+    }
+    if c == 34 {
+        if _deja_cerrar(sig) and _clase_car(ant) != 1 and ant != 34 and ant != 92 {
+            insertar(b, "\"\"")
+            mover_a(b, b.fila, b.col - 1, false)
+            return true
+        }
+    }
+    return false
+}
+
+# la última fila de la selección que cuenta para las operaciones por líneas (si la selección termina al
+# principio de una línea, esa no)
+fn _ultima_fila(b: Buffer) -> i32 {
+    let mut f2 = sel_f2(b)
+    if sel_c2(b) == 0 and f2 > sel_f1(b) {
+        f2 = f2 - 1
+    }
+    return f2
+}
+
+fn _sangria(l: str) -> i32 {
+    let mut i = 0
+    while _car(l, i) == 32 {
+        i = i + 1
+    }
+    return i
+}
+
+# buffer.comentar(b): pone o saca "# " en las líneas de la selección (o en la del cursor). Si todas
+# las que no están en blanco ya empiezan con #, se los saca (con el espacio que siga); si no, pone "# "
+# en la sangría más chica. Las líneas en blanco no se tocan. Es un solo paso para deshacer.
+fn comentar(b: Buffer) {
+    let f1 = sel_f1(b)
+    let f2 = _ultima_fila(b)
+    let varias = hay_sel(b) and b.af != b.fila
+    let mut todas = true
+    let mut alguna = false
+    let mut menor = 1000000
+    for k in f1..(f2 + 1) {
+        let l = linea(b, k)
+        let ind = _sangria(l)
+        if ind < len(l) {
+            alguna = true
+            menor = min(menor, ind)
+            if _car(l, ind) != 35 {
+                todas = false
+            }
+        }
+    }
+    if not alguna {
+        return
+    }
+    let fila = b.fila
+    let col = b.col
+    let viejo = _largo(b, fila)
+    let mut lugar = 0
+    let mut nuevo = ""
+    for k in f1..(f2 + 1) {
+        let l = linea(b, k)
+        let ind = _sangria(l)
+        let mut t = l + ""
+        if ind < len(l) {
+            if todas {
+                let mut q = 1
+                if _car(l, ind + 1) == 32 {
+                    q = 2
+                }
+                t = texto.subtexto(l, 0, ind) + texto.subtexto(l, ind + q, len(l))
+                if k == fila {
+                    lugar = ind
+                }
+            } else {
+                t = texto.subtexto(l, 0, menor) + "# " + texto.subtexto(l, menor, len(l))
+                if k == fila {
+                    lugar = menor
+                }
+            }
+        }
+        if k > f1 {
+            nuevo = nuevo + "\n"
+        }
+        nuevo = nuevo + t
+    }
+    _editar(b, f1, 0, f2, _largo(b, f2), nuevo, 0)
+    if varias {
+        b.af = f1
+        b.ac = 0
+        b.fila = f2
+        b.col = _largo(b, f2)
+        b.ideal = b.col
+    } else {
+        let d = _largo(b, fila) - viejo
+        let mut nc = col
+        if d > 0 and col >= lugar {
+            nc = col + d
+        }
+        if d < 0 {
+            if col >= lugar - d {
+                nc = col + d
+            } else {
+                if col > lugar {
+                    nc = lugar
+                }
+            }
+        }
+        b.fila = fila
+        b.col = nc
+        b.af = fila
+        b.ac = nc
+        b.ideal = nc
+    }
+}
+
+# buffer.duplicar(b): copia las líneas de la selección (o la del cursor) justo debajo, y lleva el cursor
+# (y la selección) a la copia. Es un solo paso para deshacer.
+fn duplicar(b: Buffer) {
+    let f1 = sel_f1(b)
+    let f2 = _ultima_fila(b)
+    let mut bloque = ""
+    for k in f1..(f2 + 1) {
+        bloque = bloque + "\n" + linea(b, k)
+    }
+    let n = f2 - f1 + 1
+    let fila = b.fila
+    let col = b.col
+    let af = b.af
+    let ac = b.ac
+    _editar(b, f2, _largo(b, f2), f2, _largo(b, f2), bloque, 0)
+    b.fila = fila + n
+    b.col = col
+    b.af = af + n
+    b.ac = ac
+    b.ideal = col
+}
+
+# El resultado de buffer.pareja: si hay una llave (o paréntesis o corchete) junto al cursor, dónde está
+# (f0, c0) y dónde está la que le hace pareja (f1, c1); hay es false si no hay o no tiene pareja.
+struct Pareja {
+    hay: bool
+    f0: i32
+    c0: i32
+    f1: i32
+    c1: i32
+}
+
+# una clase de buffer.clases que es código (no un texto entre comillas ni un comentario)
+fn _clase_codigo(k: i32) -> bool {
+    return k != 3 and k != 5
+}
+
+fn _abre_de(c: i32) -> i32 {
+    if c == 41 {
+        return 40
+    }
+    if c == 93 {
+        return 91
+    }
+    if c == 125 {
+        return 123
+    }
+    return 0
+}
+
+# buffer.pareja(b) -> Pareja: la pareja de la llave que está en el cursor o, si no hay, justo antes.
+# Las que están dentro de textos y comentarios no cuentan.
+fn pareja(b: Buffer) -> Pareja {
+    let nada = Pareja { hay: false, f0: 0, c0: 0, f1: 0, c1: 0 }
+    let l = linea(b, b.fila)
+    let cl = clases(l)
+    let mut c0 = 0 - 1
+    let a = _car(l, b.col)
+    if (_cierre_de(a) > 0 and a != 34 or _abre_de(a) > 0) and _clase_codigo(cl.get(b.col).unwrap_or(0)) {
+        c0 = b.col
+    } else {
+        let z = _car(l, b.col - 1)
+        if (_cierre_de(z) > 0 and z != 34 or _abre_de(z) > 0) and _clase_codigo(cl.get(b.col - 1).unwrap_or(0)) {
+            c0 = b.col - 1
+        }
+    }
+    if c0 < 0 {
+        return nada
+    }
+    let ch = _car(l, c0)
+    let adelante = _abre_de(ch) == 0
+    let mut busco = _cierre_de(ch)
+    if not adelante {
+        busco = _abre_de(ch)
+    }
+    let mut prof = 0
+    let mut f = b.fila
+    let mut c = c0
+    let n = b.lineas.len()
+    let mut lin = l + ""
+    let mut cls = clases(lin)
+    while f >= 0 and f < n {
+        let largo = len(lin)
+        let mut seguir = true
+        while seguir {
+            if adelante {
+                c = c + 1
+                seguir = c < largo
+            } else {
+                c = c - 1
+                seguir = c >= 0
+            }
+            if seguir and _clase_codigo(cls.get(c).unwrap_or(0)) {
+                let x = _car(lin, c)
+                if x == ch {
+                    prof = prof + 1
+                }
+                if x == busco {
+                    if prof == 0 {
+                        return Pareja { hay: true, f0: b.fila, c0: c0, f1: f, c1: c }
+                    }
+                    prof = prof - 1
+                }
+            }
+        }
+        if adelante {
+            f = f + 1
+        } else {
+            f = f - 1
+        }
+        if f >= 0 and f < n {
+            lin = linea(b, f)
+            cls = clases(lin)
+            if adelante {
+                c = 0 - 1
+            } else {
+                c = len(lin)
+            }
+        }
+    }
+    return nada
+}
+
+# Las pilas de deshacer y rehacer, para guardarlas aparte (un editor con varias pestañas: cada archivo
+# con su historial).
+struct Historial {
+    uf: Vec<i32>
+    uc: Vec<i32>
+    udel: Vec<str>
+    uins: Vec<str>
+    rf: Vec<i32>
+    rc: Vec<i32>
+    rdel: Vec<str>
+    rins: Vec<str>
+}
+
+fn historial_vacio() -> Historial {
+    return Historial { uf: vec_new(), uc: vec_new(), udel: vec_new(), uins: vec_new(), rf: vec_new(), rc: vec_new(), rdel: vec_new(), rins: vec_new() }
+}
+
+# buffer.historial(b) -> Historial: una copia de lo que hay para deshacer y rehacer.
+# (Las listas se copian elemento por elemento acá mismo: pasar un campo a otra función lo
+# entregaría.)
+fn historial(b: Buffer) -> Historial {
+    let h = historial_vacio()
+    for i in 0..b.uf.len() {
+        h.uf.push(b.uf.get(i).unwrap_or(0))
+        h.uc.push(b.uc.get(i).unwrap_or(0))
+        let mut o = b.udel.get(i)
+        while let Some(x) = o {
+            h.udel.push(x + "")
+            o = None
+        }
+        let mut o2 = b.uins.get(i)
+        while let Some(x) = o2 {
+            h.uins.push(x + "")
+            o2 = None
+        }
+    }
+    for i in 0..b.rf.len() {
+        h.rf.push(b.rf.get(i).unwrap_or(0))
+        h.rc.push(b.rc.get(i).unwrap_or(0))
+        let mut o = b.rdel.get(i)
+        while let Some(x) = o {
+            h.rdel.push(x + "")
+            o = None
+        }
+        let mut o2 = b.rins.get(i)
+        while let Some(x) = o2 {
+            h.rins.push(x + "")
+            o2 = None
+        }
+    }
+    return h
+}
+
+# buffer.poner_historial(b, h): cambia lo que hay para deshacer y rehacer por una copia de h (que tiene
+# que ser del mismo texto que tiene b: se usa después de buffer.poner con ese texto).
+fn poner_historial(b: Buffer, h: Historial) {
+    _vaciar_pila(b, 0)
+    _vaciar_pila(b, 1)
+    for i in 0..h.uf.len() {
+        b.uf.push(h.uf.get(i).unwrap_or(0))
+        b.uc.push(h.uc.get(i).unwrap_or(0))
+        let mut o = h.udel.get(i)
+        while let Some(x) = o {
+            b.udel.push(x + "")
+            o = None
+        }
+        let mut o2 = h.uins.get(i)
+        while let Some(x) = o2 {
+            b.uins.push(x + "")
+            o2 = None
+        }
+    }
+    for i in 0..h.rf.len() {
+        b.rf.push(h.rf.get(i).unwrap_or(0))
+        b.rc.push(h.rc.get(i).unwrap_or(0))
+        let mut o = h.rdel.get(i)
+        while let Some(x) = o {
+            b.rdel.push(x + "")
+            o = None
+        }
+        let mut o2 = h.rins.get(i)
+        while let Some(x) = o2 {
+            b.rins.push(x + "")
+            o2 = None
+        }
+    }
+    b.tipo = 0
+}
+

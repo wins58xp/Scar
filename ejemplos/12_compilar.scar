@@ -1,0 +1,45 @@
+# Capítulo 12: el mismo programa, con scar run y con scar build.
+#
+#   scar run ejemplos/12_compilar.scar
+#   scar build ejemplos/12_compilar.scar -o criba && ./criba
+#
+# Cuenta los primos menores que un número con la criba de Eratóstenes. La
+# cantidad es la misma en los dos; el tiempo, no.
+
+fn criba(n: i32) -> i32 {
+    let es_primo: Vec<bool> = vec_new(n)
+    for i in 0..n {
+        es_primo.push(i >= 2)
+    }
+    let mut p = 2
+    while p * p < n {
+        if es_primo.get(p).unwrap_or(false) {
+            let mut m = p * p
+            while m < n {
+                es_primo.set(m, false)
+                m = m + p
+            }
+        }
+        p = p + 1
+    }
+    let mut cuenta = 0
+    for i in 0..n {
+        if es_primo.get(i).unwrap_or(false) {
+            cuenta = cuenta + 1
+        }
+    }
+    return cuenta
+}
+
+fn main() -> Result<i32> {
+    let t0 = now()
+    let n = 200000
+    print("primos menores que " + a_texto(n) + ":", criba(n))
+    # el tiempo cambia en cada corrida: va a la salida de errores, así la
+    # salida normal es la misma con scar run y con el binario
+    let ms = to_i32((now() - t0) * 1000.0)
+    let err = file_open("/dev/stderr", "a")?    # "a": "w" vaciaría un archivo redirigido
+    err.write("tardó " + a_texto(ms) + " ms\n")?
+    err.close()
+    return Ok(0)
+}

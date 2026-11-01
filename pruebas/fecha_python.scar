@@ -1,0 +1,116 @@
+# lib/fecha contra datetime y zoneinfo de Python: lo corre
+# pruebas/test_fecha_python.py. Escribe, para días, instantes y fechas
+# locales al azar (y los de alrededor de cada cambio de hora de Chile), lo que
+# calcula fecha, para que Python lo compare.
+
+use "mate"
+use "fecha"
+
+fn campos(f: fecha.Fecha) -> str {
+    return a_texto(f.anio) + " " + a_texto(f.mes) + " " + a_texto(f.dia) + " " + a_texto(f.hora) + " "
+        + a_texto(f.minuto) + " " + a_texto(f.segundo)
+}
+
+fn main() {
+    let g = mate.azar(1970)
+    # días: del año 1 al 9999
+    for k in 0..400 {
+        let d = to_i64(mate.azar_entero(g, 0 - 719162, 2932896))
+        let f = fecha.civil_desde_dias(d)
+        print("DIA", d, campos(f), fecha.dia_semana(f), fecha.dia_del_anio(f), fecha.dias_desde_civil(f.anio, f.mes, f.dia))
+    }
+    # instantes en UTC, con ISO y formato
+    for k in 0..300 {
+        let s = to_i64(mate.azar_entero(g, 0 - 1000000000, 1000000000)) * 62
+        let f = fecha.de_segundos(s)
+        print("SEG", s, campos(f), fecha.a_segundos(f), fecha.iso(s))
+        print("FMT", s, fecha.formato(f, "%A|%a|%d|%B|%b|%Y|%m|%H:%M:%S|%j|%%"))
+    }
+    # Chile y Pascua: al azar entre 2019 y 2040, y alrededor de cada cambio
+    let zonas = [fecha.chile(), fecha.pascua(), fecha.magallanes(), fecha.fija(330), fecha.utc()]
+    let desde = fecha.a_segundos(fecha.fecha(2019, 1, 1, 0, 0, 0))
+    let hasta = fecha.a_segundos(fecha.fecha(2040, 12, 31, 0, 0, 0))
+    let mut instantes: Vec<i64> = vec_new()
+    for k in 0..300 {
+        instantes.push(desde + to_i64(mate.azar_entero(g, 0, to_i32((hasta - desde) / 60))) * 60)
+    }
+    for anio in 2019..2041 {
+        for c in 0..2 {
+            let base = fecha.a_segundos(fecha.fecha(anio, if c == 0 { 4 } else { 9 }, 1, 0, 0, 0))
+            # cada media hora durante 16 días: cruza el domingo del cambio
+            for h in 0..16 * 48 {
+                if h % 7 == 0 {
+                    instantes.push(base + to_i64(h) * 1800)
+                }
+            }
+        }
+    }
+    for i in 0..instantes.len() {
+        let s = instantes.get(i).unwrap_or(0)
+        for z in 0..zonas.len() {
+            match zonas.get(z) {
+                Some(zona) => {
+                    let f = fecha.local(s, zona)
+                    print("LOC", s, z, campos(f), fecha.desfase(zona, s), fecha.iso_local(s, zona),
+                          fecha.instante(f, zona))
+                }
+                None => {}
+            }
+        }
+    }
+    # fechas locales que no existen o pasan dos veces
+    for anio in 2019..2041 {
+        let meses = [4, 9]
+        for c in 0..2 {
+            let mes = meses.get(c).unwrap_or(4)
+            for dia in 1..15 {
+                for hm in 0..6 {
+                    let f = fecha.fecha(anio, mes, dia, if hm < 3 { 23 } else { 0 }, (hm % 3) * 25, 7)
+                    print("INST", anio, mes, dia, f.hora, f.minuto, 7, fecha.instante(f, fecha.chile()),
+                          fecha.instante(f, fecha.pascua()))
+                }
+            }
+        }
+    }
+    # ISO 8601 de varias formas
+    for k in 0..200 {
+        let s = to_i64(mate.azar_entero(g, 0, 2000000000)) * 2
+        let f = fecha.de_segundos(s)
+        let forma = k % 6
+        let off = mate.azar_entero(g, 0 - 12, 14) * 60 + (if k % 4 == 0 { 30 } else { 0 })
+        let h = abs(off) / 60
+        let mi = abs(off) % 60
+        let sig = if off < 0 { "-" } else { "+" }
+        let hh = if h < 10 { "0" + a_texto(h) } else { a_texto(h) }
+        let mm = if mi < 10 { "0" + a_texto(mi) } else { a_texto(mi) }
+        let base = fecha.formato(f, "%Y-%m-%d")
+        let t = if forma == 0 { base }
+                else if forma == 1 { base + "T" + fecha.formato(f, "%H:%M") }
+                else if forma == 2 { base + " " + fecha.formato(f, "%H:%M:%S") + "Z" }
+                else if forma == 3 { base + "T" + fecha.formato(f, "%H:%M:%S") + ".123456" + sig + hh + ":" + mm }
+                else if forma == 4 { base + "T" + fecha.formato(f, "%H:%M:%S") + sig + hh + mm }
+                else { base + "T" + fecha.formato(f, "%H:%M:%S") + sig + hh }
+        match fecha.de_iso(t) {
+            Ok(v) => { print("ISO", forma, off, campos(f), v, t) }
+            Err(e) => { print("ISO", forma, off, campos(f), "ERR", t) }
+        }
+    }
+    let malos = ["2026-13-01", "2026-02-30", "2026-1-01", "2026-10-26T25:00", "2026-10-26T10:61",
+                 "2026-10-26T10:00:00+0", "hola", "2026/10/26", "2023-02-29"]
+    for k in 0..malos.len() {
+        let mut t = ""
+        match malos.get(k) {
+            Some(x) => { t = x + "" }
+            None => {}
+        }
+        print("ISOMAL", k, fecha.de_iso(t).is_err())
+    }
+    # meses
+    for k in 0..200 {
+        let f = fecha.fecha(mate.azar_entero(g, 1900, 2100), mate.azar_entero(g, 1, 12), mate.azar_entero(g, 1, 31), 0, 0, 0)
+        let n = mate.azar_entero(g, 0 - 30, 30)
+        if f.dia <= fecha.dias_del_mes(f.anio, f.mes) {
+            print("MES", campos(f), n, campos(fecha.sumar_meses(f, n)))
+        }
+    }
+}

@@ -1,0 +1,130 @@
+# lib/prueba.scar: un mini framework de pruebas (use "prueba").
+#
+# Para que una librería se pruebe a sí misma desde SCAR:
+#
+#   use "prueba"
+#
+#   fn main() -> i32 {
+#       let t = prueba.nueva("mate")
+#       prueba.seccion(t, "vectores")
+#       prueba.afirmar_igual_i32(t, 2 + 2, 4, "suma")
+#       prueba.afirmar_cerca(t, sqrt(2.0) * sqrt(2.0), 2.0, 1e-12, "raíz")
+#       return prueba.terminar(t)
+#   }
+#
+# Cada afirmación cuenta una prueba; si falla, imprime qué se esperaba y qué
+# salió, y sigue. `terminar` imprime el resumen y devuelve el código de salida
+# (0 si todo pasó, 1 si algo falló) para que `main` lo devuelva: así la CI ve
+# la falla aunque el programa no se caiga.
+#
+# Límites del lenguaje: no hay igualdad genérica, así que hay una función por
+# tipo (afirmar_igual_i32, _i64, _f64, _str, _bool), y un panic no se puede
+# atrapar: una prueba que panickea corta el programa entero (y la CI lo ve por
+# el código de salida). Para probar que algo panickea, va como programa
+# aparte.
+
+struct Prueba {
+    nombre: str
+    total: i32
+    fallas: i32
+    seccion: str
+}
+
+# Un conjunto de pruebas nuevo, sin nada contado.
+fn nueva(nombre: str) -> Prueba {
+    return Prueba { nombre: nombre, total: 0, fallas: 0, seccion: "" }
+}
+
+# Marca el comienzo de un grupo de pruebas: las fallas de acá en adelante
+# dicen a qué sección pertenecen.
+fn seccion(t: Prueba, nombre: str) {
+    t.seccion = nombre
+}
+
+fn _fallo(t: Prueba, que: str) {
+    t.fallas = t.fallas + 1
+    if len(t.seccion) > 0 {
+        print("FALLA [" + t.seccion + "]", que)
+    } else {
+        print("FALLA", que)
+    }
+}
+
+# La condición tiene que ser verdadera.
+fn afirmar(t: Prueba, cond: bool, que: str) {
+    t.total = t.total + 1
+    if not cond {
+        _fallo(t, que)
+    }
+}
+
+fn afirmar_igual_i32(t: Prueba, obtenido: i32, esperado: i32, que: str) {
+    t.total = t.total + 1
+    if obtenido != esperado {
+        _fallo(t, que)
+        print("    esperado:", esperado, "obtenido:", obtenido)
+    }
+}
+
+fn afirmar_igual_i64(t: Prueba, obtenido: i64, esperado: i64, que: str) {
+    t.total = t.total + 1
+    if obtenido != esperado {
+        _fallo(t, que)
+        print("    esperado:", esperado, "obtenido:", obtenido)
+    }
+}
+
+# Igualdad exacta de dos f64 (para resultados que tienen que ser exactos; para
+# cuentas con redondeo, afirmar_cerca).
+fn afirmar_igual_f64(t: Prueba, obtenido: f64, esperado: f64, que: str) {
+    t.total = t.total + 1
+    if obtenido != esperado {
+        _fallo(t, que)
+        print("    esperado:", esperado, "obtenido:", obtenido)
+    }
+}
+
+fn afirmar_igual_str(t: Prueba, obtenido: str, esperado: str, que: str) {
+    t.total = t.total + 1
+    if obtenido != esperado {
+        _fallo(t, que)
+        print("    esperado:", esperado, "obtenido:", obtenido)
+    }
+}
+
+fn afirmar_igual_bool(t: Prueba, obtenido: bool, esperado: bool, que: str) {
+    t.total = t.total + 1
+    if obtenido != esperado {
+        _fallo(t, que)
+        print("    esperado:", esperado, "obtenido:", obtenido)
+    }
+}
+
+# |obtenido - esperado| <= tolerancia. Un nan nunca está cerca de nada.
+fn afirmar_cerca(t: Prueba, obtenido: f64, esperado: f64, tolerancia: f64, que: str) {
+    t.total = t.total + 1
+    let d = abs(obtenido - esperado)
+    if not (d <= tolerancia) {
+        _fallo(t, que)
+        print("    esperado:", esperado, "obtenido:", obtenido, "diferencia:", d, "tolerancia:", tolerancia)
+    }
+}
+
+# Cuántas pruebas se contaron y cuántas fallaron.
+fn total(t: Prueba) -> i32 {
+    return t.total
+}
+
+fn fallas(t: Prueba) -> i32 {
+    return t.fallas
+}
+
+# Imprime el resumen y devuelve el código de salida: 0 si todo pasó, 1 si no.
+fn terminar(t: Prueba) -> i32 {
+    if t.fallas == 0 {
+        print("prueba " + t.nombre + ":", t.total, "pruebas, todas pasaron")
+        return 0
+    }
+    print("prueba " + t.nombre + ":", t.total, "pruebas,", t.fallas, "fallaron")
+    return 1
+}

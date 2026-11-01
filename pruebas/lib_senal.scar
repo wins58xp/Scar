@@ -1,0 +1,162 @@
+# lib/senal, probada con lib/prueba.
+#
+# FFT y su inversa, FFT real, frecuencias, convolución, ventanas, filtros FIR y
+# Butterworth (con filtrado de ida y vuelta), periodograma y remuestreo, con señales
+# chicas cuyos resultados se saben a mano o salen de numpy y scipy.signal. La
+# comparación con numpy y scipy sobre 263 casos al azar está en
+# pruebas/test_senal_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "mate"
+use "estadistica"
+use "senal"
+
+fn s_de(a: Vec<f64>) -> estadistica.Serie {
+    return estadistica.serie(a)
+}
+
+fn lista(s: estadistica.Serie) -> str {
+    let mut t = ""
+    for i in 0..estadistica.cantidad(s) {
+        if i > 0 {
+            t = t + " "
+        }
+        t = t + a_texto(estadistica.dato(s, i))
+    }
+    return t
+}
+
+fn seno(n: i32, ciclos: f64) -> estadistica.Serie {
+    let s = estadistica.nueva()
+    for i in 0..n {
+        estadistica.agregar(s, sin(2.0 * mate.pi() * ciclos * to_f64(i) / to_f64(n)))
+    }
+    return s
+}
+
+fn correr(t: prueba.Prueba) -> Result<i32> {
+    prueba.seccion(t, "FFT")
+    let x = s_de([1.0, 2.0, 3.0, 4.0, 0.0, -1.0, -2.0, 0.0])
+    let f = senal.fft(x)
+    prueba.afirmar_igual_i32(t, senal.largo_c(f), 8, "8 valores")
+    prueba.afirmar_cerca(t, senal.parte_real(f, 0), 7.0, 1e-13, "bin 0 es la suma")
+    prueba.afirmar_cerca(t, senal.parte_real(f, 1), 0.29289322, 1e-8, "bin 1, parte real")
+    prueba.afirmar_cerca(t, senal.parte_imag(f, 1), -9.94974747, 1e-8, "bin 1, parte imaginaria")
+    prueba.afirmar_cerca(t, senal.parte_imag(f, 2), 3.0, 1e-13, "bin 2")
+    prueba.afirmar_cerca(t, senal.parte_real(f, 4), -3.0, 1e-13, "bin de Nyquist")
+    let vuelta = senal.ifft(f)
+    let mut peor = 0.0
+    for i in 0..8 {
+        let d = senal.parte_real(vuelta, i) - estadistica.dato(x, i)
+        if d * d > peor {
+            peor = d * d
+        }
+    }
+    prueba.afirmar(t, peor < 1e-26, "ifft(fft(x)) vuelve a x")
+    prueba.afirmar_igual_i32(t, senal.largo_c(senal.fft(s_de([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]))), 7, "largo primo (Bluestein)")
+    prueba.afirmar_cerca(t, senal.parte_real(senal.fft(s_de([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])), 0), 28.0, 1e-12, "suma con largo primo")
+    prueba.afirmar_igual_i32(t, senal.largo_c(senal.rfft(x)), 5, "rfft: n/2 + 1 valores")
+    prueba.afirmar_igual_i32(t, senal.largo_c(senal.fft(estadistica.nueva())), 0, "señal vacía")
+
+    prueba.seccion(t, "frecuencias y espectro de un seno")
+    let s = seno(64, 8.0)
+    let m = senal.magnitud(senal.rfft(s))
+    let mut mejor = 0
+    for i in 0..estadistica.cantidad(m) {
+        if estadistica.dato(m, i) > estadistica.dato(m, mejor) {
+            mejor = i
+        }
+    }
+    prueba.afirmar_igual_i32(t, mejor, 8, "el seno de 8 ciclos cae en el bin 8")
+    prueba.afirmar_igual_str(t, lista(senal.frecuencias(4, 1.0)), "0.0 0.25 -0.5 -0.25", "frecuencias como fftfreq")
+    prueba.afirmar_igual_str(t, lista(senal.frecuencias_r(4, 1.0)), "0.0 0.25 0.5", "frecuencias como rfftfreq")
+    let e = senal.periodograma(s, 64.0, "boxcar")
+    let mut pico = 0
+    for i in 0..estadistica.cantidad(e.p) {
+        if estadistica.dato(e.p, i) > estadistica.dato(e.p, pico) {
+            pico = i
+        }
+    }
+    prueba.afirmar_cerca(t, estadistica.dato(e.f, pico), 8.0, 1e-12, "el periodograma marca 8 Hz")
+
+    prueba.seccion(t, "convolución")
+    prueba.afirmar_igual_str(t, lista(senal.convolucion(s_de([1.0, 2.0, 3.0]), s_de([0.0, 1.0, 0.5]))), "0.0 1.0 2.5 4.0 1.5", "convolución")
+    let c = senal.convolucion_fft(s_de([1.0, 2.0, 3.0]), s_de([0.0, 1.0, 0.5]))
+    prueba.afirmar_cerca(t, estadistica.dato(c, 2), 2.5, 1e-14, "convolución por FFT")
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(c), 5, "largo n + m - 1")
+    prueba.afirmar_igual_str(t, lista(senal.correlacion_cruzada(s_de([1.0, 2.0, 3.0]), s_de([0.0, 1.0, 0.5]))), "0.5 2.0 3.5 3.0 0.0", "correlación cruzada")
+
+    prueba.seccion(t, "ventanas")
+    let hn = senal.ventana("hann", 5, true)
+    prueba.afirmar_cerca(t, estadistica.dato(hn, 1), 0.5, 1e-15, "hann simétrica de 5, muestra 1")
+    prueba.afirmar_cerca(t, estadistica.dato(hn, 2), 1.0, 1e-15, "hann simétrica de 5, centro")
+    prueba.afirmar_cerca(t, estadistica.dato(hn, 4), 0.0, 1e-15, "hann simétrica de 5, punta")
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(senal.ventana("hamming", 9, false)), 9, "largo de la ventana periódica")
+    prueba.afirmar_igual_str(t, lista(senal.ventana("boxcar", 3, true)), "1.0 1.0 1.0", "rectangular")
+    prueba.afirmar_cerca(t, estadistica.dato(senal.ventana("hamming", 5, true), 0), 0.08, 1e-15, "hamming vale 0.08 en la punta")
+    prueba.afirmar_cerca(t, estadistica.dato(senal.ventana_kaiser(5, 8.6, true), 2), 1.0, 1e-15, "kaiser vale 1 en el centro")
+
+    prueba.seccion(t, "filtros FIR")
+    let h = senal.fir_pasabajo(5, 0.5, 2.0)
+    prueba.afirmar_cerca(t, estadistica.dato(h, 1), 0.203712369, 1e-8, "coeficiente 1 del pasabajo de 5")
+    prueba.afirmar_cerca(t, estadistica.dato(h, 2), 0.592575262, 1e-8, "coeficiente central")
+    prueba.afirmar_cerca(t, estadistica.suma(h), 1.0, 1e-14, "ganancia 1 en continua")
+    let pa = senal.fir_pasaalto(11, 0.5, 2.0)
+    prueba.afirmar_cerca(t, estadistica.suma(pa), 0.0, 0.06, "el pasaalto casi no deja pasar la continua")
+
+    prueba.seccion(t, "filtro Butterworth")
+    let but = senal.butter(2, s_de([0.2]), "pasabajo", 2.0)
+    prueba.afirmar_cerca(t, estadistica.dato(but.b, 0), 0.06745527, 1e-8, "b0")
+    prueba.afirmar_cerca(t, estadistica.dato(but.b, 1), 0.13491055, 1e-8, "b1")
+    prueba.afirmar_cerca(t, estadistica.dato(but.a, 1), -1.1429805, 1e-7, "a1")
+    prueba.afirmar_cerca(t, estadistica.dato(but.a, 2), 0.4128016, 1e-7, "a2")
+    prueba.afirmar_cerca(t, senal.ganancia(but, 0.0, 2.0), 1.0, 1e-12, "ganancia 1 en continua")
+    prueba.afirmar_cerca(t, senal.ganancia(but, 0.1, 2.0), 0.9729115, 1e-6, "ganancia en 0.1 Hz")
+    prueba.afirmar_cerca(t, senal.ganancia(but, 0.2, 2.0), sqrt(0.5), 1e-9, "-3 dB en la frecuencia de corte")
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(senal.butter(2, s_de([0.2, 0.4]), "pasabanda", 2.0).a), 5, "el pasabanda de orden 2 tiene 5 coeficientes")
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(senal.butter(0, s_de([0.2]), "pasabajo", 2.0).a), 0, "orden 0: filtro vacío")
+    let un_paso = senal.aplicar(but, s_de([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]))
+    prueba.afirmar_cerca(t, estadistica.dato(un_paso, 23), 1.0, 1e-3, "la respuesta al escalón llega a 1")
+    let zi = senal.estado_inicial(but)
+    let en_regimen = senal.aplicar_con(but, s_de([1.0, 1.0, 1.0]), zi)
+    prueba.afirmar_cerca(t, estadistica.dato(en_regimen, 0), 1.0, 1e-12, "con el estado inicial no hay transitorio")
+    let ruido = estadistica.nueva()
+    for i in 0..200 {
+        let lento = sin(2.0 * mate.pi() * to_f64(i) / 100.0)
+        let rapido = 0.5 * sin(2.0 * mate.pi() * to_f64(i) * 0.45)
+        estadistica.agregar(ruido, lento + rapido)
+    }
+    let limpio = senal.filtfilt(but, ruido)
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(limpio), 200, "filtfilt conserva el largo")
+    prueba.afirmar_cerca(t, estadistica.dato(limpio, 50), sin(2.0 * mate.pi() * 0.5), 0.08, "filtfilt deja la señal lenta, sin desfase")
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(senal.filtfilt(but, s_de([1.0, 2.0]))), 0, "señal más corta que el relleno")
+
+    prueba.seccion(t, "remuestreo")
+    let r2 = senal.remuestrear_poly(s_de([1.0, 2.0, 3.0, 4.0]), 2, 1)
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(r2), 8, "el doble de muestras")
+    prueba.afirmar_cerca(t, estadistica.dato(r2, 1), 1.73692716, 1e-8, "muestra 1 como scipy.signal.resample_poly")
+    prueba.afirmar_cerca(t, estadistica.dato(r2, 7), 2.08049436, 1e-8, "muestra 7 (el borde se rellena con ceros)")
+    let r3 = senal.remuestrear(seno(32, 2.0), 64)
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(r3), 64, "remuestreo por Fourier a 64")
+    prueba.afirmar_cerca(t, estadistica.dato(r3, 8), 1.0, 1e-12, "el seno de 2 ciclos vale 1 en la muestra 16 de 64")
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(senal.remuestrear_poly(s_de([1.0, 2.0, 3.0]), 1, 1)), 3, "factor 1: la misma señal")
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(senal.remuestrear_poly(s_de([1.0, 2.0, 3.0]), 0, 1)), 0, "factor 0: vacío")
+
+    return Ok(prueba.terminar(t))
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("lib/senal")
+    let r = correr(t)
+    match r {
+        Ok(codigo) => {
+            return codigo
+        }
+        Err(e) => {
+            print("ERROR:", e)
+            return 1
+        }
+    }
+    return 1
+}

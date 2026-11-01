@@ -1,0 +1,304 @@
+# lib/https.scar: pedidos HTTP y HTTPS con la misma interfaz que lib/web (use "https").
+#
+#   use "https"
+#
+#   let r = https.obtener("https://api.ejemplo.cl/datos?x=1")?
+#   if https.exito(r) {
+#       let doc = https.json_de(r)?
+#       print(json.texto(doc, "nombre"))
+#   }
+#
+# SCAR no trae TLS, y escribir uno a mano sería peligroso (un error en la criptografía no se ve y
+# deja los datos al aire). Esta librería le deja el trabajo a libcurl, con OpenSSL o GnuTLS del
+# sistema, a través de native/scarhttp.c: el cifrado, la verificación del certificado y del
+# nombre del servidor, los certificados de confianza del sistema, HTTP/2, la compresión
+# (gzip, deflate, br: el cuerpo llega ya abierto) y los proxies del entorno (HTTPS_PROXY).
+# El certificado SIEMPRE se verifica: no hay un modo "inseguro". Para una autoridad propia (un
+# servidor de pruebas, una red de la empresa) hay que dar el archivo de certificados:
+# https.enviar_con_ca(...), o la variable de entorno SCAR_HTTPS_CA.
+#
+# Usa los mismos tipos que web (web.Opciones, web.Respuesta, web.opciones(), web.cabecera(...),
+# web.cabecera_de(r, ...)), y para una URL http:// se la pasa a web (el cliente escrito en SCAR),
+# así que https.obtener sirve para las dos clases de URL.
+#
+# Necesita libscarhttp.so (la que ya usa el sismógrafo en vivo):
+#   gcc -shared -fPIC native/scarhttp.c -o libscarhttp.so -lcurl
+# y los archivos de desarrollo de libcurl (en Debian y Ubuntu: libcurl4-openssl-dev).
+# web no depende de esa librería: un programa que solo usa web sigue andando sin ella.
+#
+# Diferencias con web:
+# - Las redirecciones las sigue curl (301, 302 y 303 pasan a GET; 307 y 308 conservan método y
+#   cuerpo; en un cambio de servidor no se manda Authorization). `redirecciones` de las opciones
+#   es el máximo (0 = no seguir).
+# - Reintentos: igual que web: sin conexión (cualquier método) y 502, 503 o 504 (solo GET,
+#   HEAD, PUT, DELETE y OPTIONS), con la espera doble de `o.pausa`.
+# - Cada pedido tiene 30 segundos como máximo. Las respuestas pasan de 256 MB: Err.
+# - Los hilos (task) pueden pedir a la vez: cada uno tiene sus propios buffers en C.
+#
+# Límites: no hay cookies entre pedidos, ni autenticación de cliente (certificado propio), ni
+# subir archivos por partes, ni leer la respuesta a medida que llega.
+
+use "web"
+use "codigos"
+use "json"
+use "texto"
+
+extern lib "scarhttp" en_proceso
+
+extern "C" fn scar_https_pedido(cuerpo: Vec<i32>, metodo: str, url: str, cabeceras: str, redirecciones: i32, segundos: i32, ca: str) -> i32 from "scarhttp"
+extern "C" fn scar_http_largo(que: i32) -> i32 from "scarhttp"
+extern "C" fn scar_http_copiar(destino: Vec<i32>, que: i32) -> i32 from "scarhttp"
+extern "C" fn scar_http_url_final() -> str from "scarhttp"
+extern "C" fn scar_http_error() -> str from "scarhttp"
+extern "C" fn scar_http_error_conexion() -> i32 from "scarhttp"
+extern "C" fn getenv(nombre: str) -> Result<str>
+
+# El texto de unos bytes, con "?" en lo que no es ASCII (las cabeceras son ASCII; lo demás es raro).
+fn _ascii(v: Vec<i32>) -> str {
+    let mut s = ""
+    for i in 0..v.len() {
+        let b = v.get(i).unwrap_or(63)
+        if b >= 32 and b < 127 or b == 10 or b == 13 or b == 9 {
+            s = s + chr(b)
+        } else {
+            s = s + "?"
+        }
+    }
+    return s
+}
+
+# Retira de C los `que` bytes (0 cuerpo, 1 cabeceras).
+fn _retirar(que: i32) -> Vec<i32> {
+    let n = scar_http_largo(que)
+    let mut v: Vec<i32> = vec_new()
+    for i in 0..n {
+        v.push(0)
+    }
+    scar_http_copiar(v, que)
+    return v
+}
+
+fn _limpio(t: str) -> bool {
+    return not t.contains("\r") and not t.contains("\n")
+}
+
+fn _bajar(s: str) -> str {
+    let mut r = ""
+    for i in 0..len(s) {
+        let k = ord(s[i])
+        if k >= 65 and k <= 90 {
+            r = r + chr(k + 32)
+        } else {
+            r = r + s[i]
+        }
+    }
+    return r
+}
+
+# Las cabeceras del pedido como "Nombre: valor" por línea (Err si alguna tiene un salto de línea:
+# sería una cabecera colada).
+fn _texto_cabeceras(o: web.Opciones) -> Result<str> {
+    let mut t = ""
+    for i in 0..web.cantidad(o.cabeceras) {
+        let n = web.nombre_en(o.cabeceras, i)
+        let v = web.valor_en(o.cabeceras, i)
+        if len(n) == 0 or n.contains(":") or not _limpio(n) or not _limpio(v) {
+            return Err("https: cabecera inválida: " + n)
+        }
+        t = t + n + ": " + v + "\n"
+    }
+    return Ok(t)
+}
+
+# Del texto crudo de cabeceras (de todos los saltos de redirección) arma la respuesta del último.
+fn _armar(crudo: str, cuerpo: Vec<i32>, url: str) -> Result<web.Respuesta> {
+    let lineas = texto.lineas(crudo)
+    let mut inicio = -1
+    for i in 0..lineas.len() {
+        let mut o = lineas.get(i)
+        while let Some(l) = o {
+            if texto.empieza(l, "HTTP/") {
+                inicio = i
+            }
+            o = None
+        }
+    }
+    if inicio < 0 {
+        return Err("https: la respuesta no trae línea de estado")
+    }
+    let mut estado = ""
+    let cab = web.pares()
+    let mut fin = false
+    for i in inicio..lineas.len() {
+        let mut o = lineas.get(i)
+        while let Some(l) = o {
+            if i == inicio {
+                estado = l + ""
+            } else if len(l) == 0 {
+                fin = true
+            } else if not fin {
+                let p = texto.buscar(l, ":")
+                if p > 0 {
+                    web.poner(cab, texto.subtexto(l, 0, p), texto.recortar(texto.subtexto(l, p + 1, len(l))))
+                }
+            }
+            o = None
+        }
+    }
+    let partes = texto.dividir(estado, " ")
+    if partes.len() < 2 {
+        return Err("https: línea de estado inválida: " + estado)
+    }
+    let mut codigo = 0
+    let mut op = partes.get(1)
+    while let Some(c) = op {
+        for i in 0..len(c) {
+            let k = ord(c[i]) - 48
+            if k < 0 or k > 9 {
+                return Err("https: línea de estado inválida: " + estado)
+            }
+            codigo = codigo * 10 + k
+        }
+        op = None
+    }
+    let mut motivo = ""
+    let p1 = texto.buscar(estado, " ")
+    if p1 >= 0 {
+        let resto = texto.subtexto(estado, p1 + 1, len(estado))
+        let p2 = texto.buscar(resto, " ")
+        if p2 >= 0 {
+            motivo = texto.subtexto(resto, p2 + 1, len(resto))
+        }
+    }
+    return Ok(web.Respuesta { codigo: codigo, motivo: motivo, cabeceras: cab, cuerpo: codigos.datos(cuerpo), url: url })
+}
+
+fn _repetible(metodo: str) -> bool {
+    return metodo == "GET" or metodo == "HEAD" or metodo == "PUT" or metodo == "DELETE" or metodo == "OPTIONS"
+}
+
+# Lo que se supo del último intento, para decidir si se repite sin tocar el Result.
+struct Estado {
+    codigo: i32
+    conexion: bool
+}
+
+# Un intento. Err que empieza con "conexión:" = no se pudo conectar. `est` dice cómo salió.
+fn _un_intento(metodo: str, url: str, o: web.Opciones, cuerpo: codigos.Datos, ca: str, est: Estado) -> Result<web.Respuesta> {
+    est.codigo = -1
+    est.conexion = false
+    let cab = _texto_cabeceras(o)?
+    let copia = codigos.copia(cuerpo)
+    let c = scar_https_pedido(copia.v, metodo, url, cab, o.redirecciones, 30, ca)
+    if c < 0 {
+        let msg = scar_http_error() + ""
+        if scar_http_error_conexion() == 1 {
+            est.conexion = true
+            return Err("conexión: " + msg)
+        }
+        return Err("https: " + msg)
+    }
+    est.codigo = c
+    let crudo = _ascii(_retirar(1))
+    let cuerpo_r = _retirar(0)
+    return _armar(crudo, cuerpo_r, scar_http_url_final() + "")
+}
+
+fn _toca_repetir(metodo: str, est: Estado, intento: i32, maximo: i32) -> bool {
+    if intento >= maximo {
+        return false
+    }
+    if est.conexion {
+        return true
+    }
+    return _repetible(metodo) and (est.codigo == 502 or est.codigo == 503 or est.codigo == 504)
+}
+
+# Un pedido con el método, la URL, las opciones, un cuerpo (bytes; vacío si no hay) y el archivo de
+# certificados de confianza `ca` ("" = los del sistema). Err solo si no hubo respuesta: un 404 o
+# un 500 llegan como Ok con su código.
+fn enviar_con_ca(metodo: str, url: str, o: web.Opciones, cuerpo: codigos.Datos, ca: str) -> Result<web.Respuesta> {
+    let u = web.analizar(url)?
+    if u.esquema == "http" {
+        return web.enviar(metodo, url, o, cuerpo)
+    }
+    if u.esquema != "https" {
+        return Err("https: esquema no soportado '" + u.esquema + "' en " + url)
+    }
+    if len(metodo) == 0 or not _limpio(metodo) or metodo.contains(" ") {
+        return Err("https: método inválido")
+    }
+    if len(web.host(u)) == 0 {
+        return Err("https: la URL no tiene servidor: " + url)
+    }
+    let est = Estado { codigo: -1, conexion: false }
+    let mut intento = 0
+    let mut r = _un_intento(metodo, url, o, cuerpo, ca, est)
+    while _toca_repetir(metodo, est, intento, o.reintentos) {
+        sleep(o.pausa * to_f64(1 << min(intento, 5)))
+        intento = intento + 1
+        r = _un_intento(metodo, url, o, cuerpo, ca, est)
+    }
+    return r
+}
+
+# Como enviar_con_ca, con los certificados de SCAR_HTTPS_CA si esa variable de entorno existe.
+fn enviar(metodo: str, url: str, o: web.Opciones, cuerpo: codigos.Datos) -> Result<web.Respuesta> {
+    let mut ca = ""
+    if getenv("SCAR_HTTPS_CA").is_ok() {
+        ca = getenv("SCAR_HTTPS_CA")?
+    }
+    return enviar_con_ca(metodo, url, o, cuerpo, ca)
+}
+
+fn obtener_con(url: str, o: web.Opciones) -> Result<web.Respuesta> {
+    return enviar("GET", url, o, codigos.vacio())
+}
+
+fn obtener(url: str) -> Result<web.Respuesta> {
+    return enviar("GET", url, web.opciones(), codigos.vacio())
+}
+
+# POST de un texto con el Content-Type dado.
+fn enviar_texto(url: str, tipo: str, cuerpo: str, o: web.Opciones) -> Result<web.Respuesta> {
+    let o2 = web.opciones()
+    o2.reintentos = o.reintentos
+    o2.pausa = o.pausa
+    o2.redirecciones = o.redirecciones
+    let mut tiene = false
+    for i in 0..web.cantidad(o.cabeceras) {
+        web.cabecera(o2, web.nombre_en(o.cabeceras, i), web.valor_en(o.cabeceras, i))
+        if _bajar(web.nombre_en(o.cabeceras, i)) == "content-type" {
+            tiene = true
+        }
+    }
+    if not tiene {
+        web.cabecera(o2, "Content-Type", tipo)
+    }
+    return enviar("POST", url, o2, codigos.de_texto(cuerpo))
+}
+
+# POST de un documento de lib/json (Content-Type: application/json).
+fn enviar_json(url: str, doc: json.Doc, o: web.Opciones) -> Result<web.Respuesta> {
+    return enviar_texto(url, "application/json", json.escribir(doc), o)
+}
+
+# POST de un formulario (application/x-www-form-urlencoded).
+fn enviar_formulario(url: str, p: web.Pares, o: web.Opciones) -> Result<web.Respuesta> {
+    return enviar_texto(url, "application/x-www-form-urlencoded", web.consulta_armar(p), o)
+}
+
+# El cuerpo como texto (Err si no es UTF-8).
+fn cuerpo_texto(r: web.Respuesta) -> Result<str> {
+    return codigos.a_cadena(r.cuerpo)
+}
+
+# El cuerpo leído como JSON.
+fn json_de(r: web.Respuesta) -> Result<json.Doc> {
+    return json.analizar_texto(cuerpo_texto(r)?)
+}
+
+# ¿Salió bien (código 200 a 299)?
+fn exito(r: web.Respuesta) -> bool {
+    return r.codigo >= 200 and r.codigo < 300
+}

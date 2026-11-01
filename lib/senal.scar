@@ -1,0 +1,1183 @@
+# lib/senal.scar: procesamiento de señales (use "senal"). Probada contra
+# numpy.fft y scipy.signal.
+#
+#   use "senal"
+#   use "estadistica"                       # una señal es una estadistica.Serie
+#
+#   let x = estadistica.serie(muestras)
+#   let c = senal.fft(x)                    # numpy.fft.fft, de cualquier largo
+#   let amp = senal.magnitud(c)
+#   let w = senal.ventana("hann", 256, false)        # scipy.signal.get_window
+#   let h = senal.fir_pasabajo(101, 5.0, 100.0)      # scipy.signal.firwin (corte 5 Hz, fs 100 Hz)
+#   let y = senal.convolucion(x, h)                  # numpy.convolve
+#   let f = senal.butter(4, estadistica.serie([1.0, 10.0]), "pasabanda", 100.0)
+#   let z = senal.filtfilt(f, x)            # scipy.signal.filtfilt: sin desfase
+#   let p = senal.periodograma(x, 100.0, "hann")     # scipy.signal.periodogram
+#   let r = senal.remuestrear(x, 400)       # scipy.signal.resample (por Fourier)
+#   let q = senal.remuestrear_poly(x, 3, 2) # scipy.signal.resample_poly
+#
+# Qué copia de scipy: la FFT de cualquier largo (potencias de 2 por mariposas; los
+# demás largos con el algoritmo de Bluestein), las ventanas, el diseño de FIR por
+# ventanas (firwin: pasabajo, pasaalto, pasabanda y rechazabanda, con la escala de
+# ganancia 1), Butterworth digital (pasabajo, pasaalto, pasabanda y rechazabanda, por
+# polos y bilineal, como scipy.signal.butter en forma b/a), lfilter, el filtrado hacia
+# adelante y hacia atrás con relleno impar y condiciones iniciales de estado
+# estacionario (filtfilt), el periodograma y el remuestreo por Fourier y polifásico.
+# Las frecuencias de corte van en Hz con la frecuencia de muestreo `fs`.
+#
+# Una señal es una `estadistica.Serie` (sus datos en `.v`); los resultados complejos
+# van en un `Complejos` con las partes real e imaginaria.
+
+use "mate"
+use "estadistica"
+
+struct Complejos {
+    re: Vec<f64>
+    im: Vec<f64>
+}
+
+# Un filtro digital b/a: y[n] = (Σ b[k] x[n-k] - Σ a[k] y[n-k]) / a[0].
+struct Filtro {
+    b: estadistica.Serie
+    a: estadistica.Serie
+}
+
+# Frecuencias y valores de un espectro.
+struct Espectro {
+    f: estadistica.Serie
+    p: estadistica.Serie
+}
+
+fn complejos_ceros(n: i32) -> Complejos {
+    let re: Vec<f64> = vec_new()
+    let im: Vec<f64> = vec_new()
+    for i in 0..n {
+        re.push(0.0)
+        im.push(0.0)
+    }
+    return Complejos { re: re, im: im }
+}
+
+fn largo_c(c: Complejos) -> i32 {
+    return c.re.len()
+}
+
+fn parte_real(c: Complejos, i: i32) -> f64 {
+    return c.re.get(i).unwrap_or(0.0)
+}
+
+fn parte_imag(c: Complejos, i: i32) -> f64 {
+    return c.im.get(i).unwrap_or(0.0)
+}
+
+fn _nan() -> f64 {
+    return 0.0 / 0.0
+}
+
+# ---------- FFT ----------
+
+fn _es_pot2(n: i32) -> bool {
+    let mut p = 1
+    while p < n {
+        p = p * 2
+    }
+    return p == n
+}
+
+fn _siguiente_pot2(n: i32) -> i32 {
+    let mut p = 1
+    while p < n {
+        p = p * 2
+    }
+    return p
+}
+
+# FFT hacia adelante de un largo que es potencia de 2, sobre el mismo Complejos.
+fn _fft_pot2(c: Complejos) {
+    let n = c.re.len()
+    if n < 2 {
+        return
+    }
+    # orden por inversión de bits
+    let mut j = 0
+    for i in 1..n {
+        let mut bit = n / 2
+        while j >= bit {
+            j = j - bit
+            bit = bit / 2
+        }
+        j = j + bit
+        if i < j {
+            let tr = c.re.get(i).unwrap_or(0.0)
+            let ti = c.im.get(i).unwrap_or(0.0)
+            c.re.set(i, c.re.get(j).unwrap_or(0.0))
+            c.im.set(i, c.im.get(j).unwrap_or(0.0))
+            c.re.set(j, tr)
+            c.im.set(j, ti)
+        }
+    }
+    # factores exp(-2πi k/n), k < n/2
+    let wr: Vec<f64> = vec_new()
+    let wi: Vec<f64> = vec_new()
+    let dos_pi = 2.0 * mate.pi()
+    for k in 0..n / 2 {
+        let ang = dos_pi * to_f64(k) / to_f64(n)
+        wr.push(cos(ang))
+        wi.push(0.0 - sin(ang))
+    }
+    let mut largo = 2
+    while largo <= n {
+        let paso = n / largo
+        let mitad = largo / 2
+        let mut i = 0
+        while i < n {
+            for k in 0..mitad {
+                let cr = wr.get(k * paso).unwrap_or(1.0)
+                let ci = wi.get(k * paso).unwrap_or(0.0)
+                let a = i + k
+                let b = i + k + mitad
+                let br = c.re.get(b).unwrap_or(0.0)
+                let bi = c.im.get(b).unwrap_or(0.0)
+                let tr = br * cr - bi * ci
+                let ti = br * ci + bi * cr
+                let ar = c.re.get(a).unwrap_or(0.0)
+                let ai = c.im.get(a).unwrap_or(0.0)
+                c.re.set(b, ar - tr)
+                c.im.set(b, ai - ti)
+                c.re.set(a, ar + tr)
+                c.im.set(a, ai + ti)
+            }
+            i = i + largo
+        }
+        largo = largo * 2
+    }
+}
+
+# FFT hacia adelante de cualquier largo (Bluestein si no es potencia de 2).
+fn _fft_directa(c: Complejos) -> Complejos {
+    let n = c.re.len()
+    if n < 2 {
+        return _copia_c(c)
+    }
+    if _es_pot2(n) {
+        let r = _copia_c(c)
+        _fft_pot2(r)
+        return r
+    }
+    let m = _siguiente_pot2(2 * n - 1)
+    # chirp c_k = exp(-iπ k²/n), con k² reducido módulo 2n para no perder precisión
+    let cr: Vec<f64> = vec_new()
+    let ci: Vec<f64> = vec_new()
+    let mut k2 = 0
+    for k in 0..n {
+        if k > 0 {
+            k2 = (k2 + 2 * k - 1) % (2 * n)
+        }
+        let ang = mate.pi() * to_f64(k2) / to_f64(n)
+        cr.push(cos(ang))
+        ci.push(0.0 - sin(ang))
+    }
+    let a = complejos_ceros(m)
+    let b = complejos_ceros(m)
+    for k in 0..n {
+        let xr = c.re.get(k).unwrap_or(0.0)
+        let xi = c.im.get(k).unwrap_or(0.0)
+        let pr = cr.get(k).unwrap_or(0.0)
+        let pi_ = ci.get(k).unwrap_or(0.0)
+        a.re.set(k, xr * pr - xi * pi_)
+        a.im.set(k, xr * pi_ + xi * pr)
+        b.re.set(k, pr)
+        b.im.set(k, 0.0 - pi_)
+        if k > 0 {
+            b.re.set(m - k, pr)
+            b.im.set(m - k, 0.0 - pi_)
+        }
+    }
+    _fft_pot2(a)
+    _fft_pot2(b)
+    for k in 0..m {
+        let ar = a.re.get(k).unwrap_or(0.0)
+        let ai = a.im.get(k).unwrap_or(0.0)
+        let br = b.re.get(k).unwrap_or(0.0)
+        let bi = b.im.get(k).unwrap_or(0.0)
+        # producto, conjugado (para invertir con la misma FFT)
+        a.re.set(k, ar * br - ai * bi)
+        a.im.set(k, 0.0 - (ar * bi + ai * br))
+    }
+    _fft_pot2(a)
+    let r = complejos_ceros(n)
+    let escala = 1.0 / to_f64(m)
+    for k in 0..n {
+        let vr = a.re.get(k).unwrap_or(0.0) * escala
+        let vi = 0.0 - a.im.get(k).unwrap_or(0.0) * escala
+        let pr = cr.get(k).unwrap_or(0.0)
+        let pi_ = ci.get(k).unwrap_or(0.0)
+        r.re.set(k, vr * pr - vi * pi_)
+        r.im.set(k, vr * pi_ + vi * pr)
+    }
+    return r
+}
+
+fn _copia_c(c: Complejos) -> Complejos {
+    let n = c.re.len()
+    let r = complejos_ceros(n)
+    for i in 0..n {
+        r.re.set(i, c.re.get(i).unwrap_or(0.0))
+        r.im.set(i, c.im.get(i).unwrap_or(0.0))
+    }
+    return r
+}
+
+fn _copia_s(x: estadistica.Serie) -> estadistica.Serie {
+    let r = estadistica.nueva()
+    for i in 0..x.v.len() {
+        r.v.push(x.v.get(i).unwrap_or(0.0))
+    }
+    return r
+}
+
+fn _reales(c: Complejos) -> estadistica.Serie {
+    let r = estadistica.nueva()
+    for i in 0..c.re.len() {
+        r.v.push(c.re.get(i).unwrap_or(0.0))
+    }
+    return r
+}
+
+fn _vec_re(c: Complejos) -> Vec<f64> {
+    let r: Vec<f64> = vec_new()
+    for i in 0..c.re.len() {
+        r.push(c.re.get(i).unwrap_or(0.0))
+    }
+    return r
+}
+
+fn _copia(v: Vec<f64>) -> Vec<f64> {
+    let r: Vec<f64> = vec_new()
+    for i in 0..v.len() {
+        r.push(v.get(i).unwrap_or(0.0))
+    }
+    return r
+}
+
+# La transformada de Fourier de una señal real (numpy.fft.fft): n valores complejos.
+fn fft(x: estadistica.Serie) -> Complejos {
+    let n = x.v.len()
+    let c = complejos_ceros(n)
+    for i in 0..n {
+        c.re.set(i, x.v.get(i).unwrap_or(0.0))
+    }
+    return _fft_directa(c)
+}
+
+# La transformada de un Complejos (numpy.fft.fft de una señal compleja).
+fn fft_c(c: Complejos) -> Complejos {
+    return _fft_directa(c)
+}
+
+# La inversa (numpy.fft.ifft): divide por n.
+fn ifft(c: Complejos) -> Complejos {
+    let n = c.re.len()
+    let t = complejos_ceros(n)
+    for i in 0..n {
+        t.re.set(i, c.re.get(i).unwrap_or(0.0))
+        t.im.set(i, 0.0 - c.im.get(i).unwrap_or(0.0))
+    }
+    let r = _fft_directa(t)
+    for i in 0..n {
+        r.re.set(i, r.re.get(i).unwrap_or(0.0) / to_f64(n))
+        r.im.set(i, 0.0 - r.im.get(i).unwrap_or(0.0) / to_f64(n))
+    }
+    return r
+}
+
+# Solo las n/2 + 1 frecuencias de 0 a Nyquist de una señal real (numpy.fft.rfft).
+fn rfft(x: estadistica.Serie) -> Complejos {
+    let n = x.v.len()
+    let c = fft(x)
+    let m = n / 2 + 1
+    let r = complejos_ceros(m)
+    for i in 0..m {
+        r.re.set(i, c.re.get(i).unwrap_or(0.0))
+        r.im.set(i, c.im.get(i).unwrap_or(0.0))
+    }
+    return r
+}
+
+# La inversa de rfft, a una señal real de n muestras (numpy.fft.irfft).
+fn irfft(c: Complejos, n: i32) -> estadistica.Serie {
+    let lleno = complejos_ceros(n)
+    let m = n / 2 + 1
+    for k in 0..m {
+        if k < c.re.len() {
+            let mut re = c.re.get(k).unwrap_or(0.0)
+            let mut im = c.im.get(k).unwrap_or(0.0)
+            if k == 0 or (n % 2 == 0 and k == n / 2) {
+                im = 0.0
+            }
+            lleno.re.set(k, re)
+            lleno.im.set(k, im)
+            if k > 0 and n - k != k {
+                lleno.re.set(n - k, re)
+                lleno.im.set(n - k, 0.0 - im)
+            }
+        }
+    }
+    let r = ifft(lleno)
+    return _reales(r)
+}
+
+fn magnitud(c: Complejos) -> estadistica.Serie {
+    let r = estadistica.nueva()
+    for i in 0..c.re.len() {
+        r.v.push(sqrt(c.re.get(i).unwrap_or(0.0) * c.re.get(i).unwrap_or(0.0) + c.im.get(i).unwrap_or(0.0) * c.im.get(i).unwrap_or(0.0)))
+    }
+    return r
+}
+
+fn fase(c: Complejos) -> estadistica.Serie {
+    let r = estadistica.nueva()
+    for i in 0..c.re.len() {
+        r.v.push(mate.atan2(c.im.get(i).unwrap_or(0.0), c.re.get(i).unwrap_or(0.0)))
+    }
+    return r
+}
+
+# Las frecuencias de cada valor de fft, con muestras cada `d` segundos (numpy.fft.fftfreq).
+fn frecuencias(n: i32, d: f64) -> estadistica.Serie {
+    let r = estadistica.nueva()
+    for i in 0..n {
+        let mut k = i
+        if i > (n - 1) / 2 {
+            k = i - n
+        }
+        r.v.push(to_f64(k) / (to_f64(n) * d))
+    }
+    return r
+}
+
+# Las de rfft (numpy.fft.rfftfreq).
+fn frecuencias_r(n: i32, d: f64) -> estadistica.Serie {
+    let r = estadistica.nueva()
+    for i in 0..n / 2 + 1 {
+        r.v.push(to_f64(i) / (to_f64(n) * d))
+    }
+    return r
+}
+
+# ---------- convolución ----------
+
+# La convolución completa de a y b, n + m - 1 valores (numpy.convolve).
+fn convolucion(a: estadistica.Serie, b: estadistica.Serie) -> estadistica.Serie {
+    let na = a.v.len()
+    let nb = b.v.len()
+    let r = estadistica.nueva()
+    if na == 0 or nb == 0 {
+        return r
+    }
+    for i in 0..na + nb - 1 {
+        r.v.push(0.0)
+    }
+    for i in 0..na {
+        let x = a.v.get(i).unwrap_or(0.0)
+        for j in 0..nb {
+            r.v.set(i + j, r.v.get(i + j).unwrap_or(0.0) + x * b.v.get(j).unwrap_or(0.0))
+        }
+    }
+    return r
+}
+
+# Lo mismo por FFT: mucho más rápido con señales largas, con un error de redondeo
+# del orden de 1e-16 por el tamaño de los datos.
+fn convolucion_fft(a: estadistica.Serie, b: estadistica.Serie) -> estadistica.Serie {
+    let na = a.v.len()
+    let nb = b.v.len()
+    let r = estadistica.nueva()
+    if na == 0 or nb == 0 {
+        return r
+    }
+    let n = na + nb - 1
+    let m = _siguiente_pot2(n)
+    let ca = complejos_ceros(m)
+    let cb = complejos_ceros(m)
+    for i in 0..na {
+        ca.re.set(i, a.v.get(i).unwrap_or(0.0))
+    }
+    for i in 0..nb {
+        cb.re.set(i, b.v.get(i).unwrap_or(0.0))
+    }
+    let fa = fft_c(ca)
+    let fb = fft_c(cb)
+    let p = complejos_ceros(m)
+    for k in 0..m {
+        let ar = fa.re.get(k).unwrap_or(0.0)
+        let ai = fa.im.get(k).unwrap_or(0.0)
+        let br = fb.re.get(k).unwrap_or(0.0)
+        let bi = fb.im.get(k).unwrap_or(0.0)
+        p.re.set(k, ar * br - ai * bi)
+        p.im.set(k, ar * bi + ai * br)
+    }
+    let t = ifft(p)
+    for i in 0..n {
+        r.v.push(t.re.get(i).unwrap_or(0.0))
+    }
+    return r
+}
+
+# La correlación cruzada completa (numpy.correlate(a, b, "full")).
+fn correlacion_cruzada(a: estadistica.Serie, b: estadistica.Serie) -> estadistica.Serie {
+    let inv = estadistica.nueva()
+    let mut i = b.v.len() - 1
+    while i >= 0 {
+        inv.v.push(b.v.get(i).unwrap_or(0.0))
+        i = i - 1
+    }
+    return convolucion(a, inv)
+}
+
+# ---------- ventanas ----------
+
+# I0, la función de Bessel modificada de orden 0, por su serie.
+fn _bessel_i0(x: f64) -> f64 {
+    let mut suma = 1.0
+    let mut termino = 1.0
+    let q = x * x / 4.0
+    let mut k = 1.0
+    while k < 500.0 {
+        termino = termino * q / (k * k)
+        suma = suma + termino
+        if termino < suma * 1.0e-17 {
+            return suma
+        }
+        k = k + 1.0
+    }
+    return suma
+}
+
+# Una ventana de n puntos: "hann", "hamming", "blackman", "bartlett", "boxcar" o
+# "kaiser" (con beta 8.6; para otro beta, `ventana_kaiser`). `simetrica` true: de 0
+# a 0 en los extremos, para diseñar filtros (get_window con fftbins=False);
+# false: periódica, para análisis espectral (la de scipy por omisión).
+fn ventana(nombre: str, n: i32, simetrica: bool) -> estadistica.Serie {
+    if nombre == "kaiser" {
+        return ventana_kaiser(n, 8.6, simetrica)
+    }
+    let r = estadistica.nueva()
+    if n < 1 {
+        return r
+    }
+    if n == 1 {
+        r.v.push(1.0)
+        return r
+    }
+    let mut m = n
+    if simetrica == false {
+        m = n + 1
+    }
+    let den = to_f64(m - 1)
+    let dos_pi = 2.0 * mate.pi()
+    for i in 0..n {
+        let k = to_f64(i)
+        if nombre == "hann" {
+            r.v.push(0.5 - 0.5 * cos(dos_pi * k / den))
+        } else {
+            if nombre == "hamming" {
+                r.v.push(0.54 - 0.46 * cos(dos_pi * k / den))
+            } else {
+                if nombre == "blackman" {
+                    r.v.push(0.42 - 0.5 * cos(dos_pi * k / den) + 0.08 * cos(2.0 * dos_pi * k / den))
+                } else {
+                    if nombre == "bartlett" {
+                        if k <= den / 2.0 {
+                            r.v.push(2.0 * k / den)
+                        } else {
+                            r.v.push(2.0 - 2.0 * k / den)
+                        }
+                    } else {
+                        r.v.push(1.0)
+                    }
+                }
+            }
+        }
+    }
+    return r
+}
+
+fn ventana_kaiser(n: i32, beta: f64, simetrica: bool) -> estadistica.Serie {
+    let r = estadistica.nueva()
+    if n < 1 {
+        return r
+    }
+    if n == 1 {
+        r.v.push(1.0)
+        return r
+    }
+    let mut m = n
+    if simetrica == false {
+        m = n + 1
+    }
+    let alfa = to_f64(m - 1) / 2.0
+    let i0b = _bessel_i0(beta)
+    for i in 0..n {
+        let t = (to_f64(i) - alfa) / alfa
+        r.v.push(_bessel_i0(beta * sqrt(max(0.0, 1.0 - t * t))) / i0b)
+    }
+    return r
+}
+
+# ---------- filtros FIR ----------
+
+fn _sinc(x: f64) -> f64 {
+    if x == 0.0 {
+        return 1.0
+    }
+    let t = mate.pi() * x
+    return sin(t) / t
+}
+
+# Diseño de un FIR por ventanas (scipy.signal.firwin). `cortes` en Hz, estrictamente
+# crecientes y entre 0 y fs/2. `pasa_cero` true: la banda de 0 al primer corte pasa
+# (pasabajo, rechazabanda); false: no pasa (pasaalto, pasabanda). `win` es la ventana
+# simétrica de `numtaps` puntos. Con `escalar`, la ganancia de la primera banda es 1.
+fn fir(numtaps: i32, cortes: estadistica.Serie, pasa_cero: bool, win: estadistica.Serie, escalar: bool, fs: f64) -> estadistica.Serie {
+    let nyq = fs / 2.0
+    let n = cortes.v.len()
+    let borde: Vec<f64> = vec_new()
+    if pasa_cero {
+        borde.push(0.0)
+    }
+    for i in 0..n {
+        borde.push(cortes.v.get(i).unwrap_or(0.0) / nyq)
+    }
+    let pasa_nyquist = (n % 2 == 0) == pasa_cero
+    if pasa_nyquist {
+        borde.push(1.0)
+    }
+    let alfa = 0.5 * to_f64(numtaps - 1)
+    let h = estadistica.nueva()
+    for i in 0..numtaps {
+        let m = to_f64(i) - alfa
+        let mut v = 0.0
+        let mut j = 0
+        while j + 1 < borde.len() {
+            let izq = borde.get(j).unwrap_or(0.0)
+            let der = borde.get(j + 1).unwrap_or(0.0)
+            v = v + der * _sinc(der * m)
+            v = v - izq * _sinc(izq * m)
+            j = j + 2
+        }
+        h.v.push(v * win.v.get(i).unwrap_or(1.0))
+    }
+    if escalar {
+        let izq = borde.get(0).unwrap_or(0.0)
+        let der = borde.get(1).unwrap_or(1.0)
+        let mut f = 0.5 * (izq + der)
+        if izq == 0.0 {
+            f = 0.0
+        } else {
+            if der == 1.0 {
+                f = 1.0
+            }
+        }
+        let mut s = 0.0
+        for i in 0..numtaps {
+            let m = to_f64(i) - alfa
+            s = s + h.v.get(i).unwrap_or(0.0) * cos(mate.pi() * m * f)
+        }
+        for i in 0..numtaps {
+            h.v.set(i, h.v.get(i).unwrap_or(0.0) / s)
+        }
+    }
+    return h
+}
+
+fn _uno(x: f64) -> estadistica.Serie {
+    let s = estadistica.nueva()
+    s.v.push(x)
+    return s
+}
+
+fn _dos(x: f64, y: f64) -> estadistica.Serie {
+    let s = estadistica.nueva()
+    s.v.push(x)
+    s.v.push(y)
+    return s
+}
+
+# Pasabajo con ventana de Hamming (como firwin(numtaps, corte, fs=fs)).
+fn fir_pasabajo(numtaps: i32, corte: f64, fs: f64) -> estadistica.Serie {
+    return fir(numtaps, _uno(corte), true, ventana("hamming", numtaps, true), true, fs)
+}
+
+# Pasaalto (numtaps impar).
+fn fir_pasaalto(numtaps: i32, corte: f64, fs: f64) -> estadistica.Serie {
+    return fir(numtaps, _uno(corte), false, ventana("hamming", numtaps, true), true, fs)
+}
+
+fn fir_pasabanda(numtaps: i32, bajo: f64, alto: f64, fs: f64) -> estadistica.Serie {
+    return fir(numtaps, _dos(bajo, alto), false, ventana("hamming", numtaps, true), true, fs)
+}
+
+# Rechazabanda (numtaps impar).
+fn fir_rechazabanda(numtaps: i32, bajo: f64, alto: f64, fs: f64) -> estadistica.Serie {
+    return fir(numtaps, _dos(bajo, alto), true, ventana("hamming", numtaps, true), true, fs)
+}
+
+# ---------- filtros IIR: Butterworth ----------
+
+struct C {
+    re: f64
+    im: f64
+}
+
+fn _c_mul(a: C, b: C) -> C {
+    return C { re: a.re * b.re - a.im * b.im, im: a.re * b.im + a.im * b.re }
+}
+
+fn _c_div(a: C, b: C) -> C {
+    let d = b.re * b.re + b.im * b.im
+    return C { re: (a.re * b.re + a.im * b.im) / d, im: (a.im * b.re - a.re * b.im) / d }
+}
+
+# Raíz cuadrada principal (la de numpy.sqrt).
+fn _c_raiz(a: C) -> C {
+    let r = sqrt(a.re * a.re + a.im * a.im)
+    let re = sqrt(max(0.0, (r + a.re) / 2.0))
+    let mut im = sqrt(max(0.0, (r - a.re) / 2.0))
+    if a.im < 0.0 {
+        im = 0.0 - im
+    }
+    return C { re: re, im: im }
+}
+
+fn _c_en(c: Complejos, i: i32) -> C {
+    return C { re: c.re.get(i).unwrap_or(0.0), im: c.im.get(i).unwrap_or(0.0) }
+}
+
+fn _c_agregar(c: Complejos, v: C) {
+    c.re.push(v.re)
+    c.im.push(v.im)
+}
+
+# El producto de (escala · r) o (escala - r) de todas las raíces r: con `resta` true es
+# el producto de (escala - r), si no el de (-r).
+fn _prod(r: Complejos, escala: f64, resta: bool) -> C {
+    let mut p = C { re: 1.0, im: 0.0 }
+    for i in 0..r.re.len() {
+        let v = _c_en(r, i)
+        if resta {
+            p = _c_mul(p, C { re: escala - v.re, im: 0.0 - v.im })
+        } else {
+            p = _c_mul(p, C { re: 0.0 - v.re, im: 0.0 - v.im })
+        }
+    }
+    return p
+}
+
+# Ceros, polos y ganancia de un filtro analógico.
+struct Zpk {
+    z: Complejos
+    p: Complejos
+    k: f64
+}
+
+# Los polos del Butterworth analógico pasabajo de orden n con corte 1:
+# p = -exp(iπ m / 2n) para m = -n+1, -n+3, ..., n-1.
+fn _polos_butter(n: i32) -> Complejos {
+    let p = complejos_ceros(0)
+    let mut m = 0 - n + 1
+    while m < n {
+        let ang = mate.pi() * to_f64(m) / to_f64(2 * n)
+        p.re.push(0.0 - cos(ang))
+        p.im.push(0.0 - sin(ang))
+        m = m + 2
+    }
+    return p
+}
+
+fn _pasabajo_a_pasabajo(g: Zpk, wo: f64) -> Zpk {
+    let grado = g.p.re.len() - g.z.re.len()
+    let z = complejos_ceros(0)
+    let p = complejos_ceros(0)
+    for i in 0..g.z.re.len() {
+        z.re.push(g.z.re.get(i).unwrap_or(0.0) * wo)
+        z.im.push(g.z.im.get(i).unwrap_or(0.0) * wo)
+    }
+    for i in 0..g.p.re.len() {
+        p.re.push(g.p.re.get(i).unwrap_or(0.0) * wo)
+        p.im.push(g.p.im.get(i).unwrap_or(0.0) * wo)
+    }
+    let mut k = g.k
+    for i in 0..grado {
+        k = k * wo
+    }
+    return Zpk { z: z, p: p, k: k }
+}
+
+fn _pasabajo_a_pasaalto(g: Zpk, wo: f64) -> Zpk {
+    let grado = g.p.re.len() - g.z.re.len()
+    let uno = C { re: wo, im: 0.0 }
+    let z = complejos_ceros(0)
+    let p = complejos_ceros(0)
+    for i in 0..g.z.re.len() {
+        _c_agregar(z, _c_div(uno, _c_en(g.z, i)))
+    }
+    for i in 0..grado {
+        z.re.push(0.0)
+        z.im.push(0.0)
+    }
+    for i in 0..g.p.re.len() {
+        _c_agregar(p, _c_div(uno, _c_en(g.p, i)))
+    }
+    let q = _c_div(_prod(g.z, 0.0, false), _prod(g.p, 0.0, false))
+    return Zpk { z: z, p: p, k: g.k * q.re }
+}
+
+# Las dos raíces de cada v: v ± sqrt(v² - wo²).
+fn _pares_banda(v: Complejos, wo: f64, z: Complejos) {
+    for i in 0..v.re.len() {
+        let a = _c_en(v, i)
+        let d = _c_raiz(C { re: a.re * a.re - a.im * a.im - wo * wo, im: 2.0 * a.re * a.im })
+        z.re.push(a.re + d.re)
+        z.im.push(a.im + d.im)
+    }
+    for i in 0..v.re.len() {
+        let a = _c_en(v, i)
+        let d = _c_raiz(C { re: a.re * a.re - a.im * a.im - wo * wo, im: 2.0 * a.re * a.im })
+        z.re.push(a.re - d.re)
+        z.im.push(a.im - d.im)
+    }
+}
+
+fn _pasabajo_a_pasabanda(g: Zpk, wo: f64, bw: f64) -> Zpk {
+    let grado = g.p.re.len() - g.z.re.len()
+    let zl = complejos_ceros(0)
+    let pl = complejos_ceros(0)
+    for i in 0..g.z.re.len() {
+        zl.re.push(g.z.re.get(i).unwrap_or(0.0) * bw / 2.0)
+        zl.im.push(g.z.im.get(i).unwrap_or(0.0) * bw / 2.0)
+    }
+    for i in 0..g.p.re.len() {
+        pl.re.push(g.p.re.get(i).unwrap_or(0.0) * bw / 2.0)
+        pl.im.push(g.p.im.get(i).unwrap_or(0.0) * bw / 2.0)
+    }
+    let z = complejos_ceros(0)
+    let p = complejos_ceros(0)
+    _pares_banda(zl, wo, z)
+    _pares_banda(pl, wo, p)
+    for i in 0..grado {
+        z.re.push(0.0)
+        z.im.push(0.0)
+    }
+    let mut k = g.k
+    for i in 0..grado {
+        k = k * bw
+    }
+    return Zpk { z: z, p: p, k: k }
+}
+
+fn _pasabajo_a_rechazabanda(g: Zpk, wo: f64, bw: f64) -> Zpk {
+    let grado = g.p.re.len() - g.z.re.len()
+    let medio = C { re: bw / 2.0, im: 0.0 }
+    let zh = complejos_ceros(0)
+    let ph = complejos_ceros(0)
+    for i in 0..g.z.re.len() {
+        _c_agregar(zh, _c_div(medio, _c_en(g.z, i)))
+    }
+    for i in 0..g.p.re.len() {
+        _c_agregar(ph, _c_div(medio, _c_en(g.p, i)))
+    }
+    let z = complejos_ceros(0)
+    let p = complejos_ceros(0)
+    _pares_banda(zh, wo, z)
+    _pares_banda(ph, wo, p)
+    for i in 0..grado {
+        z.re.push(0.0)
+        z.im.push(wo)
+    }
+    for i in 0..grado {
+        z.re.push(0.0)
+        z.im.push(0.0 - wo)
+    }
+    let q = _c_div(_prod(g.z, 0.0, false), _prod(g.p, 0.0, false))
+    return Zpk { z: z, p: p, k: g.k * q.re }
+}
+
+# Transformación bilineal con fs = 2 (frecuencias normalizadas a Nyquist = 1).
+fn _bilineal(g: Zpk) -> Zpk {
+    let grado = g.p.re.len() - g.z.re.len()
+    let cuatro = C { re: 4.0, im: 0.0 }
+    let z = complejos_ceros(0)
+    let p = complejos_ceros(0)
+    for i in 0..g.z.re.len() {
+        let v = _c_en(g.z, i)
+        _c_agregar(z, _c_div(C { re: 4.0 + v.re, im: v.im }, C { re: 4.0 - v.re, im: 0.0 - v.im }))
+    }
+    for i in 0..g.p.re.len() {
+        let v = _c_en(g.p, i)
+        _c_agregar(p, _c_div(C { re: 4.0 + v.re, im: v.im }, C { re: 4.0 - v.re, im: 0.0 - v.im }))
+    }
+    for i in 0..grado {
+        z.re.push(0.0 - 1.0)
+        z.im.push(0.0)
+    }
+    let q = _c_div(_prod(g.z, 4.0, true), _prod(g.p, 4.0, true))
+    return Zpk { z: z, p: p, k: g.k * q.re }
+}
+
+# Los coeficientes (reales) del polinomio con esas raíces: (x - r1)(x - r2)...
+fn _polinomio(r: Complejos) -> Vec<f64> {
+    let mut c = complejos_ceros(1)
+    c.re.set(0, 1.0)
+    for i in 0..r.re.len() {
+        let v = _c_en(r, i)
+        let n = c.re.len()
+        let nuevo = complejos_ceros(n + 1)
+        for j in 0..n {
+            let a = _c_en(c, j)
+            # nuevo[j] += a, nuevo[j+1] -= v * a   (el polinomio crece hacia la derecha: x^k a la izquierda)
+            nuevo.re.set(j, nuevo.re.get(j).unwrap_or(0.0) + a.re)
+            nuevo.im.set(j, nuevo.im.get(j).unwrap_or(0.0) + a.im)
+            let m = _c_mul(v, a)
+            nuevo.re.set(j + 1, nuevo.re.get(j + 1).unwrap_or(0.0) - m.re)
+            nuevo.im.set(j + 1, nuevo.im.get(j + 1).unwrap_or(0.0) - m.im)
+        }
+        c = nuevo
+    }
+    return _vec_re(c)
+}
+
+# Pasa el filtro analógico prototipo al tipo pedido (con las frecuencias ya alabeadas).
+fn _disenar(base: Zpk, tipo: str, w0: f64, w1: f64) -> Zpk {
+    if tipo == "pasaalto" {
+        return _pasabajo_a_pasaalto(base, w0)
+    }
+    if tipo == "pasabanda" {
+        return _pasabajo_a_pasabanda(base, sqrt(w0 * w1), w1 - w0)
+    }
+    if tipo == "rechazabanda" {
+        return _pasabajo_a_rechazabanda(base, sqrt(w0 * w1), w1 - w0)
+    }
+    return _pasabajo_a_pasabajo(base, w0)
+}
+
+# Un filtro digital Butterworth de ese orden (scipy.signal.butter, forma b/a).
+# `cortes`: un valor en Hz para "pasabajo" y "pasaalto", dos (bajo, alto) para
+# "pasabanda" y "rechazabanda". `fs` es la frecuencia de muestreo. Con orden alto
+# (más de 8) la forma b/a pierde precisión. Si los argumentos no sirven devuelve un
+# filtro vacío (b y a sin coeficientes).
+fn butter(orden: i32, cortes: estadistica.Serie, tipo: str, fs: f64) -> Filtro {
+    let bandas = tipo == "pasabanda" or tipo == "rechazabanda"
+    let esperadas = if bandas { 2 } else { 1 }
+    let valido = tipo == "pasabajo" or tipo == "pasaalto" or bandas
+    if orden < 1 or valido == false or cortes.v.len() != esperadas {
+        return Filtro { b: estadistica.nueva(), a: estadistica.nueva() }
+    }
+    let alabeados: Vec<f64> = vec_new()
+    for i in 0..cortes.v.len() {
+        let wn = cortes.v.get(i).unwrap_or(0.0) / (fs / 2.0)
+        let t = mate.pi() * wn / 2.0
+        alabeados.push(4.0 * sin(t) / cos(t))
+    }
+    let w0 = alabeados.get(0).unwrap_or(1.0)
+    let w1 = alabeados.get(esperadas - 1).unwrap_or(1.0)
+    let base = Zpk { z: complejos_ceros(0), p: _polos_butter(orden), k: 1.0 }
+    let d = _bilineal(_disenar(base, tipo, w0, w1))
+    let b = _polinomio(d.z)
+    let a = _polinomio(d.p)
+    for i in 0..b.len() {
+        b.set(i, b.get(i).unwrap_or(0.0) * d.k)
+    }
+    return Filtro { b: estadistica.serie(b), a: estadistica.serie(a) }
+}
+
+fn filtro(b: estadistica.Serie, a: estadistica.Serie) -> Filtro {
+    return Filtro { b: b, a: a }
+}
+
+fn _max_i(a: i32, b: i32) -> i32 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn _min_i(a: i32, b: i32) -> i32 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+# ---------- aplicar filtros ----------
+
+# El estado inicial que deja al filtro en régimen para una entrada constante de 1
+# (scipy.signal.lfilter_zi): n - 1 valores.
+fn estado_inicial(f: Filtro) -> estadistica.Serie {
+    let a0 = f.a.v.get(0).unwrap_or(1.0)
+    let n = _max_i(f.a.v.len(), f.b.v.len())
+    let b: Vec<f64> = vec_new()
+    let a: Vec<f64> = vec_new()
+    for i in 0..n {
+        b.push(f.b.v.get(i).unwrap_or(0.0) / a0)
+        a.push(f.a.v.get(i).unwrap_or(0.0) / a0)
+    }
+    let mut sb = 0.0
+    let mut sa = 0.0
+    for i in 0..n {
+        sb = sb + b.get(i).unwrap_or(0.0)
+        sa = sa + a.get(i).unwrap_or(0.0)
+    }
+    let yinf = sb / sa
+    let zi = estadistica.nueva()
+    for i in 0..n - 1 {
+        zi.v.push(0.0)
+    }
+    let mut acum = 0.0
+    let mut k = n - 1
+    while k >= 1 {
+        acum = acum + (b.get(k).unwrap_or(0.0) - yinf * a.get(k).unwrap_or(0.0))
+        zi.v.set(k - 1, acum)
+        k = k - 1
+    }
+    return zi
+}
+
+# Aplica el filtro a la señal, hacia adelante (scipy.signal.lfilter), con el estado
+# inicial `zi` (n - 1 valores, o una serie vacía para ceros).
+fn aplicar_con(f: Filtro, x: estadistica.Serie, zi: estadistica.Serie) -> estadistica.Serie {
+    let a0 = f.a.v.get(0).unwrap_or(1.0)
+    let n = _max_i(f.a.v.len(), f.b.v.len())
+    let b: Vec<f64> = vec_new()
+    let a: Vec<f64> = vec_new()
+    let z: Vec<f64> = vec_new()
+    for i in 0..n {
+        b.push(f.b.v.get(i).unwrap_or(0.0) / a0)
+        a.push(f.a.v.get(i).unwrap_or(0.0) / a0)
+        z.push(zi.v.get(i).unwrap_or(0.0))
+    }
+    let y = estadistica.nueva()
+    for t in 0..x.v.len() {
+        let xv = x.v.get(t).unwrap_or(0.0)
+        let yv = b.get(0).unwrap_or(0.0) * xv + z.get(0).unwrap_or(0.0)
+        for i in 0..n - 1 {
+            z.set(i, z.get(i + 1).unwrap_or(0.0) + b.get(i + 1).unwrap_or(0.0) * xv - a.get(i + 1).unwrap_or(0.0) * yv)
+        }
+        y.v.push(yv)
+    }
+    return y
+}
+
+fn aplicar(f: Filtro, x: estadistica.Serie) -> estadistica.Serie {
+    return aplicar_con(f, x, estadistica.nueva())
+}
+
+fn _invertir(x: estadistica.Serie) -> estadistica.Serie {
+    let r = estadistica.nueva()
+    let mut i = x.v.len() - 1
+    while i >= 0 {
+        r.v.push(x.v.get(i).unwrap_or(0.0))
+        i = i - 1
+    }
+    return r
+}
+
+fn _por(zi: estadistica.Serie, k: f64) -> estadistica.Serie {
+    let r = estadistica.nueva()
+    for i in 0..zi.v.len() {
+        r.v.push(zi.v.get(i).unwrap_or(0.0) * k)
+    }
+    return r
+}
+
+# Filtra hacia adelante y hacia atrás: sin desfase y con el doble de atenuación
+# (scipy.signal.filtfilt con relleno impar de 3·max(len a, len b) muestras en cada
+# punta y estado inicial de régimen). La señal tiene que ser más larga que el relleno;
+# si no, devuelve una serie vacía.
+fn filtfilt(f: Filtro, x: estadistica.Serie) -> estadistica.Serie {
+    let n = x.v.len()
+    let borde = 3 * _max_i(f.a.v.len(), f.b.v.len())
+    if n <= borde {
+        return estadistica.nueva()
+    }
+    let ext = estadistica.nueva()
+    let x0 = x.v.get(0).unwrap_or(0.0)
+    let xf = x.v.get(n - 1).unwrap_or(0.0)
+    let mut i = borde
+    while i >= 1 {
+        ext.v.push(2.0 * x0 - x.v.get(i).unwrap_or(0.0))
+        i = i - 1
+    }
+    for t in 0..n {
+        ext.v.push(x.v.get(t).unwrap_or(0.0))
+    }
+    let mut j = 2
+    while j <= borde + 1 {
+        ext.v.push(2.0 * xf - x.v.get(n - j).unwrap_or(0.0))
+        j = j + 1
+    }
+    let zi = estado_inicial(f)
+    let adelante = aplicar_con(f, ext, _por(zi, ext.v.get(0).unwrap_or(0.0)))
+    let y0 = adelante.v.get(adelante.v.len() - 1).unwrap_or(0.0)
+    let atras = aplicar_con(f, _invertir(adelante), _por(zi, y0))
+    let todo = _invertir(atras)
+    let r = estadistica.nueva()
+    for t in borde..borde + n {
+        r.v.push(todo.v.get(t).unwrap_or(0.0))
+    }
+    return r
+}
+
+# La ganancia |H| del filtro a la frecuencia `hz` (con muestreo `fs`).
+fn ganancia(f: Filtro, hz: f64, fs: f64) -> f64 {
+    let w = 2.0 * mate.pi() * hz / fs
+    let mut nr = 0.0
+    let mut ni = 0.0
+    for k in 0..f.b.v.len() {
+        nr = nr + f.b.v.get(k).unwrap_or(0.0) * cos(w * to_f64(k))
+        ni = ni - f.b.v.get(k).unwrap_or(0.0) * sin(w * to_f64(k))
+    }
+    let mut dr = 0.0
+    let mut di = 0.0
+    for k in 0..f.a.v.len() {
+        dr = dr + f.a.v.get(k).unwrap_or(0.0) * cos(w * to_f64(k))
+        di = di - f.a.v.get(k).unwrap_or(0.0) * sin(w * to_f64(k))
+    }
+    return sqrt((nr * nr + ni * ni) / (dr * dr + di * di))
+}
+
+# ---------- espectro ----------
+
+# El periodograma de una señal (scipy.signal.periodogram con scaling "density",
+# quitando la media): la potencia por Hz de 0 a Nyquist. `nombre_ventana`: "boxcar",
+# "hann", "hamming", "blackman" o "bartlett" (en su forma periódica).
+fn periodograma(x: estadistica.Serie, fs: f64, nombre_ventana: str) -> Espectro {
+    let n = x.v.len()
+    let m = estadistica.media(x)
+    let w = ventana(nombre_ventana, n, false)
+    let y = estadistica.nueva()
+    let mut sw2 = 0.0
+    for i in 0..n {
+        let wi = w.v.get(i).unwrap_or(1.0)
+        y.v.push((x.v.get(i).unwrap_or(0.0) - m) * wi)
+        sw2 = sw2 + wi * wi
+    }
+    let c = rfft(y)
+    let p = estadistica.nueva()
+    let escala = 1.0 / (fs * sw2)
+    let nc = c.re.len()
+    for k in 0..nc {
+        let re = c.re.get(k).unwrap_or(0.0)
+        let im = c.im.get(k).unwrap_or(0.0)
+        let mut v = (re * re + im * im) * escala
+        if k > 0 and (n % 2 == 1 or k != nc - 1) {
+            v = v * 2.0
+        }
+        p.v.push(v)
+    }
+    return Espectro { f: frecuencias_r(n, 1.0 / fs), p: p }
+}
+
+# ---------- remuestreo ----------
+
+# Remuestrea la señal a `num` muestras por el método de Fourier (scipy.signal.resample,
+# sin ventana): se recorta o se rellena el espectro.
+fn remuestrear(x: estadistica.Serie, num: i32) -> estadistica.Serie {
+    let nx = x.v.len()
+    if nx == 0 or num < 1 {
+        return estadistica.nueva()
+    }
+    let fac = to_f64(nx) / to_f64(num)
+    let m = _min_i(num, nx)
+    let m2 = m / 2 + 1
+    let c = rfft(x)
+    let y = complejos_ceros(m2)
+    for k in 0..m2 {
+        y.re.set(k, c.re.get(k).unwrap_or(0.0))
+        y.im.set(k, c.im.get(k).unwrap_or(0.0))
+    }
+    if m % 2 == 0 and num != nx {
+        let f = if num < nx { 2.0 } else { 0.5 }
+        y.re.set(m / 2, y.re.get(m / 2).unwrap_or(0.0) * f)
+        y.im.set(m / 2, y.im.get(m / 2).unwrap_or(0.0) * f)
+    }
+    for k in 0..m2 {
+        y.re.set(k, y.re.get(k).unwrap_or(0.0) / fac)
+        y.im.set(k, y.im.get(k).unwrap_or(0.0) / fac)
+    }
+    return irfft(y, num)
+}
+
+fn _mcd(a: i32, b: i32) -> i32 {
+    let mut x = a
+    let mut y = b
+    while y != 0 {
+        let t = x % y
+        x = y
+        y = t
+    }
+    return x
+}
+
+# Cuántas muestras salen de upfirdn: ((n - 1)·up + len(h) - 1) / down + 1.
+fn _largo_upfirdn(len_h: i32, n_in: i32, arriba: i32, abajo: i32) -> i32 {
+    return ((n_in - 1) * arriba + len_h - 1) / abajo + 1
+}
+
+# Remuestrea por el factor arriba/abajo con un filtro polifásico (scipy.signal.resample_poly
+# con su ventana de Kaiser de beta 5 por omisión): sube la tasa `arriba` veces, filtra y
+# baja `abajo` veces, sin calcular las muestras que se tiran.
+fn remuestrear_poly(x: estadistica.Serie, arriba: i32, abajo: i32) -> estadistica.Serie {
+    if arriba < 1 or abajo < 1 {
+        return estadistica.nueva()
+    }
+    let g = _mcd(arriba, abajo)
+    let up = arriba / g
+    let down = abajo / g
+    let n_in = x.v.len()
+    if up == 1 and down == 1 {
+        return _copia_s(x)
+    }
+    let mut n_out = (n_in * up) / down
+    if (n_in * up) % down != 0 {
+        n_out = n_out + 1
+    }
+    let tasa_max = _max_i(up, down)
+    let mitad = 10 * tasa_max
+    let f_c = 1.0 / to_f64(tasa_max)
+    let h0 = fir(2 * mitad + 1, _uno(f_c), true, ventana_kaiser(2 * mitad + 1, 5.0, true), true, 2.0)
+    let h = estadistica.nueva()
+    let pre = down - mitad % down
+    for i in 0..pre {
+        h.v.push(0.0)
+    }
+    for i in 0..h0.v.len() {
+        h.v.push(h0.v.get(i).unwrap_or(0.0) * to_f64(up))
+    }
+    let quitar_ini = (mitad + pre) / down
+    let mut post = 0
+    while _largo_upfirdn(h0.v.len() + pre + post, n_in, up, down) < n_out + quitar_ini {
+        post = post + 1
+    }
+    for i in 0..post {
+        h.v.push(0.0)
+    }
+    let largo_y = _largo_upfirdn(h.v.len(), n_in, up, down)
+    let r = estadistica.nueva()
+    for k in quitar_ini..quitar_ini + n_out {
+        let base = k * down
+        let mut s = 0.0
+        let mut t = base % up
+        while t < h.v.len() {
+            let j = (base - t) / up
+            if j >= 0 and j < n_in {
+                s = s + h.v.get(t).unwrap_or(0.0) * x.v.get(j).unwrap_or(0.0)
+            }
+            t = t + up
+        }
+        if k < largo_y {
+            r.v.push(s)
+        }
+    }
+    return r
+}

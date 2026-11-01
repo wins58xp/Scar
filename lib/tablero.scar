@@ -1,0 +1,465 @@
+# lib/tablero.scar: piezas de tablero de control (dashboard) sobre lib/gui (use "tablero").
+# Tarjetas de indicador (con variación y color), medidor de media luna, barra de nivel
+# con avisos, semáforo, mini gráfico de líneas, botones grandes e interruptor. Se usan
+# igual que las piezas de gui: una por cuadro, sin coordenadas, y en una gui.fila quedan
+# lado a lado (tablero.ancho_celda dice cuánto mide cada una si se quieren n por fila).
+#
+#   use "gui"
+#   use "tablero"
+#
+#   gui.fila(ui)
+#   let w = tablero.ancho_celda(ui, 3)
+#   tablero.tarjeta(ui, w, "Sismos hoy", a_texto(n), "", "últimas 24 h", tablero.azul())
+#   tablero.tarjeta_delta(ui, w, "Magnitud máx.", "5.8", "Mw", 0.4, 1, false, "vs ayer")
+#   tablero.medidor(ui, w, "CPU", cpu, 0.0, 100.0, 70.0, 90.0, " %")
+#   gui.fin_fila(ui)
+#   if tablero.boton_grande(ui, 200, 64, "Reiniciar", "estaciones", -1) { ... }
+#   encendido = tablero.interruptor(ui, "Alarma", encendido)
+#
+# Avisos: `aviso` y `critico` son los valores desde los que algo pasa a ámbar y a rojo.
+# Con critico >= aviso se avisa cuando el valor sube (temperatura); con critico < aviso,
+# cuando baja (batería). Con aviso == critico no hay avisos y se usa el color de acento.
+#
+# Las cuentas (fraccion, estado, compacto, la geometría del medidor) están probadas contra
+# Python; el dibujo se revisa con una captura de la ventana.
+
+use "gui"
+
+# colores sueltos para las tarjetas (gui.color(r, g, b)); -1 = el acento del tema
+fn azul() -> i32 {
+    return gui.color(46, 134, 222)
+}
+
+fn verde() -> i32 {
+    return gui.color(39, 174, 96)
+}
+
+fn ambar() -> i32 {
+    return gui.color(230, 150, 20)
+}
+
+fn rojo() -> i32 {
+    return gui.color(214, 69, 65)
+}
+
+fn violeta() -> i32 {
+    return gui.color(142, 84, 200)
+}
+
+fn gris() -> i32 {
+    return gui.color(120, 130, 145)
+}
+
+# ---------------------------------------------------------------------------
+# Cuentas
+# ---------------------------------------------------------------------------
+
+# Dónde cae v entre lo y hi, de 0.0 a 1.0.
+fn fraccion(v: f64, lo: f64, hi: f64) -> f64 {
+    if hi <= lo {
+        return 0.0
+    }
+    return max(0.0, min(1.0, (v - lo) / (hi - lo)))
+}
+
+# -1 sin avisos, 0 bien, 1 aviso (ámbar), 2 crítico (rojo).
+fn estado(v: f64, aviso: f64, critico: f64) -> i32 {
+    if aviso == critico {
+        return 0 - 1
+    }
+    if critico > aviso {
+        if v >= critico {
+            return 2
+        }
+        if v >= aviso {
+            return 1
+        }
+        return 0
+    }
+    if v <= critico {
+        return 2
+    }
+    if v <= aviso {
+        return 1
+    }
+    return 0
+}
+
+# El color de un estado: -1 el acento, 0 bien, 1 aviso, 2 mal, 3 apagado.
+fn color_estado(ui: gui.Ui, e: i32) -> i32 {
+    if e == 0 {
+        return ui.c_bien
+    }
+    if e == 1 {
+        return ui.c_aviso
+    }
+    if e == 2 {
+        return ui.c_mal
+    }
+    if e == 3 {
+        return ui.c_tenue
+    }
+    return ui.c_acento
+}
+
+fn _sin_cero(s: str) -> str {
+    let n = len(s)
+    if n > 2 and ord(s[n - 1]) == 48 and ord(s[n - 2]) == 46 {
+        let mut r = ""
+        for i in 0..(n - 2) {
+            r = r + s[i]
+        }
+        return r
+    }
+    return s
+}
+
+# Un número corto para una tarjeta: 950 -> "950", 1234 -> "1.2k", 3400000 -> "3.4M",
+# 2.0 -> "2", 3.14159 -> "3.1" (k, M y G desde mil, un millón y mil millones).
+fn compacto(v: f64) -> str {
+    let a = abs(v)
+    if a >= 1000000000.0 {
+        return _sin_cero(gui.decimales(v / 1000000000.0, 1)) + "G"
+    }
+    if a >= 1000000.0 {
+        return _sin_cero(gui.decimales(v / 1000000.0, 1)) + "M"
+    }
+    if a >= 1000.0 {
+        return _sin_cero(gui.decimales(v / 1000.0, 1)) + "k"
+    }
+    return _sin_cero(gui.decimales(v, 1))
+}
+
+# El ancho de cada pieza si caben `columnas` en una fila (con el espacio entre ellas). Se pide UNA
+# vez, antes de la primera pieza de la fila: después de cada pieza queda menos lugar libre.
+fn ancho_celda(ui: gui.Ui, columnas: i32) -> i32 {
+    let n = max(columnas, 1)
+    return max((gui.ancho_libre(ui) - (n - 1) * 10) / n, 20)
+}
+
+# El punto (x, y) del arco del medidor a la fracción f (0 = la izquierda, 1 = la derecha),
+# a distancia r del centro (cx, cy); la media luna es la de arriba.
+fn arco_x(cx: i32, r: f64, f: f64) -> i32 {
+    return cx + to_i32(floor(r * cos(3.141592653589793 * (1.0 - f)) + 0.5))
+}
+
+fn arco_y(cy: i32, r: f64, f: f64) -> i32 {
+    return cy - to_i32(floor(r * sin(3.141592653589793 * (1.0 - f)) + 0.5))
+}
+
+# a mezclado con b: t centésimos de b
+fn mezclar(a: i32, b: i32, t: i32) -> i32 {
+    let ra = (a >> 16) & 255
+    let ga = (a >> 8) & 255
+    let ba = a & 255
+    let rb = (b >> 16) & 255
+    let gb = (b >> 8) & 255
+    let bb = b & 255
+    let r = ra + (rb - ra) * t / 100
+    let g = ga + (gb - ga) * t / 100
+    let bl = ba + (bb - ba) * t / 100
+    return (r << 16) | (g << 8) | bl
+}
+
+# El texto que se lee sobre un fondo c.
+fn sobre(c: i32) -> i32 {
+    let r = (c >> 16) & 255
+    let g = (c >> 8) & 255
+    let b = c & 255
+    if r * 299 + g * 587 + b * 114 > 150000 {
+        return 1315860
+    }
+    return 16777215
+}
+
+# ---------------------------------------------------------------------------
+# Dibujo
+# ---------------------------------------------------------------------------
+
+# Un rectángulo con las esquinas redondeadas (radio r).
+fn _redondo(ui: gui.Ui, x: i32, y: i32, w: i32, h: i32, r0: i32, c: i32) {
+    let r = max(0, min(r0, min(w, h) / 2))
+    if r == 0 {
+        gui.pintar(ui, x, y, w, h, c)
+        return
+    }
+    gui.pintar(ui, x + r, y, w - 2 * r, h, c)
+    gui.pintar(ui, x, y + r, w, h - 2 * r, c)
+    gui.circulo(ui, x + r, y + r, r, c)
+    gui.circulo(ui, x + w - r - 1, y + r, r, c)
+    gui.circulo(ui, x + r, y + h - r - 1, r, c)
+    gui.circulo(ui, x + w - r - 1, y + h - r - 1, r, c)
+}
+
+# El fondo de una tarjeta: borde fino y panel.
+fn _panel(ui: gui.Ui, x: i32, y: i32, w: i32, h: i32) {
+    _redondo(ui, x, y, w, h, 8, ui.c_borde)
+    _redondo(ui, x + 1, y + 1, w - 2, h - 2, 7, ui.c_panel)
+}
+
+fn _ancho_de(ui: gui.Ui, ancho: i32) -> i32 {
+    let libre = gui.ancho_libre(ui)
+    if ancho <= 0 {
+        return libre
+    }
+    return min(ancho, libre)
+}
+
+# Reserva y pinta una tarjeta de indicador; deja puesto el título, el valor y la unidad.
+fn _tarjeta_base(ui: gui.Ui, ancho: i32, titulo: str, valor: str, unidad: str, color: i32, con_pie: bool) -> gui.Lienzo {
+    let th = gui.alto_texto(13)
+    let vh = gui.alto_texto(28)
+    let mut h = 12 + th + 4 + vh + 12
+    if con_pie {
+        h = h + th + 4
+    }
+    let w = _ancho_de(ui, ancho)
+    let l = gui.reservar(ui, w, h)
+    _panel(ui, l.x, l.y, w, h)
+    if color >= 0 {
+        _redondo(ui, l.x + 1, l.y + 10, 4, h - 20, 2, color)
+    }
+    gui.rotular(ui, l.x + 16, l.y + 12, titulo, 13, ui.c_tenue)
+    let vy = l.y + 12 + th + 4
+    let vw = gui.rotular(ui, l.x + 16, vy, valor, 28, ui.c_texto)
+    if len(unidad) > 0 {
+        gui.rotular(ui, l.x + 16 + vw + 6, vy + vh - gui.alto_texto(16) - 3, unidad, 16, ui.c_tenue)
+    }
+    return l
+}
+
+# gui-tablero.tarjeta(ui, ancho, titulo, valor, unidad, nota, color): un indicador. `valor`
+# y `unidad` van como texto (tablero.compacto(x) ayuda); `nota` (puede ser "") va abajo, en
+# gris; `color` pone una franja a la izquierda (-1: sin franja). ancho 0: todo lo que queda.
+fn tarjeta(ui: gui.Ui, ancho: i32, titulo: str, valor: str, unidad: str, nota: str, color: i32) {
+    let l = _tarjeta_base(ui, ancho, titulo, valor, unidad, color, len(nota) > 0)
+    if len(nota) > 0 {
+        gui.rotular(ui, l.x + 16, l.y + l.alto - 12 - gui.alto_texto(13), nota, 13, ui.c_tenue)
+    }
+}
+
+# Un triángulo de 9 de alto, hacia arriba o hacia abajo, con la base en y.
+fn _triangulo(ui: gui.Ui, x: i32, y: i32, arriba: bool, c: i32) {
+    for i in 0..9 {
+        let ancho = 2 * i + 1
+        if arriba {
+            gui.pintar(ui, x + 8 - i, y + i, ancho, 1, c)
+        } else {
+            gui.pintar(ui, x + 8 - i, y + 8 - i, ancho, 1, c)
+        }
+    }
+}
+
+# tablero.tarjeta_delta: como tarjeta, y abajo cuánto cambió (`delta`, con `decimales`
+# cifras) con una flecha: verde si el cambio es bueno (sube_es_bueno decide cuál lo es),
+# rojo si es malo, gris si no cambió; `nota` sigue al cambio ("vs ayer").
+fn tarjeta_delta(ui: gui.Ui, ancho: i32, titulo: str, valor: str, unidad: str, delta: f64, decimales: i32, sube_es_bueno: bool, nota: str) {
+    let l = _tarjeta_base(ui, ancho, titulo, valor, unidad, -1, true)
+    let th = gui.alto_texto(13)
+    let y = l.y + l.alto - 12 - th
+    let mut c = ui.c_tenue
+    if delta != 0.0 {
+        if (delta > 0.0) == sube_es_bueno {
+            c = ui.c_bien
+        } else {
+            c = ui.c_mal
+        }
+        _triangulo(ui, l.x + 16, y + (th - 9) / 2, delta > 0.0, c)
+    }
+    let mut signo = ""
+    if delta > 0.0 {
+        signo = "+"
+    }
+    let t = signo + gui.decimales(delta, decimales)
+    let tw = gui.rotular(ui, l.x + 16 + 22, y, t, 13, c)
+    if len(nota) > 0 {
+        gui.rotular(ui, l.x + 16 + 22 + tw + 8, y, nota, 13, ui.c_tenue)
+    }
+}
+
+# Un arco grueso entre las fracciones f0 y f1, con círculos de punta redonda.
+fn _arco(ui: gui.Ui, cx: i32, cy: i32, r: f64, grosor: i32, f0: f64, f1: f64, c: i32) {
+    let pasos = max(6, to_i32(abs(f1 - f0) * 3.14159 * r / 1.5))
+    for k in 0..(pasos + 1) {
+        let f = f0 + (f1 - f0) * to_f64(k) / to_f64(pasos)
+        gui.circulo(ui, arco_x(cx, r, f), arco_y(cy, r, f), max(grosor / 2, 1), c)
+    }
+}
+
+# tablero.medidor(ui, ancho, titulo, valor, lo, hi, aviso, critico, unidad): una media luna
+# que se llena de lo a hi, del color del estado, con el valor en el medio y marcas en los
+# avisos.
+fn medidor(ui: gui.Ui, ancho: i32, titulo: str, valor: f64, lo: f64, hi: f64, aviso: f64, critico: f64, unidad: str) {
+    let th = gui.alto_texto(13)
+    let w = _ancho_de(ui, ancho)
+    let radio = max((w - 48) / 2, 20)
+    let grosor = max(radio / 6, 8)
+    let cy_rel = 12 + th + 14 + radio
+    let h = cy_rel + 6 + th + 12
+    let l = gui.reservar(ui, w, h)
+    _panel(ui, l.x, l.y, w, h)
+    gui.rotular(ui, l.x + 16, l.y + 12, titulo, 13, ui.c_tenue)
+    let cx = l.x + w / 2
+    let cy = l.y + cy_rel
+    let rm = to_f64(radio - grosor / 2)
+    _arco(ui, cx, cy, rm, grosor, 0.0, 1.0, ui.c_borde)
+    let f = fraccion(valor, lo, hi)
+    let e = estado(valor, aviso, critico)
+    if f > 0.0 {
+        _arco(ui, cx, cy, rm, grosor, 0.0, f, color_estado(ui, e))
+    }
+    if e >= 0 {
+        let fa = fraccion(aviso, lo, hi)
+        let fc = fraccion(critico, lo, hi)
+        let r0 = rm - to_f64(grosor / 2) - 3.0
+        let r1 = rm + to_f64(grosor / 2) + 3.0
+        gui.trazo(ui, arco_x(cx, r0, fa), arco_y(cy, r0, fa), arco_x(cx, r1, fa), arco_y(cy, r1, fa), ui.c_texto)
+        gui.trazo(ui, arco_x(cx, r0, fc), arco_y(cy, r0, fc), arco_x(cx, r1, fc), arco_y(cy, r1, fc), ui.c_texto)
+    }
+    let t = compacto(valor) + unidad
+    let tw = gui.ancho_texto(t, 20)
+    gui.rotular(ui, cx - tw / 2, cy - gui.alto_texto(20) - 2, t, 20, ui.c_texto)
+    let ty = cy + 6
+    gui.rotular(ui, l.x + 16, ty, compacto(lo), 13, ui.c_tenue)
+    let hs = compacto(hi)
+    gui.rotular(ui, l.x + w - 16 - gui.ancho_texto(hs, 13), ty, hs, 13, ui.c_tenue)
+}
+
+# tablero.nivel(ui, ancho, titulo, valor, lo, hi, aviso, critico, unidad): una barra
+# horizontal que se llena y cambia de color en los avisos (que se marcan con una raya).
+fn nivel(ui: gui.Ui, ancho: i32, titulo: str, valor: f64, lo: f64, hi: f64, aviso: f64, critico: f64, unidad: str) {
+    let th = gui.alto_texto(13)
+    let w = _ancho_de(ui, ancho)
+    let h = 12 + gui.alto_texto(16) + 10 + 10 + 14
+    let l = gui.reservar(ui, w, h)
+    _panel(ui, l.x, l.y, w, h)
+    gui.rotular(ui, l.x + 16, l.y + 12, titulo, 13, ui.c_tenue)
+    let t = compacto(valor) + unidad
+    gui.rotular(ui, l.x + w - 16 - gui.ancho_texto(t, 16), l.y + 10, t, 16, ui.c_texto)
+    let bx = l.x + 16
+    let bw = w - 32
+    let by = l.y + 12 + gui.alto_texto(16) + 10
+    _redondo(ui, bx, by, bw, 10, 5, ui.c_borde)
+    let f = fraccion(valor, lo, hi)
+    let e = estado(valor, aviso, critico)
+    let fw = to_i32(f * to_f64(bw))
+    if fw > 0 {
+        _redondo(ui, bx, by, max(fw, 10), 10, 5, color_estado(ui, e))
+    }
+    if e >= 0 {
+        let xa = bx + to_i32(fraccion(aviso, lo, hi) * to_f64(bw))
+        let xc = bx + to_i32(fraccion(critico, lo, hi) * to_f64(bw))
+        gui.pintar(ui, xa, by - 3, 2, 16, ui.c_texto)
+        gui.pintar(ui, xc, by - 3, 2, 16, ui.c_texto)
+    }
+}
+
+# tablero.semaforo(ui, texto, e): un círculo de color y el texto. e: 0 bien, 1 aviso,
+# 2 mal, 3 apagado (gris); -1 el acento.
+fn semaforo(ui: gui.Ui, texto: str, e: i32) {
+    let h = gui.alto_texto(16) + 4
+    let w = 26 + gui.ancho_texto(texto, 16)
+    let l = gui.reservar(ui, w, h)
+    let c = color_estado(ui, e)
+    gui.circulo(ui, l.x + 9, l.y + h / 2, 9, mezclar(ui.c_fondo, c, 35))
+    gui.circulo(ui, l.x + 9, l.y + h / 2, 6, c)
+    gui.rotular(ui, l.x + 26, l.y + 2, texto, 16, ui.c_texto)
+}
+
+# tablero.mini_lineas(ui, ancho, alto, serie, color): los valores de una gui.Serie como una
+# línea sin ejes, en un panel; el último punto va marcado (-1: el color de acento).
+fn mini_lineas(ui: gui.Ui, ancho: i32, alto: i32, s: gui.Serie, color: i32) {
+    let w = _ancho_de(ui, ancho)
+    let l = gui.reservar(ui, w, alto)
+    _panel(ui, l.x, l.y, w, alto)
+    let c = if color >= 0 { color } else { ui.c_acento }
+    let n = s.valores.len()
+    if n < 2 {
+        return
+    }
+    let mut lo = s.valores.get(0).unwrap_or(0.0)
+    let mut hi = lo
+    for i in 0..n {
+        let v = s.valores.get(i).unwrap_or(0.0)
+        lo = min(lo, v)
+        hi = max(hi, v)
+    }
+    if hi <= lo {
+        hi = lo + 1.0
+    }
+    let x0 = l.x + 10
+    let ancho_i = w - 20
+    let y0 = l.y + 10
+    let alto_i = alto - 20
+    let mut ax = 0
+    let mut ay = 0
+    for i in 0..n {
+        let v = s.valores.get(i).unwrap_or(0.0)
+        let px = x0 + i * ancho_i / (n - 1)
+        let py = y0 + alto_i - to_i32((v - lo) / (hi - lo) * to_f64(alto_i))
+        if i > 0 {
+            gui.trazo(ui, ax, ay, px, py, c)
+            gui.trazo(ui, ax, ay + 1, px, py + 1, c)
+        }
+        ax = px
+        ay = py
+    }
+    gui.circulo(ui, ax, ay, 4, c)
+}
+
+# tablero.boton_grande(ui, ancho, alto, titulo, detalle, color) -> bool: un botón-tarjeta de
+# color (-1: el acento) con un título y una línea de detalle (puede ser ""); true en el
+# cuadro del clic.
+fn boton_grande(ui: gui.Ui, ancho: i32, alto: i32, titulo: str, detalle: str, color: i32) -> bool {
+    let w = _ancho_de(ui, ancho)
+    let l = gui.reservar(ui, w, alto)
+    let base = if color >= 0 { color } else { ui.c_acento }
+    let sobre_el = gui.encima(ui, l.x, l.y, w, alto)
+    let mut c = base
+    if sobre_el {
+        c = gui.aclarar(base, 12)
+        if gui.raton_abajo(ui) {
+            c = gui.aclarar(base, -18)
+        }
+    }
+    _redondo(ui, l.x, l.y, w, alto, 10, c)
+    let tc = sobre(c)
+    let t1 = gui.alto_texto(20)
+    let mut bloque = t1
+    if len(detalle) > 0 {
+        bloque = bloque + 2 + gui.alto_texto(13)
+    }
+    let y0 = l.y + (alto - bloque) / 2
+    gui.rotular(ui, l.x + 16, y0, titulo, 20, tc)
+    if len(detalle) > 0 {
+        gui.rotular(ui, l.x + 16, y0 + t1 + 2, detalle, 13, mezclar(c, tc, 75))
+    }
+    return gui.clic_en(ui, l.x, l.y, w, alto)
+}
+
+# tablero.interruptor(ui, texto, encendido) -> bool: un interruptor con su texto; devuelve
+# cómo queda (cambia con un clic en el interruptor o en el texto).
+fn interruptor(ui: gui.Ui, texto: str, encendido: bool) -> bool {
+    let w = 44 + 10 + gui.ancho_texto(texto, 16)
+    let l = gui.reservar(ui, w, 24)
+    let mut valor = encendido
+    if gui.clic_en(ui, l.x, l.y, w, 24) {
+        valor = not valor
+    }
+    let pista = if valor { ui.c_acento } else { ui.c_borde }
+    _redondo(ui, l.x, l.y, 44, 24, 12, pista)
+    let perilla = if valor { l.x + 32 } else { l.x + 12 }
+    gui.circulo(ui, perilla, l.y + 12, 9, if valor { ui.c_sobre_acento } else { ui.c_panel })
+    gui.rotular(ui, l.x + 54, l.y + 2, texto, 16, ui.c_texto)
+    return valor
+}
+
+# tablero.encabezado(ui, titulo, subtitulo): el título de la página, una línea gris
+# debajo y un separador.
+fn encabezado(ui: gui.Ui, titulo: str, subtitulo: str) {
+    gui.titulo(ui, titulo)
+    if len(subtitulo) > 0 {
+        gui.texto_tenue(ui, subtitulo)
+    }
+    gui.separador(ui)
+}

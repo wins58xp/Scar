@@ -1,0 +1,111 @@
+# lib/audio, probada con lib/prueba.
+#
+# Las formas de onda en puntos conocidos, la envolvente ADSR, la mezcla con
+# recorte, el estéreo intercalado, la conversión a 16 bits, la cabecera de un
+# WAV byte por byte, ida y vuelta, y los errores. La comparación muestra por
+# muestra con Python (wave) está en pruebas/test_audio_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "audio"
+
+fn le32(v: Vec<i32>, i: i32) -> i32 {
+    return v.get(i).unwrap_or(0) | (v.get(i + 1).unwrap_or(0) << 8) | (v.get(i + 2).unwrap_or(0) << 16)
+        | (v.get(i + 3).unwrap_or(0) << 24)
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("audio")
+
+    prueba.seccion(t, "ondas")
+    # 1000 Hz a 8000 muestras por segundo: 8 muestras por período
+    let s = audio.seno(1000.0, 0.5, 0.01, 8000)
+    prueba.afirmar_igual_i32(t, audio.largo(s), 80, "0,01 s a 8 kHz: 80 muestras")
+    prueba.afirmar_igual_f64(t, audio.muestra(s, 0, 0), 0.0, "seno en 0")
+    prueba.afirmar_cerca(t, audio.muestra(s, 2, 0), 0.5, 1e-12, "seno en un cuarto de período")
+    prueba.afirmar_cerca(t, audio.muestra(s, 6, 0), 0.0 - 0.5, 1e-12, "seno en tres cuartos")
+    let q = audio.cuadrada(1000.0, 0.25, 0.01, 8000)
+    prueba.afirmar_igual_f64(t, audio.muestra(q, 3, 0), 0.25, "cuadrada, primera mitad")
+    prueba.afirmar_igual_f64(t, audio.muestra(q, 4, 0), 0.0 - 0.25, "cuadrada, segunda mitad")
+    let w = audio.sierra(1000.0, 1.0, 0.01, 8000)
+    prueba.afirmar_igual_f64(t, audio.muestra(w, 0, 0), 0.0 - 1.0, "sierra empieza abajo")
+    prueba.afirmar_igual_f64(t, audio.muestra(w, 4, 0), 0.0, "y pasa por 0 en la mitad")
+    let tr = audio.triangulo(1000.0, 1.0, 0.01, 8000)
+    prueba.afirmar_igual_f64(t, audio.muestra(tr, 4, 0), 1.0, "triángulo arriba en la mitad")
+    prueba.afirmar_igual_f64(t, audio.muestra(tr, 2, 0), 0.0, "y en 0 a un cuarto")
+    let r1 = audio.ruido(0.3, 0.01, 8000, 7)
+    let r2 = audio.ruido(0.3, 0.01, 8000, 7)
+    let mut igual = true
+    let mut dentro = true
+    for i in 0..audio.largo(r1) {
+        let v = audio.muestra(r1, i, 0)
+        if v != audio.muestra(r2, i, 0) {
+            igual = false
+        }
+        if v < 0.0 - 0.3 or v > 0.3 {
+            dentro = false
+        }
+    }
+    prueba.afirmar(t, igual, "ruido: la misma semilla da lo mismo")
+    prueba.afirmar(t, dentro, "ruido: dentro de la amplitud")
+
+    prueba.seccion(t, "envolvente")
+    prueba.afirmar_igual_f64(t, audio.envolvente(0.0, 1.0, 0.1, 0.2, 0.5, 0.3), 0.0, "empieza en 0")
+    prueba.afirmar_cerca(t, audio.envolvente(0.05, 1.0, 0.1, 0.2, 0.5, 0.3), 0.5, 1e-12, "mitad del ataque")
+    prueba.afirmar_cerca(t, audio.envolvente(0.2, 1.0, 0.1, 0.2, 0.5, 0.3), 0.75, 1e-12, "mitad del decaimiento")
+    prueba.afirmar_igual_f64(t, audio.envolvente(0.5, 1.0, 0.1, 0.2, 0.5, 0.3), 0.5, "sostenido")
+    prueba.afirmar_cerca(t, audio.envolvente(0.85, 1.0, 0.1, 0.2, 0.5, 0.3), 0.25, 1e-12, "mitad de la liberación")
+    prueba.afirmar_cerca(t, audio.envolvente(1.0, 1.0, 0.1, 0.2, 0.5, 0.3), 0.0, 1e-12, "termina en 0")
+
+    prueba.seccion(t, "mezcla y estéreo")
+    let m = audio.mezclar(audio.cuadrada(1000.0, 0.8, 0.01, 8000), audio.cuadrada(1000.0, 0.7, 0.005, 8000))
+    prueba.afirmar_igual_i32(t, audio.largo(m), 80, "dura lo que el más largo")
+    prueba.afirmar_igual_f64(t, audio.muestra(m, 0, 0), 1.0, "se recorta a 1")
+    prueba.afirmar_cerca(t, audio.muestra(m, 60, 0), 0.0 - 0.8, 1e-12, "después del corto, solo el largo")
+    let st = audio.estereo(audio.cuadrada(1000.0, 0.5, 0.01, 8000), audio.sierra(1000.0, 1.0, 0.002, 8000))
+    prueba.afirmar_igual_i32(t, st.canales, 2, "estéreo")
+    prueba.afirmar_igual_f64(t, audio.muestra(st, 0, 1), 0.0 - 1.0, "canal derecho")
+    prueba.afirmar_igual_f64(t, audio.muestra(st, 50, 1), 0.0, "con silencio al final")
+    prueba.afirmar_igual_i32(t, audio.a_16(1.0), 32767, "16 bits: 1")
+    prueba.afirmar_igual_i32(t, audio.a_16(0.0 - 2.0), 0 - 32767, "16 bits: se recorta")
+    prueba.afirmar_igual_i32(t, audio.a_16(0.5), 16384, "16 bits: redondea (16383,5)")
+
+    prueba.seccion(t, "WAV")
+    let b = audio.a_wav(audio.seno(1000.0, 0.5, 0.01, 8000))
+    prueba.afirmar_igual_i32(t, b.len(), 44 + 160, "44 de cabecera y 2 bytes por muestra")
+    let b2 = audio.a_wav(audio.seno(1000.0, 0.5, 0.01, 8000))
+    prueba.afirmar_igual_i32(t, le32(b2, 24), 8000, "la tasa")
+    let b3 = audio.a_wav(st)
+    prueba.afirmar_igual_i32(t, b3.get(22).unwrap_or(0), 2, "los canales")
+    match audio.de_wav(audio.a_wav(audio.triangulo(1000.0, 0.9, 0.01, 8000))) {
+        Ok(v) => {
+            let o = audio.triangulo(1000.0, 0.9, 0.01, 8000)
+            let mut cerca = true
+            for i in 0..audio.largo(o) {
+                if abs(audio.muestra(v, i, 0) - audio.muestra(o, i, 0)) > 1.0 / 32767.0 {
+                    cerca = false
+                }
+            }
+            prueba.afirmar(t, cerca, "ida y vuelta: a menos de un paso de 16 bits")
+        }
+        Err(e) => { prueba.afirmar(t, false, "ida y vuelta: " + e) }
+    }
+    match audio.guardar_wav(st, "/tmp/scar_279_lib_audio.wav") {
+        Ok(n) => { prueba.afirmar_igual_i32(t, n, 44 + 80 * 2 * 2, "guardar_wav") }
+        Err(e) => { prueba.afirmar(t, false, "guardar: " + e) }
+    }
+    match audio.leer_wav("/tmp/scar_279_lib_audio.wav") {
+        Ok(v) => { prueba.afirmar_igual_i32(t, audio.largo(v) * v.canales, 160, "leer_wav") }
+        Err(e) => { prueba.afirmar(t, false, "leer: " + e) }
+    }
+    let mut ocho = audio.a_wav(audio.seno(1000.0, 0.5, 0.01, 8000))
+    ocho.set(34, 8)
+    match audio.de_wav(ocho) {
+        Ok(v) => { prueba.afirmar(t, false, "8 bits tenía que dar Err") }
+        Err(e) => { prueba.afirmar_igual_str(t, e, "audio: WAV de 8 bits por muestra todavía no (solo 16)", "8 bits") }
+    }
+    prueba.afirmar(t, audio.de_wav([82, 73, 70, 70]).is_err(), "no es WAV")
+    prueba.afirmar(t, audio.leer_wav("/no/existe.wav").is_err(), "no existe")
+
+    return prueba.terminar(t)
+}

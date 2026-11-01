@@ -1,0 +1,7 @@
+#!/bin/sh
+# El comando `scar`: corre el cli.py de esta copia de SCAR desde cualquier
+# carpeta. instalar.sh lo enlaza en ~/.local/bin; el enlace se sigue hasta
+# aquí para encontrar la carpeta de SCAR.
+yo=$(readlink -f "$0")
+raiz=$(dirname "$(dirname "$yo")")
+exec python3 "$raiz/cli.py" "$@"

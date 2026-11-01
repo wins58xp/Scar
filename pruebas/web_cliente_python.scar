@@ -1,0 +1,169 @@
+# lib/web (el cliente HTTP) contra un servidor de prueba en Python: lo corre
+# pruebas/test_web_python.py. Lee "casos.json" con el "puerto" del servidor y escribe una
+# línea "ETIQUETA k valor" por escenario. Los textos salen en hexadecimal UTF-8.
+
+use "json"
+use "codigos"
+use "texto"
+use "web"
+
+fn h(t: str) -> str {
+    return codigos.hex(codigos.de_texto(t))
+}
+
+fn sal(etiqueta: str, k: i32, valor: str) {
+    print(etiqueta + " " + a_texto(k) + " " + valor)
+}
+
+# código, motivo, Content-Type y el cuerpo entero en hexadecimal (o el error)
+fn resumen(r: Result<web.Respuesta>) -> str {
+    match r {
+        Ok(x) => {
+            return "OK " + a_texto(x.codigo) + " " + h(x.motivo) + " " + h(web.cabecera_de(x, "content-type")) + " " + codigos.hex(x.cuerpo)
+        }
+        Err(e) => {
+            return "ERR " + h(e)
+        }
+    }
+    return "ERR"
+}
+
+fn eco(r: Result<web.Respuesta>) -> str {
+    match r {
+        Ok(x) => {
+            match web.json_de(x) {
+                Ok(d) => {
+                    return "OK " + a_texto(x.codigo) + " " + h(json.texto(d, "metodo")) + " " + h(json.texto(d, "destino")) + " " + h(json.texto_o(d, "cabeceras.content-type", "")) + " " + h(json.texto_o(d, "cabeceras.content-length", "")) + " " + h(json.texto_o(d, "cabeceras.authorization", "")) + " " + h(json.texto_o(d, "cabeceras.x-uno", "")) + " " + h(json.texto_o(d, "cabeceras.host", "")) + " " + json.texto(d, "cuerpo")
+                }
+                Err(e) => {
+                    return "ERRJSON"
+                }
+            }
+        }
+        Err(e) => {
+            return "ERR " + h(e)
+        }
+    }
+    return "ERR"
+}
+
+fn main() {
+    match json.leer_archivo("casos.json") {
+        Err(e) => {
+            print("ERROR no se pudo leer casos.json")
+        }
+        Ok(d) => {
+            let p = a_texto(json.entero(d, "puerto"))
+            let base = "http://127.0.0.1:" + p
+            correr(base, p)
+        }
+    }
+}
+
+fn correr(base: str, p: str) {
+    # 1: GET con cabeceras propias
+    let o1 = web.opciones()
+    web.cabecera(o1, "X-Uno", "valor ñ")
+    web.cabecera(o1, "Authorization", "Bearer abc")
+    sal("ECO", 1, eco(web.obtener_con(base + "/eco?a=1&b=dos", o1)))
+    # 2: POST de un documento JSON
+    let doc = json.nuevo_objeto()
+    json.poner_texto(doc, 0, "lugar", "Calama ñ")
+    json.poner_entero(doc, 0, "mag", 4)
+    sal("ECO", 2, eco(web.enviar_json(base + "/eco", doc, web.opciones())))
+    # 3: POST de un formulario
+    let f = web.pares()
+    web.poner(f, "nombre", "Ana María")
+    web.poner(f, "x&y", "1+1=2")
+    sal("ECO", 3, eco(web.enviar_formulario(base + "/eco", f, web.opciones())))
+    # 4: PUT y DELETE
+    sal("ECO", 4, eco(web.enviar("PUT", base + "/eco", web.opciones(), codigos.de_texto("hola"))))
+    sal("ECO", 5, eco(web.enviar("DELETE", base + "/eco", web.opciones(), codigos.vacio())))
+    # 6: cuerpo por trozos (con extensión) y 7: sin Content-Length
+    sal("RESP", 6, resumen(web.obtener(base + "/trozos")))
+    sal("RESP", 7, resumen(web.obtener(base + "/sinlargo")))
+    # 8: redirecciones
+    sal("RESP", 8, resumen(web.obtener(base + "/redir/3")))
+    sal("RESP", 9, resumen(web.obtener(base + "/bucle")))
+    let o10 = web.opciones()
+    o10.redirecciones = 0
+    sal("RESP", 10, resumen(web.obtener_con(base + "/redir/1", o10)))
+    # 11: 301 convierte el POST en GET; 12: 307 lo mantiene con su cuerpo
+    sal("ECO", 11, eco(web.enviar_texto(base + "/a301", "text/plain", "datos", web.opciones())))
+    sal("ECO", 12, eco(web.enviar_texto(base + "/a307", "text/plain", "datos", web.opciones())))
+    sal("ECO", 35, eco(web.enviar_texto(base + "/a308", "text/plain", "datos", web.opciones())))
+    sal("ECO", 36, eco(web.enviar_texto(base + "/a303", "text/plain", "datos", web.opciones())))
+    # 13: al cambiar de servidor se suelta Authorization pero no X-Uno
+    sal("ECO", 13, eco(web.obtener_con(base + "/otro?p=" + p, o1)))
+    # 14: códigos de error llegan como Ok; HEAD y 204 sin cuerpo
+    sal("RESP", 14, resumen(web.obtener(base + "/404")))
+    sal("RESP", 15, resumen(web.enviar("HEAD", base + "/eco", web.opciones(), codigos.vacio())))
+    sal("RESP", 16, resumen(web.obtener(base + "/vacio")))
+    # 17: reintentos con 503 (dos fallos y después 200)
+    let o17 = web.opciones()
+    o17.reintentos = 3
+    o17.pausa = 0.01
+    sal("RESP", 17, resumen(web.obtener_con(base + "/inestable?id=a", o17)))
+    sal("RESP", 18, resumen(web.obtener(base + "/contador?id=a")))
+    # 19: un POST no se reintenta ante un 503
+    sal("RESP", 19, resumen(web.enviar_texto(base + "/inestable?id=b", "text/plain", "x", o17)))
+    sal("RESP", 20, resumen(web.obtener(base + "/contador?id=b")))
+    # 21: sin reintentos, el primer 503 llega tal cual
+    sal("RESP", 21, resumen(web.obtener(base + "/inestable?id=c")))
+    # 22: el mismo cuerpo grande y todos los bytes
+    match web.obtener(base + "/grande") {
+        Ok(x) => {
+            sal("GRANDE", 22, a_texto(x.cuerpo.v.len()) + " " + codigos.sha256_hex(x.cuerpo))
+        }
+        Err(e) => {
+            sal("GRANDE", 22, "ERR " + h(e))
+        }
+    }
+    match web.obtener(base + "/binario") {
+        Ok(x) => {
+            sal("GRANDE", 23, a_texto(x.cuerpo.v.len()) + " " + codigos.sha256_hex(x.cuerpo))
+        }
+        Err(e) => {
+            sal("GRANDE", 23, "ERR " + h(e))
+        }
+    }
+    # 24: UTF-8 y json_de
+    match web.obtener(base + "/json") {
+        Ok(x) => {
+            match web.json_de(x) {
+                Ok(dd) => {
+                    sal("JSON", 24, h(json.texto(dd, "a.0.b")) + " " + a_texto(json.largo(dd, "a")) + " " + a_texto(web.exito(x)))
+                }
+                Err(e) => {
+                    sal("JSON", 24, "ERRJSON")
+                }
+            }
+        }
+        Err(e) => {
+            sal("JSON", 24, "ERR " + h(e))
+        }
+    }
+    # errores
+    sal("RESP", 25, resumen(web.obtener(base + "/cortada")))
+    sal("RESP", 26, resumen(web.obtener(base + "/trozos_malos")))
+    sal("RESP", 27, resumen(web.obtener("http://127.0.0.1:1/nadie")))
+    sal("RESP", 28, resumen(web.obtener("https://127.0.0.1:" + p + "/")))
+    sal("RESP", 29, resumen(web.obtener("ftp://127.0.0.1/")))
+    let o30 = web.opciones()
+    web.cabecera(o30, "X-Malo", "a\r\nX-Inyectada: 1")
+    sal("RESP", 30, resumen(web.obtener_con(base + "/eco", o30)))
+    sal("RESP", 31, resumen(web.obtener(base + "/con espacio")))
+    sal("RESP", 32, resumen(web.obtener("/sin/servidor")))
+    sal("RESP", 33, resumen(web.obtener(base + "/no_http")))
+    # 34: con_consulta
+    let q = web.pares()
+    web.poner(q, "z", "a b")
+    match web.con_consulta(base + "/eco?y=1", q) {
+        Ok(u) => {
+            sal("URL", 34, h(u))
+        }
+        Err(e) => {
+            sal("URL", 34, "ERR")
+        }
+    }
+}

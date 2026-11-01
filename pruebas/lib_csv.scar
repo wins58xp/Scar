@@ -1,0 +1,92 @@
+# lib/csv, probada con lib/prueba.
+#
+# Lee CSV con comillas, comillas dobladas, separador a elección y saltos de línea
+# dentro de un campo; consulta por fila y columna o por nombre de encabezado;
+# arma una tabla y la escribe como csv.writer. La comparación con csv.reader y
+# csv.writer de Python, con cientos de textos al azar y sucios, está en
+# pruebas/test_csv_python.py. Termina con el código de salida de prueba.terminar.
+
+use "prueba"
+use "csv"
+
+fn correr(t: prueba.Prueba) -> Result<i32> {
+    prueba.seccion(t, "leer")
+    let v = csv.analizar_texto("lugar,mag,nota\r\nCalama,2.9,\"cerca, al norte\"\r\nOvalle,4.1,\"dijo \"\"fuerte\"\"\"\r\n\r\nLa Serena,3.0,\"dos\nlíneas\"\r\n", ",")?
+    prueba.afirmar_igual_i32(t, csv.filas(v), 5, "filas (la vacía cuenta)")
+    prueba.afirmar_igual_i32(t, csv.columnas(v, 0), 3, "columnas del encabezado")
+    prueba.afirmar_igual_i32(t, csv.columnas(v, 3), 0, "una línea vacía es una fila sin celdas")
+    prueba.afirmar_igual_str(t, csv.celda(v, 1, 2), "cerca, al norte", "coma dentro de comillas")
+    prueba.afirmar_igual_str(t, csv.celda(v, 2, 2), "dijo \"fuerte\"", "comillas dobladas")
+    prueba.afirmar_igual_str(t, csv.celda(v, 4, 2), "dos\nlíneas", "salto de línea dentro de comillas")
+    prueba.afirmar_igual_str(t, csv.celda(v, 4, 0), "La Serena", "texto con espacio")
+    prueba.afirmar_igual_str(t, csv.celda(v, 9, 9), "", "fuera de la tabla")
+    prueba.afirmar(t, csv.existe(v, 1, 1), "existe")
+    prueba.afirmar(t, csv.existe(v, 1, 3) == false, "no existe la columna 3")
+
+    prueba.seccion(t, "por nombre de columna")
+    prueba.afirmar_igual_i32(t, csv.indice(v, "mag"), 1, "índice de una columna")
+    prueba.afirmar_igual_i32(t, csv.indice(v, "no"), 0 - 1, "columna que no existe")
+    prueba.afirmar_igual_str(t, csv.dato(v, 0, "lugar"), "Calama", "primera fila de datos")
+    prueba.afirmar_igual_str(t, csv.dato(v, 1, "lugar"), "Ovalle", "segunda fila de datos")
+    prueba.afirmar_cerca(t, csv.dato_numero(v, 1, "mag", 0.0), 4.1, 1e-12, "dato_numero")
+    prueba.afirmar_cerca(t, csv.dato_numero(v, 0, "lugar", 0.0 - 1.0), 0.0 - 1.0, 1e-12, "texto que no es número da el valor por defecto")
+    prueba.afirmar_cerca(t, csv.numero(v, 1, 1, 0.0), 2.9, 1e-12, "numero")
+
+    prueba.seccion(t, "otros separadores y finales")
+    let pc = csv.analizar_texto("a;b;\"c;d\"\n1;;3", ";")?
+    prueba.afirmar_igual_i32(t, csv.filas(pc), 2, "sin salto final también cuenta la última fila")
+    prueba.afirmar_igual_str(t, csv.celda(pc, 0, 2), "c;d", "punto y coma entre comillas")
+    prueba.afirmar_igual_str(t, csv.celda(pc, 1, 1), "", "celda vacía")
+    prueba.afirmar_igual_i32(t, csv.columnas(pc, 1), 3, "tres celdas aunque una esté vacía")
+    let tab = csv.analizar_texto("x\ty\n\"1\t2\"\t3\n", "\t")?
+    prueba.afirmar_igual_str(t, csv.celda(tab, 1, 0), "1\t2", "tabulador")
+    let sucio = csv.analizar_texto("a\"b,\"c\"d,\"sin cerrar", ",")?
+    prueba.afirmar_igual_str(t, csv.celda(sucio, 0, 0), "a\"b", "comilla en medio de un campo es un carácter más")
+    prueba.afirmar_igual_str(t, csv.celda(sucio, 0, 1), "cd", "texto después de la comilla que cierra")
+    prueba.afirmar_igual_str(t, csv.celda(sucio, 0, 2), "sin cerrar", "comillas sin cerrar hasta el final")
+    prueba.afirmar(t, csv.analizar_texto("a,b", ",,").is_err(), "separador de dos caracteres")
+    prueba.afirmar(t, csv.analizar_texto("a,b", "\"").is_err(), "la comilla no puede ser separador")
+
+    prueba.seccion(t, "armar y escribir")
+    let n = csv.nueva()
+    csv.agregar_celda(n, "lugar")
+    csv.agregar_celda(n, "nota")
+    csv.cerrar_fila(n)
+    csv.agregar_celda(n, "Calama, norte")
+    csv.agregar_celda(n, "dijo \"sí\"")
+    csv.cerrar_fila(n)
+    csv.agregar_celda(n, "año\nnuevo")
+    csv.agregar_celda(n, "")
+    csv.cerrar_fila(n)
+    csv.cerrar_fila(n)
+    csv.agregar_celda(n, "")
+    csv.cerrar_fila(n)
+    prueba.afirmar_igual_str(t, csv.escribir(n, ","), "lugar,nota\r\n\"Calama, norte\",\"dijo \"\"sí\"\"\"\r\n\"año\nnuevo\",\r\n\r\n\"\"\r\n", "como csv.writer")
+    prueba.afirmar_igual_str(t, csv.escribir_con(n, ";", "\n"), "lugar;nota\nCalama, norte;\"dijo \"\"sí\"\"\"\n\"año\nnuevo\";\n\n\"\"\n", "con otro separador y terminador")
+    let vuelta = csv.analizar_texto(csv.escribir(n, ","), ",")?
+    prueba.afirmar_igual_i32(t, csv.filas(vuelta), 5, "escribir y leer conserva las filas")
+    prueba.afirmar_igual_str(t, csv.escribir(vuelta, ","), csv.escribir(n, ","), "y el texto")
+    let lista: Vec<str> = vec_new()
+    lista.push("a")
+    lista.push("b c")
+    csv.agregar_fila(n, lista)
+    prueba.afirmar_igual_str(t, csv.celda(n, 5, 1), "b c", "agregar_fila")
+
+    prueba.seccion(t, "archivos")
+    let bytes = csv.guardar(n, "/tmp/scar_prueba_csv.csv", ",")?
+    prueba.afirmar(t, bytes > 0, "guardar devuelve los bytes escritos")
+    let leida = csv.leer_archivo("/tmp/scar_prueba_csv.csv", ",")?
+    prueba.afirmar_igual_str(t, csv.escribir(leida, ","), csv.escribir(n, ","), "guardar y leer_archivo dan lo mismo")
+
+    return Ok(prueba.terminar(t))
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("lib/csv")
+    let r = correr(t)
+    if r.is_err() {
+        print("ERROR:", r.err())
+        return 1
+    }
+    return 0
+}

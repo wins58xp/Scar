@@ -1,0 +1,235 @@
+# lib/lienzo, probada con lib/prueba.
+#
+# Propiedades que se pueden comprobar sin mirar: los colores y la mezcla por
+# alfa, que una línea tenga sus extremos y un píxel por columna, que un
+# rectángulo lleno tenga w·h píxeles, que un círculo lleno tenga los puntos de
+# x² + y² <= r² (contados aparte) y sea simétrico, que dos triángulos que
+# comparten un lado no se pisen, que un borde a medias pinte cada píxel una
+# vez, que nada se salga del lienzo, y las letras de la fuente, fila por fila.
+# Las escenas al azar contra Python están en pruebas/test_lienzo_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "lienzo"
+
+# Cuántos píxeles del lienzo no son del color de fondo.
+fn pintados(l: lienzo.Lienzo, fondo: i32) -> i32 {
+    let mut n = 0
+    for y in 0..lienzo.alto(l) {
+        for x in 0..lienzo.ancho(l) {
+            if lienzo.leer(l, x, y) != fondo {
+                n = n + 1
+            }
+        }
+    }
+    return n
+}
+
+# La fila y de la letra escrita en (x0, y0), como los bits de la fuente.
+fn fila_de_letra(l: lienzo.Lienzo, x0: i32, y0: i32, fila: i32) -> i32 {
+    let mut bits = 0
+    for col in 0..8 {
+        if lienzo.leer(l, x0 + col, y0 + fila) != lienzo.negro() {
+            bits = bits | (1 << col)
+        }
+    }
+    return bits
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("lienzo")
+    let negro = lienzo.negro()
+    let blanco = lienzo.blanco()
+
+    prueba.seccion(t, "colores")
+    let c = lienzo.color_a(10, 20, 30, 40)
+    prueba.afirmar_igual_i32(t, lienzo.canal_r(c), 10, "rojo")
+    prueba.afirmar_igual_i32(t, lienzo.canal_g(c), 20, "verde")
+    prueba.afirmar_igual_i32(t, lienzo.canal_b(c), 30, "azul")
+    prueba.afirmar_igual_i32(t, lienzo.canal_a(c), 40, "alfa")
+    prueba.afirmar_igual_i32(t, lienzo.canal_a(blanco), 255, "el blanco es opaco (y negativo como i32)")
+    prueba.afirmar(t, blanco < 0, "0xFFFFFFFF es -1")
+    prueba.afirmar_igual_i32(t, lienzo.mezclar(negro, blanco), blanco, "opaco tapa")
+    prueba.afirmar_igual_i32(t, lienzo.mezclar(negro, lienzo.transparente()), negro, "transparente no cambia")
+    let medio = lienzo.mezclar(negro, lienzo.color_a(255, 255, 255, 128))
+    prueba.afirmar_igual_i32(t, lienzo.canal_r(medio), 128, "blanco a medias sobre negro: 128")
+    prueba.afirmar_igual_i32(t, lienzo.canal_a(medio), 255, "sobre opaco queda opaco")
+    let sobre_nada = lienzo.mezclar(lienzo.transparente(), lienzo.color_a(200, 100, 50, 128))
+    prueba.afirmar_igual_i32(t, lienzo.canal_r(sobre_nada), 200, "sobre transparente el color queda")
+    prueba.afirmar_igual_i32(t, lienzo.canal_a(sobre_nada), 128, "y el alfa también")
+
+    prueba.seccion(t, "píxeles")
+    let l = lienzo.nuevo(32, 24, negro)
+    lienzo.poner(l, 3, 4, blanco)
+    prueba.afirmar_igual_i32(t, lienzo.leer(l, 3, 4), blanco, "poner y leer")
+    prueba.afirmar_igual_i32(t, lienzo.leer(l, 0 - 1, 4), 0, "afuera da transparente")
+    lienzo.poner(l, 99, 99, blanco)
+    lienzo.pintar(l, 0 - 5, 2, blanco)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 1, "afuera no se dibuja")
+    lienzo.limpiar(l, negro)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 0, "limpiar")
+
+    prueba.seccion(t, "líneas")
+    lienzo.linea(l, 2, 3, 29, 17, blanco)
+    prueba.afirmar_igual_i32(t, lienzo.leer(l, 2, 3), blanco, "primer extremo")
+    prueba.afirmar_igual_i32(t, lienzo.leer(l, 29, 17), blanco, "último extremo")
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 28, "un píxel por columna")
+    lienzo.limpiar(l, negro)
+    lienzo.linea(l, 5, 20, 5, 2, blanco)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 19, "vertical, hacia arriba")
+    lienzo.limpiar(l, negro)
+    lienzo.linea(l, 0 - 100, 10, 200, 10, blanco)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 32, "recortada por el lienzo")
+    lienzo.limpiar(l, negro)
+    lienzo.linea(l, 7, 7, 7, 7, blanco)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 1, "una línea de un punto")
+
+    prueba.seccion(t, "rectángulos")
+    lienzo.limpiar(l, negro)
+    lienzo.rect_lleno(l, 4, 5, 10, 7, blanco)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 70, "lleno: w·h")
+    lienzo.limpiar(l, negro)
+    lienzo.rect(l, 4, 5, 10, 7, blanco)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 30, "borde: 2·(w + h) - 4")
+    lienzo.limpiar(l, negro)
+    lienzo.rect(l, 4, 5, 1, 1, blanco)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 1, "borde de 1x1")
+    lienzo.limpiar(l, negro)
+    lienzo.rect_lleno(l, 0 - 10, 0 - 10, 100, 100, blanco)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 32 * 24, "más grande que el lienzo")
+
+    prueba.seccion(t, "círculos")
+    lienzo.limpiar(l, negro)
+    lienzo.circulo_lleno(l, 15, 12, 7, blanco)
+    let mut esperados = 0
+    for dy in 0 - 7..8 {
+        for dx in 0 - 7..8 {
+            if dx * dx + dy * dy <= 49 {
+                esperados = esperados + 1
+            }
+        }
+    }
+    prueba.afirmar_igual_i32(t, pintados(l, negro), esperados, "lleno: los puntos de x² + y² <= r²")
+    let mut simetrico = true
+    for dy in 0 - 8..9 {
+        for dx in 0 - 8..9 {
+            let p = lienzo.leer(l, 15 + dx, 12 + dy)
+            if p != lienzo.leer(l, 15 - dx, 12 + dy) or p != lienzo.leer(l, 15 + dy, 12 + dx) {
+                simetrico = false
+            }
+        }
+    }
+    prueba.afirmar(t, simetrico, "simétrico")
+    lienzo.limpiar(l, negro)
+    lienzo.circulo(l, 15, 12, 7, lienzo.color_a(255, 255, 255, 100))
+    let mut parejo = true
+    for y in 0..24 {
+        for x in 0..32 {
+            let p = lienzo.leer(l, x, y)
+            if p != negro and p != lienzo.mezclar(negro, lienzo.color_a(255, 255, 255, 100)) {
+                parejo = false
+            }
+        }
+    }
+    prueba.afirmar(t, parejo, "borde a medias: cada píxel pintado una vez")
+    prueba.afirmar_igual_i32(t, lienzo.leer(l, 22, 12), lienzo.leer(l, 8, 12), "izquierda y derecha")
+    lienzo.limpiar(l, negro)
+    lienzo.circulo(l, 15, 12, 0, blanco)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 1, "radio 0: un punto")
+
+    prueba.seccion(t, "polígonos")
+    lienzo.limpiar(l, negro)
+    lienzo.poligono_lleno(l, [4, 14, 14, 4], [5, 5, 12, 12], blanco)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 70, "un rectángulo como polígono: w·h")
+    lienzo.limpiar(l, negro)
+    let medio_blanco = lienzo.color_a(255, 255, 255, 128)
+    lienzo.triangulo_lleno(l, 2, 2, 28, 2, 2, 20, medio_blanco)
+    lienzo.triangulo_lleno(l, 28, 2, 28, 20, 2, 20, medio_blanco)
+    let un_toque = lienzo.mezclar(negro, medio_blanco)
+    let mut sin_pisar = true
+    let mut cubiertos = 0
+    for y in 0..24 {
+        for x in 0..32 {
+            let p = lienzo.leer(l, x, y)
+            if p != negro {
+                cubiertos = cubiertos + 1
+                if p != un_toque {
+                    sin_pisar = false
+                }
+            }
+        }
+    }
+    prueba.afirmar(t, sin_pisar, "dos triángulos con un lado en común no se pisan")
+    prueba.afirmar_igual_i32(t, cubiertos, 26 * 18, "y entre los dos cubren el rectángulo")
+    lienzo.limpiar(l, negro)
+    lienzo.poligono(l, [3, 20, 3, 20], [3, 15, 15, 3], medio_blanco)
+    let mut una_vez = true
+    for y in 0..24 {
+        for x in 0..32 {
+            let p = lienzo.leer(l, x, y)
+            if p != negro and p != un_toque {
+                una_vez = false
+            }
+        }
+    }
+    prueba.afirmar(t, una_vez, "un borde que se cruza pinta el cruce una vez")
+    lienzo.limpiar(l, negro)
+    lienzo.poligono_lleno(l, [15, 21, 5, 25, 9], [1, 21, 9, 9, 21], blanco)
+    prueba.afirmar_igual_i32(t, lienzo.leer(l, 15, 13), negro, "par-impar: el centro de una estrella queda afuera")
+    prueba.afirmar_igual_i32(t, lienzo.leer(l, 15, 5), blanco, "y las puntas adentro")
+
+    prueba.seccion(t, "copiar")
+    let chico = lienzo.nuevo(4, 3, lienzo.rojo())
+    lienzo.poner(chico, 0, 0, lienzo.transparente())
+    lienzo.limpiar(l, negro)
+    lienzo.copiar(l, chico, 30, 22)
+    prueba.afirmar_igual_i32(t, pintados(l, negro), 3, "copiar recorta en el borde")
+    lienzo.copiar(l, chico, 1, 1)
+    prueba.afirmar_igual_i32(t, lienzo.leer(l, 1, 1), negro, "lo transparente no tapa")
+    prueba.afirmar_igual_i32(t, lienzo.leer(l, 2, 1), lienzo.rojo(), "lo opaco sí")
+
+    prueba.seccion(t, "texto")
+    lienzo.limpiar(l, negro)
+    lienzo.texto(l, 0, 0, "Añ", blanco)
+    let a = [12, 30, 51, 51, 63, 51, 51, 0]
+    let ene = [0, 31, 0, 31, 51, 51, 51, 0]
+    let mut a_bien = true
+    let mut ene_bien = true
+    for f in 0..8 {
+        if fila_de_letra(l, 0, 0, f) != a.get(f).unwrap_or(0 - 1) {
+            a_bien = false
+        }
+        if fila_de_letra(l, 8, 0, f) != ene.get(f).unwrap_or(0 - 1) {
+            ene_bien = false
+        }
+    }
+    prueba.afirmar(t, a_bien, "la A, fila por fila")
+    prueba.afirmar(t, ene_bien, "la ñ, fila por fila")
+    lienzo.limpiar(l, negro)
+    lienzo.texto(l, 0, 0, "€", blanco)
+    lienzo.texto(l, 8, 0, "?", lienzo.rojo())
+    let mut igual = true
+    for f in 0..8 {
+        let a1 = fila_de_letra(l, 0, 0, f)
+        let a2 = fila_de_letra(l, 8, 0, f)
+        if a1 != a2 {
+            igual = false
+        }
+    }
+    prueba.afirmar(t, igual, "lo que no está en la fuente sale como ?")
+    lienzo.limpiar(l, negro)
+    lienzo.texto_escala(l, 0, 0, "I\nI", blanco, 2)
+    prueba.afirmar_igual_i32(t, lienzo.leer(l, 4, 16), lienzo.leer(l, 4, 0), "\\n baja 8·escala")
+    prueba.afirmar_igual_i32(t, lienzo.ancho_texto("hola\nmundo!", 2), 96, "ancho del texto")
+
+    prueba.seccion(t, "suma de control")
+    let d1 = lienzo.nuevo(16, 16, negro)
+    let d2 = lienzo.nuevo(16, 16, negro)
+    lienzo.circulo_lleno(d1, 8, 8, 5, lienzo.azul())
+    lienzo.circulo_lleno(d2, 8, 8, 5, lienzo.azul())
+    prueba.afirmar_igual_i64(t, lienzo.suma(d1), lienzo.suma(d2), "dos dibujos iguales")
+    lienzo.poner(d2, 0, 0, blanco)
+    prueba.afirmar(t, lienzo.suma(d1) != lienzo.suma(d2), "un píxel la cambia")
+
+    return prueba.terminar(t)
+}

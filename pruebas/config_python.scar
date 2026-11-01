@@ -1,0 +1,256 @@
+# lib/config contra configparser y tomllib de Python: lo corre pruebas/test_config_python.py.
+# Lee "casos.json" (en la carpeta donde corre) con las listas "ini", "iniget", "toml" y
+# "lineas", y escribe cada resultado en una línea "ETIQUETA k valor". Los textos van como
+# puntos de código separados por comas ("_" = texto vacío) para que no los toque ninguna
+# codificación; un árbol sale en una sola línea:
+#   O(nombre:nodo;nombre:nodo)  objeto     A(nodo;nodo)  arreglo
+#   S<texto>  texto     N<número>  número tal como lo guarda el árbol     B1 / B0  booleano
+
+use "json"
+use "config"
+
+fn cps(s: str) -> str {
+    let n = s.len()
+    if n == 0 {
+        return "_"
+    }
+    let mut r = ""
+    for i in 0..n {
+        if i > 0 {
+            r = r + ","
+        }
+        r = r + a_texto(ord(s[i]))
+    }
+    return r
+}
+
+fn sal(etiqueta: str, k: i32, valor: str) {
+    print(etiqueta + " " + a_texto(k) + " " + valor)
+}
+
+fn volcar(d: json.Doc, n: i32) -> str {
+    let t = json.doc_tipo(d, n)
+    if t == 5 or t == 4 {
+        let mut r = "A("
+        if t == 5 {
+            r = "O("
+        }
+        let mut h = json.doc_campo(d, 0, n)
+        let mut primero = true
+        while h >= 0 {
+            if primero == false {
+                r = r + ";"
+            }
+            primero = false
+            if t == 5 {
+                r = r + cps(json.doc_nombre(d, h)) + ":"
+            }
+            r = r + volcar(d, h)
+            h = json.doc_campo(d, 2, h)
+        }
+        return r + ")"
+    }
+    if t == 3 {
+        return "S" + cps(json.doc_valor(d, n))
+    }
+    if t == 2 {
+        return "N" + json.doc_valor(d, n)
+    }
+    if t == 1 {
+        if json.doc_valor(d, n) == "true" {
+            return "B1"
+        }
+        return "B0"
+    }
+    return "Z"
+}
+
+fn clase_error(e: str) -> str {
+    if texto_contiene(e, "fechas") {
+        return "F"
+    }
+    if texto_contiene(e, "demasiado grande") {
+        return "G"
+    }
+    if texto_contiene(e, "NUL") {
+        return "N"
+    }
+    return "E"
+}
+
+fn texto_contiene(s: str, sub: str) -> bool {
+    let n = s.len()
+    let m = sub.len()
+    let mut i = 0
+    while i + m <= n {
+        let mut ok = true
+        let mut j = 0
+        while j < m and ok {
+            if s[i + j] != sub[j] {
+                ok = false
+            }
+            j = j + 1
+        }
+        if ok {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn caso_ini(d: json.Doc, k: i32) {
+    let t = json.texto(d, "ini." + a_texto(k))
+    match config.leer_ini(t) {
+        Ok(doc) => {
+            sal("I", k, "OK " + volcar(doc, 0))
+            match config.escribir_ini(doc) {
+                Ok(s) => {
+                    let mut igual = "D"
+                    match config.leer_ini(s) {
+                        Ok(d2) => {
+                            igual = "S"
+                        }
+                        Err(e) => {
+                            igual = "X"
+                        }
+                    }
+                    sal("IW", k, igual + " " + cps(s))
+                }
+                Err(e) => {
+                    sal("IW", k, "ERR")
+                }
+            }
+        }
+        Err(e) => {
+            sal("I", k, "ERR " + clase_error(e))
+        }
+    }
+}
+
+fn caso_iniget(d: json.Doc, k: i32) {
+    let r = "iniget." + a_texto(k)
+    let t = json.texto(d, r + ".t")
+    let s = json.texto(d, r + ".s")
+    let c = json.texto(d, r + ".c")
+    match config.leer_ini(t) {
+        Ok(doc) => {
+            sal("GT", k, cps(config.ini_texto(doc, s, c, "pordefecto")))
+            sal("GH", k, if config.ini_tiene(doc, s, c) { "1" } else { "0" })
+            sal("GI", k, a_texto(config.ini_entero(doc, s, c, 7777)))
+            sal("GB", k, if config.ini_booleano(doc, s, c, true) { "1" } else { "0" })
+            sal("GN", k, if config.ini_booleano(doc, s, c, false) { "1" } else { "0" })
+            sal("GF", k, a_texto(config.ini_decimal(doc, s, c, 1234.5)))
+            let secs = config.ini_secciones(doc)
+            let mut lista = ""
+            let mut i = 0
+            while i < secs.len() {
+                let mut o = secs.get(i)
+                while let Some(e) = o {
+                    lista = lista + cps(e) + ";"
+                    o = None
+                }
+                i = i + 1
+            }
+            sal("GS", k, lista)
+        }
+        Err(e) => {
+            sal("GT", k, "ERR")
+        }
+    }
+}
+
+fn caso_toml(d: json.Doc, k: i32) {
+    let t = json.texto(d, "toml." + a_texto(k))
+    match config.leer_toml(t) {
+        Ok(doc) => {
+            sal("T", k, "OK " + volcar(doc, 0))
+            match config.escribir_toml(doc) {
+                Ok(s) => {
+                    let mut igual = "D"
+                    match config.leer_toml(s) {
+                        Ok(d2) => {
+                            igual = "S"
+                        }
+                        Err(e) => {
+                            igual = "X"
+                        }
+                    }
+                    sal("TW", k, igual + " " + cps(s))
+                }
+                Err(e) => {
+                    sal("TW", k, "ERR")
+                }
+            }
+        }
+        Err(e) => {
+            sal("T", k, "ERR " + clase_error(e))
+        }
+    }
+}
+
+fn caso_lineas(d: json.Doc, k: i32) {
+    let r = "lineas." + a_texto(k)
+    let t = json.texto(d, r + ".t")
+    let doc = config.leer_lineas(t)
+    sal("L", k, volcar(doc, 0))
+    match config.escribir_lineas(doc) {
+        Ok(s) => {
+            sal("LW", k, cps(s))
+        }
+        Err(e) => {
+            sal("LW", k, "ERR")
+        }
+    }
+    let clave = json.texto(d, r + ".c")
+    sal("LU", k, cps(config.ultima(doc, clave, "pordefecto")))
+    let todas = config.todas(doc, clave)
+    let mut lista = ""
+    let mut i = 0
+    while i < todas.len() {
+        let mut o = todas.get(i)
+        while let Some(e) = o {
+            lista = lista + cps(e) + ";"
+            o = None
+        }
+        i = i + 1
+    }
+    sal("LT", k, lista)
+    let resto = json.texto(d, r + ".r")
+    let mut campos = ""
+    for j in 0..4 {
+        campos = campos + cps(config.campo(resto, j)) + ";"
+    }
+    sal("LC", k, campos)
+}
+
+fn correr() -> Result<i32> {
+    let d = json.leer_archivo("casos.json")?
+    for k in 0..json.largo(d, "ini") {
+        caso_ini(d, k)
+    }
+    for k in 0..json.largo(d, "iniget") {
+        caso_iniget(d, k)
+    }
+    for k in 0..json.largo(d, "toml") {
+        caso_toml(d, k)
+    }
+    for k in 0..json.largo(d, "lineas") {
+        caso_lineas(d, k)
+    }
+    return Ok(0)
+}
+
+fn main() -> i32 {
+    let r = correr()
+    match r {
+        Ok(x) => {
+            return 0
+        }
+        Err(e) => {
+            print("ERROR " + e)
+            return 1
+        }
+    }
+    return 1
+}

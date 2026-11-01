@@ -1,0 +1,711 @@
+# lib/neuronalgames.scar: redes neuronales chicas para JUEGOS (use "neuronalgames"): bots, criaturas y
+# enemigos que aprenden, con retropropagación o por neuroevolución.
+#
+# No reemplaza a lib/autodiff, que calcula las derivadas solas para cualquier modelo (ver el
+# capítulo de IA nativa del libro). Esta
+# librería es más simple y está hecha para el bucle de un juego: capas densas con la retropropagación
+# escrita a mano. Para un juego alcanza con una capa oculta (o dos): más capas aprenden más lento,
+# se vuelven inestables y piden muchos más datos.
+#
+#   use "neuronalgames"
+#
+#   let r = neuronalgames.red(2, 7)                        # 2 entradas, semilla 7
+#   neuronalgames.capa(r, 4, neuronalgames.tanh())         # capa oculta de 4 neuronas
+#   neuronalgames.capa(r, 1, neuronalgames.sigmoide())     # una salida
+#   let d = neuronalgames.datos(2, 1)
+#   neuronalgames.ejemplo(d, [0.0, 0.0], [0.0])
+#   neuronalgames.ejemplo(d, [0.0, 1.0], [1.0])            # ... (XOR)
+#   neuronalgames.entrenar(r, d, 2000, 0.5)                # 2000 vueltas, tasa 0,5
+#   neuronalgames.entrada(r, 0, 1.0)
+#   neuronalgames.entrada(r, 1, 0.0)
+#   neuronalgames.calcular(r)
+#   print(neuronalgames.salida(r, 0))                      # cerca de 1
+#
+# Qué hay:
+# - Red: n entradas y capas densas (cada neurona mira todas las de la capa anterior) con su función
+#   de activación: lineal, relu, sigmoide o tanh. Los pesos empiezan al azar (uniformes en
+#   ±raíz(6 / (entradas + salidas)) de la capa, Glorot; los sesgos en 0) con el generador de lib/mate
+#   y la semilla de la red: la misma semilla da la misma red.
+# - Calcular: se cargan las entradas con entrada(r, i, x), se llama calcular(r) y se leen las salidas
+#   con salida(r, i). Así no hay que armar ni entregar listas en cada cuadro de un juego.
+# - Entrenar: descenso por gradiente de a un ejemplo por vez (en el orden de los datos, o mezclados
+#   si se pide), con el error cuadrático 0,5 * suma (salida - deseada)^2 y retropropagación;
+#   opcionalmente con momento. error(r, d) da el promedio de (salida - deseada)^2 sobre todos los
+#   ejemplos y todas las salidas.
+# - Neuroevolución (para criaturas o bots que aprenden sin datos): copiar, mutar (cada peso, con
+#   cierta probabilidad, se corre un poco al azar) y cruzar (cada peso sale de uno de los dos padres).
+# - Guardar y leer en texto: a_texto_red y desde_texto. Cada peso se escribe como entero por potencia
+#   de 2, así que al leerlo vuelve EXACTAMENTE el mismo número (la red leída calcula lo mismo, bit a bit).
+
+use "mate"
+
+struct Red {
+    entradas: i32
+    # por capa (la 0 son las entradas): tamaño, activación, y dónde empiezan sus pesos, sesgos y valores
+    tam: Vec<i32>
+    act: Vec<i32>
+    off_w: Vec<i32>
+    off_b: Vec<i32>
+    off_a: Vec<i32>
+    pesos: Vec<f64>
+    sesgos: Vec<f64>
+    # z (antes de la activación) y a (después) de cada neurona, y el delta del gradiente
+    z: Vec<f64>
+    a: Vec<f64>
+    delta: Vec<f64>
+    # velocidad para el momento
+    vw: Vec<f64>
+    vb: Vec<f64>
+    momento: f64
+    mezclar: bool
+    azar: mate.Azar
+}
+
+fn lineal() -> i32 {
+    return 0
+}
+
+fn relu() -> i32 {
+    return 1
+}
+
+fn sigmoide() -> i32 {
+    return 2
+}
+
+fn tanh() -> i32 {
+    return 3
+}
+
+# red(entradas, semilla) -> Red: una red sin capas todavía.
+fn red(entradas: i32, semilla: i32) -> Red {
+    let r = Red {
+        entradas: entradas, tam: vec_new(), act: vec_new(), off_w: vec_new(), off_b: vec_new(), off_a: vec_new(),
+        pesos: vec_new(), sesgos: vec_new(), z: vec_new(), a: vec_new(), delta: vec_new(), vw: vec_new(),
+        vb: vec_new(), momento: 0.0, mezclar: false, azar: mate.azar(semilla)
+    }
+    r.tam.push(entradas)
+    r.act.push(0)
+    r.off_w.push(0)
+    r.off_b.push(0)
+    r.off_a.push(0)
+    for i in 0..entradas {
+        r.z.push(0.0)
+        r.a.push(0.0)
+        r.delta.push(0.0)
+    }
+    return r
+}
+
+fn _capas(r: Red) -> i32 {
+    return r.tam.len()
+}
+
+fn _tam(r: Red, l: i32) -> i32 {
+    return r.tam.get(l).unwrap_or(0)
+}
+
+# capa(r, n, activacion): agrega una capa de n neuronas al final, con pesos al azar.
+fn capa(r: Red, n: i32, activacion: i32) {
+    let ant = _tam(r, _capas(r) - 1)
+    r.off_w.push(r.pesos.len())
+    r.off_b.push(r.sesgos.len())
+    r.off_a.push(r.a.len())
+    r.tam.push(n)
+    r.act.push(activacion)
+    let lim = sqrt(6.0 / to_f64(ant + n))
+    for k in 0..n * ant {
+        r.pesos.push(mate.azar_entre(r.azar, 0.0 - lim, lim))
+        r.vw.push(0.0)
+    }
+    for k in 0..n {
+        r.sesgos.push(0.0)
+        r.vb.push(0.0)
+        r.z.push(0.0)
+        r.a.push(0.0)
+        r.delta.push(0.0)
+    }
+}
+
+# momento(r, m): cuánto de la corrección anterior se repite en la siguiente (0 nada, 0,9 mucho).
+fn momento(r: Red, m: f64) {
+    r.momento = m
+}
+
+# mezclar(r, si): al entrenar, recorrer los ejemplos en otro orden al azar en cada vuelta.
+fn mezclar(r: Red, si: bool) {
+    r.mezclar = si
+}
+
+fn salidas(r: Red) -> i32 {
+    return _tam(r, _capas(r) - 1)
+}
+
+fn entradas(r: Red) -> i32 {
+    return r.entradas
+}
+
+# cuántos números ajustables tiene (pesos más sesgos)
+fn parametros(r: Red) -> i32 {
+    return r.pesos.len() + r.sesgos.len()
+}
+
+# El peso k (en el orden en que se guardan: capa por capa, neurona por neurona, entrada por entrada) y
+# el sesgo k, para mirarlos o cambiarlos a mano.
+fn peso(r: Red, k: i32) -> f64 {
+    return r.pesos.get(k).unwrap_or(0.0)
+}
+
+fn poner_peso(r: Red, k: i32, v: f64) {
+    r.pesos.set(k, v)
+}
+
+fn sesgo(r: Red, k: i32) -> f64 {
+    return r.sesgos.get(k).unwrap_or(0.0)
+}
+
+fn poner_sesgo(r: Red, k: i32, v: f64) {
+    r.sesgos.set(k, v)
+}
+
+fn pesos_totales(r: Red) -> i32 {
+    return r.pesos.len()
+}
+
+fn sesgos_totales(r: Red) -> i32 {
+    return r.sesgos.len()
+}
+
+# ---- calcular -----------------------------------------------------------------------------
+
+fn entrada(r: Red, i: i32, x: f64) {
+    r.a.set(i, x)
+}
+
+fn _activar(f: i32, z: f64) -> f64 {
+    if f == 1 {
+        return if z > 0.0 { z } else { 0.0 }
+    }
+    if f == 2 {
+        if z >= 0.0 {
+            return 1.0 / (1.0 + exp(0.0 - z))
+        }
+        let e = exp(z)
+        return e / (1.0 + e)
+    }
+    if f == 3 {
+        # tanh(z) = 1 - 2 / (e^(2z) + 1), escrita para que no se desborde con |z| grande
+        if z > 20.0 {
+            return 1.0
+        }
+        if z < 0.0 - 20.0 {
+            return 0.0 - 1.0
+        }
+        return 1.0 - 2.0 / (exp(2.0 * z) + 1.0)
+    }
+    return z
+}
+
+# la derivada, escrita con z y con a = f(z)
+fn _derivada(f: i32, z: f64, a: f64) -> f64 {
+    if f == 1 {
+        return if z > 0.0 { 1.0 } else { 0.0 }
+    }
+    if f == 2 {
+        return a * (1.0 - a)
+    }
+    if f == 3 {
+        return 1.0 - a * a
+    }
+    return 1.0
+}
+
+# calcular(r): pasa las entradas cargadas por todas las capas.
+fn calcular(r: Red) {
+    for l in 1.._capas(r) {
+        let n = _tam(r, l)
+        let ant = _tam(r, l - 1)
+        let ow = r.off_w.get(l).unwrap_or(0)
+        let ob = r.off_b.get(l).unwrap_or(0)
+        let oa = r.off_a.get(l).unwrap_or(0)
+        let op = r.off_a.get(l - 1).unwrap_or(0)
+        let f = r.act.get(l).unwrap_or(0)
+        for j in 0..n {
+            let mut s = r.sesgos.get(ob + j).unwrap_or(0.0)
+            for i in 0..ant {
+                s = s + r.pesos.get(ow + j * ant + i).unwrap_or(0.0) * r.a.get(op + i).unwrap_or(0.0)
+            }
+            r.z.set(oa + j, s)
+            r.a.set(oa + j, _activar(f, s))
+        }
+    }
+}
+
+fn salida(r: Red, i: i32) -> f64 {
+    let l = _capas(r) - 1
+    return r.a.get(r.off_a.get(l).unwrap_or(0) + i).unwrap_or(0.0)
+}
+
+# la salida más grande (para clasificar: qué clase eligió la red)
+fn mayor_salida(r: Red) -> i32 {
+    let mut k = 0
+    for i in 1..salidas(r) {
+        if salida(r, i) > salida(r, k) {
+            k = i
+        }
+    }
+    return k
+}
+
+# ---- datos y entrenamiento ------------------------------------------------------------------
+
+struct Datos {
+    n_ent: i32
+    n_sal: i32
+    x: Vec<f64>
+    y: Vec<f64>
+}
+
+fn datos(n_entradas: i32, n_salidas: i32) -> Datos {
+    return Datos { n_ent: n_entradas, n_sal: n_salidas, x: vec_new(), y: vec_new() }
+}
+
+# ejemplo(d, entradas, deseadas): agrega un ejemplo. Si los largos no coinciden es un panic.
+fn ejemplo(d: Datos, xs: Vec<f64>, ys: Vec<f64>) {
+    if xs.len() != d.n_ent or ys.len() != d.n_sal {
+        panic("neuronalgames.ejemplo: el ejemplo no tiene la cantidad de entradas o salidas de los datos")
+    }
+    for i in 0..xs.len() {
+        d.x.push(xs.get(i).unwrap_or(0.0))
+    }
+    for i in 0..ys.len() {
+        d.y.push(ys.get(i).unwrap_or(0.0))
+    }
+}
+
+# lo mismo de a un número por vez (sin armar listas): primero las entradas, después las salidas
+fn ejemplo_entrada(d: Datos, x: f64) {
+    d.x.push(x)
+}
+
+fn ejemplo_salida(d: Datos, y: f64) {
+    d.y.push(y)
+}
+
+fn ejemplos(d: Datos) -> i32 {
+    if d.n_ent == 0 {
+        return 0
+    }
+    return d.x.len() / d.n_ent
+}
+
+fn _cargar(r: Red, d: Datos, k: i32) {
+    for i in 0..d.n_ent {
+        r.a.set(i, d.x.get(k * d.n_ent + i).unwrap_or(0.0))
+    }
+}
+
+# Un paso de descenso por gradiente con el ejemplo k.
+fn _paso(r: Red, d: Datos, k: i32, tasa: f64) {
+    _cargar(r, d, k)
+    calcular(r)
+    let ultima = _capas(r) - 1
+    # deltas de la última capa
+    let fl = r.act.get(ultima).unwrap_or(0)
+    let oal = r.off_a.get(ultima).unwrap_or(0)
+    for j in 0.._tam(r, ultima) {
+        let a = r.a.get(oal + j).unwrap_or(0.0)
+        let z = r.z.get(oal + j).unwrap_or(0.0)
+        let y = d.y.get(k * d.n_sal + j).unwrap_or(0.0)
+        r.delta.set(oal + j, (a - y) * _derivada(fl, z, a))
+    }
+    # hacia atrás
+    let mut l = ultima - 1
+    while l >= 1 {
+        let n = _tam(r, l)
+        let sig = _tam(r, l + 1)
+        let oa = r.off_a.get(l).unwrap_or(0)
+        let os = r.off_a.get(l + 1).unwrap_or(0)
+        let ow = r.off_w.get(l + 1).unwrap_or(0)
+        let f = r.act.get(l).unwrap_or(0)
+        for i in 0..n {
+            let mut s = 0.0
+            for j in 0..sig {
+                s = s + r.pesos.get(ow + j * n + i).unwrap_or(0.0) * r.delta.get(os + j).unwrap_or(0.0)
+            }
+            r.delta.set(oa + i, s * _derivada(f, r.z.get(oa + i).unwrap_or(0.0), r.a.get(oa + i).unwrap_or(0.0)))
+        }
+        l = l - 1
+    }
+    # corregir pesos y sesgos
+    for l2 in 1.._capas(r) {
+        let n = _tam(r, l2)
+        let ant = _tam(r, l2 - 1)
+        let ow = r.off_w.get(l2).unwrap_or(0)
+        let ob = r.off_b.get(l2).unwrap_or(0)
+        let oa = r.off_a.get(l2).unwrap_or(0)
+        let op = r.off_a.get(l2 - 1).unwrap_or(0)
+        for j in 0..n {
+            let dj = r.delta.get(oa + j).unwrap_or(0.0)
+            for i in 0..ant {
+                let w = ow + j * ant + i
+                let v = r.momento * r.vw.get(w).unwrap_or(0.0) - tasa * dj * r.a.get(op + i).unwrap_or(0.0)
+                r.vw.set(w, v)
+                r.pesos.set(w, r.pesos.get(w).unwrap_or(0.0) + v)
+            }
+            let vb = r.momento * r.vb.get(ob + j).unwrap_or(0.0) - tasa * dj
+            r.vb.set(ob + j, vb)
+            r.sesgos.set(ob + j, r.sesgos.get(ob + j).unwrap_or(0.0) + vb)
+        }
+    }
+}
+
+# entrenar(r, d, vueltas, tasa) -> f64: recorre todos los ejemplos `vueltas` veces corrigiendo después
+# de cada uno, y devuelve el error al final. Si la red y los datos no tienen las mismas entradas y
+# salidas es un panic.
+fn entrenar(r: Red, d: Datos, vueltas: i32, tasa: f64) -> f64 {
+    if d.n_ent != r.entradas or d.n_sal != salidas(r) {
+        panic("neuronalgames.entrenar: los datos no tienen las entradas y salidas de la red")
+    }
+    let n = ejemplos(d)
+    let orden: Vec<i32> = vec_new()
+    for k in 0..n {
+        orden.push(k)
+    }
+    for v in 0..vueltas {
+        if r.mezclar {
+            # Fisher-Yates
+            let mut i = n - 1
+            while i > 0 {
+                let j = mate.azar_entero(r.azar, 0, i)
+                let t = orden.get(i).unwrap_or(0)
+                orden.set(i, orden.get(j).unwrap_or(0))
+                orden.set(j, t)
+                i = i - 1
+            }
+        }
+        for k in 0..n {
+            _paso(r, d, orden.get(k).unwrap_or(0), tasa)
+        }
+    }
+    return error(r, d)
+}
+
+# error(r, d) -> f64: el promedio de (salida - deseada)^2 sobre todos los ejemplos y salidas.
+fn error(r: Red, d: Datos) -> f64 {
+    let n = ejemplos(d)
+    if n == 0 {
+        return 0.0
+    }
+    let mut s = 0.0
+    for k in 0..n {
+        _cargar(r, d, k)
+        calcular(r)
+        for j in 0..d.n_sal {
+            let e = salida(r, j) - d.y.get(k * d.n_sal + j).unwrap_or(0.0)
+            s = s + e * e
+        }
+    }
+    return s / to_f64(n * d.n_sal)
+}
+
+# aciertos(r, d) -> f64: la fracción de ejemplos en que la salida más grande es la de la deseada más
+# grande (para clasificar en varias clases). Con una sola salida: si los dos quedan del mismo lado de 0,5.
+fn aciertos(r: Red, d: Datos) -> f64 {
+    let n = ejemplos(d)
+    if n == 0 {
+        return 0.0
+    }
+    let mut bien = 0
+    for k in 0..n {
+        _cargar(r, d, k)
+        calcular(r)
+        if d.n_sal == 1 {
+            let y = d.y.get(k).unwrap_or(0.0)
+            if (salida(r, 0) >= 0.5) == (y >= 0.5) {
+                bien = bien + 1
+            }
+        } else {
+            let mut ky = 0
+            for j in 1..d.n_sal {
+                if d.y.get(k * d.n_sal + j).unwrap_or(0.0) > d.y.get(k * d.n_sal + ky).unwrap_or(0.0) {
+                    ky = j
+                }
+            }
+            if mayor_salida(r) == ky {
+                bien = bien + 1
+            }
+        }
+    }
+    return to_f64(bien) / to_f64(n)
+}
+
+# ---- neuroevolución -----------------------------------------------------------------------
+
+# copiar(r, semilla) -> Red: otra red igual (mismas capas, pesos y sesgos), con su propio generador.
+# (Las listas se copian elemento por elemento acá mismo: pasarlas a otra función las entregaría.)
+fn copiar(r: Red, semilla: i32) -> Red {
+    let c = Red {
+        entradas: r.entradas, tam: vec_new(), act: vec_new(), off_w: vec_new(), off_b: vec_new(), off_a: vec_new(),
+        pesos: vec_new(), sesgos: vec_new(), z: vec_new(), a: vec_new(), delta: vec_new(), vw: vec_new(),
+        vb: vec_new(), momento: r.momento, mezclar: r.mezclar, azar: mate.azar(semilla)
+    }
+    for l in 0..r.tam.len() {
+        c.tam.push(r.tam.get(l).unwrap_or(0))
+        c.act.push(r.act.get(l).unwrap_or(0))
+        c.off_w.push(r.off_w.get(l).unwrap_or(0))
+        c.off_b.push(r.off_b.get(l).unwrap_or(0))
+        c.off_a.push(r.off_a.get(l).unwrap_or(0))
+    }
+    for k in 0..r.pesos.len() {
+        c.pesos.push(r.pesos.get(k).unwrap_or(0.0))
+        c.vw.push(r.vw.get(k).unwrap_or(0.0))
+    }
+    for k in 0..r.sesgos.len() {
+        c.sesgos.push(r.sesgos.get(k).unwrap_or(0.0))
+        c.vb.push(r.vb.get(k).unwrap_or(0.0))
+    }
+    for k in 0..r.a.len() {
+        c.z.push(r.z.get(k).unwrap_or(0.0))
+        c.a.push(r.a.get(k).unwrap_or(0.0))
+        c.delta.push(r.delta.get(k).unwrap_or(0.0))
+    }
+    return c
+}
+
+# mutar(r, probabilidad, fuerza): cada peso y cada sesgo, con esa probabilidad, se corre un número al
+# azar entre -fuerza y fuerza (usa el generador de la red).
+fn mutar(r: Red, probabilidad: f64, fuerza: f64) {
+    for k in 0..r.pesos.len() {
+        if mate.azar_uniforme(r.azar) < probabilidad {
+            r.pesos.set(k, r.pesos.get(k).unwrap_or(0.0) + mate.azar_entre(r.azar, 0.0 - fuerza, fuerza))
+        }
+    }
+    for k in 0..r.sesgos.len() {
+        if mate.azar_uniforme(r.azar) < probabilidad {
+            r.sesgos.set(k, r.sesgos.get(k).unwrap_or(0.0) + mate.azar_entre(r.azar, 0.0 - fuerza, fuerza))
+        }
+    }
+}
+
+# cruzar(a, b, semilla) -> Red: un hijo con las capas de a, y cada peso y sesgo tomado de a o de b (mitad
+# y mitad al azar, con esa semilla). Si a y b no tienen las mismas capas es un panic.
+fn cruzar(a: Red, b: Red, semilla: i32) -> Red {
+    if a.pesos.len() != b.pesos.len() or a.sesgos.len() != b.sesgos.len() or a.tam.len() != b.tam.len() {
+        panic("neuronalgames.cruzar: las dos redes no tienen la misma forma")
+    }
+    let h = copiar(a, semilla)
+    for k in 0..h.pesos.len() {
+        if mate.azar_uniforme(h.azar) < 0.5 {
+            h.pesos.set(k, b.pesos.get(k).unwrap_or(0.0))
+        }
+    }
+    for k in 0..h.sesgos.len() {
+        if mate.azar_uniforme(h.azar) < 0.5 {
+            h.sesgos.set(k, b.sesgos.get(k).unwrap_or(0.0))
+        }
+    }
+    return h
+}
+
+# ---- guardar y leer -----------------------------------------------------------------------
+
+# x = m * 2^e con m entero (exacto: solo se multiplica y divide por 2)
+fn _mantisa_exp(x0: f64) -> str {
+    if x0 == 0.0 {
+        return "0:0"
+    }
+    if x0 != x0 or x0 - x0 != 0.0 {
+        panic("neuronalgames.a_texto_red: hay un peso infinito o NaN")
+    }
+    let mut x = x0
+    let mut e = 0
+    while x != floor(x) {
+        x = x * 2.0
+        e = e - 1
+    }
+    while abs(x) >= 9007199254740992.0 {
+        x = x / 2.0
+        e = e + 1
+    }
+    return a_texto(to_i64(x)) + ":" + a_texto(e)
+}
+
+fn _de_mantisa_exp(m: i64, e: i32) -> f64 {
+    let mut x = to_f64(m)
+    let mut k = e
+    while k > 0 {
+        x = x * 2.0
+        k = k - 1
+    }
+    while k < 0 {
+        x = x * 0.5
+        k = k + 1
+    }
+    return x
+}
+
+# a_texto_red(r) -> str: la red en texto (capas, activaciones, pesos y sesgos), para guardarla en un
+# archivo y leerla después con desde_texto.
+fn a_texto_red(r: Red) -> str {
+    let mut s = "neuronalgames 1\ncapas"
+    for l in 0.._capas(r) {
+        s = s + " " + a_texto(_tam(r, l))
+    }
+    s = s + "\nactivaciones"
+    for l in 1.._capas(r) {
+        s = s + " " + a_texto(r.act.get(l).unwrap_or(0))
+    }
+    s = s + "\npesos"
+    for k in 0..r.pesos.len() {
+        s = s + " " + _mantisa_exp(r.pesos.get(k).unwrap_or(0.0))
+    }
+    s = s + "\nsesgos"
+    for k in 0..r.sesgos.len() {
+        s = s + " " + _mantisa_exp(r.sesgos.get(k).unwrap_or(0.0))
+    }
+    return s + "\n"
+}
+
+# las palabras de una línea (separadas por espacios)
+struct Lector {
+    s: str
+    i: i32
+}
+
+fn _palabra(l: Lector) -> str {
+    let n = len(l.s)
+    while l.i < n and (l.s[l.i] == " " or l.s[l.i] == "\n" or l.s[l.i] == "\r" or l.s[l.i] == "\t") {
+        l.i = l.i + 1
+    }
+    let mut p = ""
+    while l.i < n and l.s[l.i] != " " and l.s[l.i] != "\n" and l.s[l.i] != "\r" and l.s[l.i] != "\t" {
+        p = p + l.s[l.i]
+        l.i = l.i + 1
+    }
+    return p
+}
+
+# el resto de la línea actual está vacío
+fn _fin_de_linea(l: Lector) -> bool {
+    let n = len(l.s)
+    let mut j = l.i
+    while j < n and (l.s[j] == " " or l.s[j] == "\t" or l.s[j] == "\r") {
+        j = j + 1
+    }
+    return j >= n or l.s[j] == "\n"
+}
+
+fn _entero(p: str) -> Result<i64> {
+    let n = len(p)
+    if n == 0 or n > 19 {
+        return Err("neuronalgames.desde_texto: número mal escrito: '" + p + "'")
+    }
+    let mut i = 0
+    let mut neg = false
+    if p[0] == "-" {
+        neg = true
+        i = 1
+        if n == 1 {
+            return Err("neuronalgames.desde_texto: número mal escrito: '" + p + "'")
+        }
+    }
+    let mut v: i64 = 0
+    while i < n {
+        let c = ord(p[i]) - 48
+        if c < 0 or c > 9 {
+            return Err("neuronalgames.desde_texto: número mal escrito: '" + p + "'")
+        }
+        v = v * 10 + to_i64(c)
+        i = i + 1
+    }
+    if neg {
+        return Ok(0 - v)
+    }
+    return Ok(v)
+}
+
+fn _numero(p: str) -> Result<f64> {
+    let n = len(p)
+    let mut dos = 0 - 1
+    for i in 0..n {
+        if p[i] == ":" {
+            dos = i
+        }
+    }
+    if dos < 0 {
+        return Err("neuronalgames.desde_texto: número mal escrito: '" + p + "'")
+    }
+    let mut a = ""
+    let mut b = ""
+    for i in 0..n {
+        if i < dos {
+            a = a + p[i]
+        }
+        if i > dos {
+            b = b + p[i]
+        }
+    }
+    let m = _entero(a)?
+    let e = _entero(b)?
+    if e > 2000 or e < 0 - 2000 {
+        return Err("neuronalgames.desde_texto: exponente fuera de rango: '" + p + "'")
+    }
+    return Ok(_de_mantisa_exp(m, to_i32(e)))
+}
+
+fn _esperar(l: Lector, palabra: str) -> Result<i32> {
+    let p = _palabra(l)
+    if p != palabra {
+        return Err("neuronalgames.desde_texto: se esperaba '" + palabra + "' y hay '" + p + "'")
+    }
+    return Ok(0)
+}
+
+# desde_texto(s) -> Result<Red>: la red guardada con a_texto_red (semilla 1 para su generador).
+fn desde_texto(s: str) -> Result<Red> {
+    let l = Lector { s: s, i: 0 }
+    _esperar(l, "neuronalgames")?
+    _esperar(l, "1")?
+    _esperar(l, "capas")?
+    let tams: Vec<i32> = vec_new()
+    while not _fin_de_linea(l) {
+        let t = _entero(_palabra(l))?
+        if t <= 0 or t > 100000 {
+            return Err("neuronalgames.desde_texto: tamaño de capa inválido")
+        }
+        tams.push(to_i32(t))
+    }
+    if tams.len() < 2 {
+        return Err("neuronalgames.desde_texto: hacen falta las entradas y al menos una capa")
+    }
+    _esperar(l, "activaciones")?
+    let r = red(tams.get(0).unwrap_or(1), 1)
+    for k in 1..tams.len() {
+        let f = _entero(_palabra(l))?
+        if f < 0 or f > 3 {
+            return Err("neuronalgames.desde_texto: activación inválida")
+        }
+        capa(r, tams.get(k).unwrap_or(1), to_i32(f))
+    }
+    if not _fin_de_linea(l) {
+        return Err("neuronalgames.desde_texto: sobran activaciones")
+    }
+    _esperar(l, "pesos")?
+    for k in 0..r.pesos.len() {
+        let v = _numero(_palabra(l))?
+        r.pesos.set(k, v)
+    }
+    if not _fin_de_linea(l) {
+        return Err("neuronalgames.desde_texto: sobran pesos")
+    }
+    _esperar(l, "sesgos")?
+    for k in 0..r.sesgos.len() {
+        let v = _numero(_palabra(l))?
+        r.sesgos.set(k, v)
+    }
+    if not _fin_de_linea(l) {
+        return Err("neuronalgames.desde_texto: sobran sesgos")
+    }
+    return Ok(r)
+}

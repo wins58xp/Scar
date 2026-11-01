@@ -1,0 +1,58 @@
+# lib/animacion: cuadraditos que van de la izquierda a la derecha con distintas curvas, siempre 16 ms por
+# cuadro (así el resultado es el mismo en cada corrida). Cuando uno llega, todos vuelven (ida y vuelta).
+# ci-env: SCAR_SDL_MAX_FRAMES=60
+
+use "gui"
+use "lienzo"
+use "pantalla"
+use "animacion"
+
+fn curva_n(i: i32) -> i32 {
+    if i == 0 {
+        return animacion.lineal()
+    }
+    if i == 1 {
+        return animacion.entrada_cubica()
+    }
+    if i == 2 {
+        return animacion.salida_cubica()
+    }
+    if i == 3 {
+        return animacion.entrada_salida_cubica()
+    }
+    if i == 4 {
+        return animacion.suave()
+    }
+    if i == 5 {
+        return animacion.rebote()
+    }
+    return animacion.salida_retroceso()
+}
+
+fn main() -> i32 {
+    let ui = gui.ventana("Curvas de animación", 560, 420)
+    gui.oscuro(ui)
+    let nombres = "lineal, entrada, salida, entrada-salida, suave, rebote, retroceso"
+    # un solo reloj de ida y vuelta (de 0 a 1 en 800 ms) y cada cuadradito lo pasa por su curva
+    let reloj = animacion.tween(0.0, 1.0, 800, animacion.lineal())
+    animacion.ida_vuelta(reloj, true)
+    let vista = lienzo.nuevo(240, 150, lienzo.color(24, 30, 52))
+    let mut ultimo = 0
+    while gui.abierta(ui) {
+        animacion.avanzar(reloj, 16)
+        let p = animacion.valor(reloj)
+        lienzo.limpiar(vista, lienzo.color(24, 30, 52))
+        for i in 0..7 {
+            let x = to_i32(animacion.entre(0.0, 200.0, p, curva_n(i)))
+            lienzo.rect_lleno(vista, 10 + x, 8 + i * 20, 14, 14, lienzo.color(230, 90 + i * 20, 60))
+            if i == 5 {
+                ultimo = x
+            }
+        }
+        gui.titulo(ui, "Siete curvas")
+        pantalla.mostrar(ui, vista, 2)
+        gui.texto_tenue(ui, "arriba a abajo: " + nombres)
+    }
+    print("rebote en " + a_texto(ultimo))
+    return 0
+}

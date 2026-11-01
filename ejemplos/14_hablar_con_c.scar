@@ -1,0 +1,43 @@
+# Capítulo 14: llamar a funciones de C.
+#
+#   scar run ejemplos/14_hablar_con_c.scar
+#
+# Usa funciones de la librería matemática de C (libm), de la librería estándar
+# de C y de zlib (para comprimir), que vienen en casi todo sistema Linux.
+
+extern "C" fn hypot(x: f64, y: f64) -> f64 from "m"
+extern "C" fn cbrt(x: f64) -> f64 from "m"
+extern "C" fn getenv(nombre: str) -> Result<str>
+
+# un handle de zlib: gzclose se queda con él (own)
+extern type GzArchivo
+extern "C" fn gzopen(ruta: str, modo: str) -> Result<GzArchivo> from "z"
+extern "C" fn gzwrite(f: GzArchivo, datos: str, largo: i32) -> i32 from "z"
+extern "C" fn gzclose(f: own GzArchivo) -> i32 from "z"
+
+fn guardar_comprimido(ruta: str, lineas: i32) -> Result<i32> {
+    let f = gzopen(ruta, "wb")?
+    let mut escritos = 0
+    for i in 0..lineas {
+        # gzwrite cuenta bytes y len() caracteres: en un texto ASCII son lo mismo
+        let linea = "linea numero " + a_texto(i) + "\n"
+        escritos = escritos + gzwrite(f, linea, to_i32(len(linea)))
+    }
+    gzclose(f)
+    return Ok(escritos)
+}
+
+fn main() {
+    print("hipotenusa de 5 y 12:", hypot(5.0, 12.0))
+    print("raíz cúbica de 1000:", cbrt(1000.0))
+
+    match getenv("SCAR_UNA_VARIABLE_QUE_NO_EXISTE") {
+        Ok(v) => print("la variable vale", v)
+        Err(e) => print("sin la variable:", e)
+    }
+
+    match guardar_comprimido("/tmp/scar_ejemplo_14.gz", 100) {
+        Ok(n) => print("comprimidas 100 líneas,", n, "bytes sin comprimir")
+        Err(e) => print("no se pudo:", e)
+    }
+}

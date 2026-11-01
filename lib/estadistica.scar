@@ -1,0 +1,774 @@
+# lib/estadistica.scar: estadística descriptiva, correlación y regresión (use "estadistica").
+# Probada contra statistics y numpy de Python.
+#
+#   use "estadistica"
+#
+#   let s = estadistica.serie(datos)        # una Serie guarda los datos y no se gasta al usarla
+#   estadistica.media(s)                    # statistics.fmean
+#   estadistica.mediana(s)                  # statistics.median
+#   estadistica.desviacion(s)               # statistics.stdev (n - 1)
+#   estadistica.percentil(s, 90.0)          # numpy.percentile (interpolación lineal)
+#   estadistica.correlacion(x, y)           # numpy.corrcoef
+#   let r = estadistica.regresion_lineal(x, y)      # numpy.polyfit(x, y, 1)
+#   r.pendiente, r.intercepto, r.r2
+#   estadistica.movil_mediana(s, 5)         # mediana de cada ventana de 5 datos
+#
+# Los datos son f64 en una `Serie` (una lista dentro de un struct: así se puede usar
+# la misma serie en muchas funciones; una lista suelta se gasta al pasarla). Las
+# sumas son compensadas (Neumaier), así que la media y la varianza salen con el último
+# bit casi siempre igual que las exactas de Python. Con una serie vacía, las funciones
+# devuelven NaN (Python avisa con una excepción). Los NaN dentro de los datos no se
+# tratan: hay que sacarlos antes.
+
+use "colecciones"
+
+struct Serie {
+    v: Vec<f64>
+}
+
+fn _nan() -> f64 {
+    return 0.0 / 0.0
+}
+
+fn serie(datos: Vec<f64>) -> Serie {
+    return Serie { v: datos }
+}
+
+fn nueva() -> Serie {
+    let v: Vec<f64> = vec_new()
+    return Serie { v: v }
+}
+
+fn agregar(s: Serie, x: f64) {
+    s.v.push(x)
+}
+
+fn cantidad(s: Serie) -> i32 {
+    return s.v.len()
+}
+
+fn dato(s: Serie, i: i32) -> f64 {
+    return s.v.get(i).unwrap_or(_nan())
+}
+
+fn _copia(s: Serie) -> Vec<f64> {
+    let r: Vec<f64> = vec_new()
+    for i in 0..s.v.len() {
+        r.push(s.v.get(i).unwrap_or(0.0))
+    }
+    return r
+}
+
+# Los datos de menor a mayor, en una serie nueva.
+fn ordenada(s: Serie) -> Serie {
+    return Serie { v: colecciones.ordenar(_copia(s)) }
+}
+
+# ---------- sumas y medidas de centro ----------
+
+# La suma, compensada (Neumaier): el error de redondeo no se acumula.
+fn suma(s: Serie) -> f64 {
+    let mut total = 0.0
+    let mut c = 0.0
+    for i in 0..s.v.len() {
+        let x = s.v.get(i).unwrap_or(0.0)
+        let t = total + x
+        if abs(total) >= abs(x) {
+            c = c + ((total - t) + x)
+        } else {
+            c = c + ((x - t) + total)
+        }
+        total = t
+    }
+    return total + c
+}
+
+fn media(s: Serie) -> f64 {
+    if s.v.len() == 0 {
+        return _nan()
+    }
+    return suma(s) / to_f64(s.v.len())
+}
+
+fn minimo(s: Serie) -> f64 {
+    if s.v.len() == 0 {
+        return _nan()
+    }
+    let mut m = s.v.get(0).unwrap_or(0.0)
+    for i in 1..s.v.len() {
+        m = min(m, s.v.get(i).unwrap_or(m))
+    }
+    return m
+}
+
+fn maximo(s: Serie) -> f64 {
+    if s.v.len() == 0 {
+        return _nan()
+    }
+    let mut m = s.v.get(0).unwrap_or(0.0)
+    for i in 1..s.v.len() {
+        m = max(m, s.v.get(i).unwrap_or(m))
+    }
+    return m
+}
+
+fn rango(s: Serie) -> f64 {
+    return maximo(s) - minimo(s)
+}
+
+fn mediana(s: Serie) -> f64 {
+    let n = s.v.len()
+    if n == 0 {
+        return _nan()
+    }
+    let o = ordenada(s)
+    if n % 2 == 1 {
+        return o.v.get(n / 2).unwrap_or(0.0)
+    }
+    return (o.v.get(n / 2 - 1).unwrap_or(0.0) + o.v.get(n / 2).unwrap_or(0.0)) / 2.0
+}
+
+# El valor que más se repite; si hay empate, el que apareció primero (statistics.mode).
+fn moda(s: Serie) -> f64 {
+    let n = s.v.len()
+    if n == 0 {
+        return _nan()
+    }
+    let o = ordenada(s)
+    let mut mejor = 0
+    let mut i = 0
+    while i < n {
+        let x = o.v.get(i).unwrap_or(0.0)
+        let mut j = i
+        while j < n and o.v.get(j).unwrap_or(0.0) == x {
+            j = j + 1
+        }
+        mejor = max(mejor, j - i)
+        i = j
+    }
+    for k in 0..n {
+        let x = s.v.get(k).unwrap_or(0.0)
+        let mut cuenta = 0
+        let mut lo = 0
+        let mut hi = n
+        while lo < hi {
+            let medio = (lo + hi) / 2
+            if o.v.get(medio).unwrap_or(0.0) < x {
+                lo = medio + 1
+            } else {
+                hi = medio
+            }
+        }
+        let mut j = lo
+        while j < n and o.v.get(j).unwrap_or(0.0) == x {
+            cuenta = cuenta + 1
+            j = j + 1
+        }
+        if cuenta == mejor {
+            return x
+        }
+    }
+    return _nan()
+}
+
+# ---------- dispersión ----------
+
+# La suma de los (x - media)², compensada.
+fn _suma_cuadrados(s: Serie) -> f64 {
+    let m = media(s)
+    let d = nueva()
+    for i in 0..s.v.len() {
+        let x = s.v.get(i).unwrap_or(0.0) - m
+        d.v.push(x * x)
+    }
+    return suma(d)
+}
+
+# Varianza con n - 1 (statistics.variance). Con menos de 2 datos, NaN.
+fn varianza(s: Serie) -> f64 {
+    if s.v.len() < 2 {
+        return _nan()
+    }
+    return _suma_cuadrados(s) / to_f64(s.v.len() - 1)
+}
+
+# Varianza con n (statistics.pvariance).
+fn varianza_poblacion(s: Serie) -> f64 {
+    if s.v.len() == 0 {
+        return _nan()
+    }
+    return _suma_cuadrados(s) / to_f64(s.v.len())
+}
+
+fn desviacion(s: Serie) -> f64 {
+    return sqrt(varianza(s))
+}
+
+fn desviacion_poblacion(s: Serie) -> f64 {
+    return sqrt(varianza_poblacion(s))
+}
+
+# Cuánto se aleja la media de la media, relativo a ella: desviación / |media|.
+fn coeficiente_variacion(s: Serie) -> f64 {
+    return desviacion(s) / abs(media(s))
+}
+
+# Desviación mediana absoluta: la mediana de |x - mediana|.
+fn mad(s: Serie) -> f64 {
+    let m = mediana(s)
+    let d = nueva()
+    for i in 0..s.v.len() {
+        d.v.push(abs(s.v.get(i).unwrap_or(0.0) - m))
+    }
+    return mediana(d)
+}
+
+# ---------- cuantiles ----------
+
+# numpy.lerp: a + (b - a) * t, o b - (b - a) * (1 - t) si t >= 0.5.
+fn _lerp(a: f64, b: f64, t: f64) -> f64 {
+    let d = b - a
+    if t >= 0.5 {
+        return b - d * (1.0 - t)
+    }
+    return a + d * t
+}
+
+# El cuantil p (de 0 a 1) con interpolación lineal, como numpy.quantile.
+fn cuantil(s: Serie, p: f64) -> f64 {
+    let n = s.v.len()
+    if n == 0 or p != p or p < 0.0 or p > 1.0 {
+        return _nan()
+    }
+    let o = ordenada(s)
+    return cuantil_ordenado(o, p)
+}
+
+# Lo mismo, para datos que ya están ordenados (se ahorra el orden si se piden varios).
+fn cuantil_ordenado(o: Serie, p: f64) -> f64 {
+    let n = o.v.len()
+    if n == 0 or p != p or p < 0.0 or p > 1.0 {
+        return _nan()
+    }
+    let h = to_f64(n - 1) * p
+    let previo = floor(h)
+    let gamma = h - previo
+    let i = to_i32(previo)
+    let a = o.v.get(i).unwrap_or(0.0)
+    let b = o.v.get(min(i + 1, n - 1)).unwrap_or(a)
+    return _lerp(a, b, gamma)
+}
+
+# El percentil p (de 0 a 100), como numpy.percentile.
+fn percentil(s: Serie, p: f64) -> f64 {
+    return cuantil(s, p / 100.0)
+}
+
+# Rango intercuartil: percentil 75 menos percentil 25.
+fn iqr(s: Serie) -> f64 {
+    let o = ordenada(s)
+    return cuantil_ordenado(o, 0.75) - cuantil_ordenado(o, 0.25)
+}
+
+# ---------- correlación ----------
+
+# Covarianza con n - 1 (numpy.cov). x e y con el mismo largo, o NaN.
+fn covarianza(x: Serie, y: Serie) -> f64 {
+    let n = x.v.len()
+    if n != y.v.len() or n < 2 {
+        return _nan()
+    }
+    let mx = media(x)
+    let my = media(y)
+    let p = nueva()
+    for i in 0..n {
+        p.v.push((x.v.get(i).unwrap_or(0.0) - mx) * (y.v.get(i).unwrap_or(0.0) - my))
+    }
+    return suma(p) / to_f64(n - 1)
+}
+
+# Correlación de Pearson, de -1 a 1 (numpy.corrcoef). NaN si un lado no varía.
+fn correlacion(x: Serie, y: Serie) -> f64 {
+    let n = x.v.len()
+    if n != y.v.len() or n < 2 {
+        return _nan()
+    }
+    let mx = media(x)
+    let my = media(y)
+    let pxy = nueva()
+    let pxx = nueva()
+    let pyy = nueva()
+    for i in 0..n {
+        let a = x.v.get(i).unwrap_or(0.0) - mx
+        let b = y.v.get(i).unwrap_or(0.0) - my
+        pxy.v.push(a * b)
+        pxx.v.push(a * a)
+        pyy.v.push(b * b)
+    }
+    let den = sqrt(suma(pxx) * suma(pyy))
+    if den == 0.0 {
+        return _nan()
+    }
+    let r = suma(pxy) / den
+    return max(0.0 - 1.0, min(1.0, r))
+}
+
+struct Par {
+    valor: f64
+    pos: i32
+}
+
+fn _antes_par(a: Par, b: Par) -> bool {
+    return a.valor < b.valor
+}
+
+# Los rangos de los datos (1 es el menor); los empatados reciben el promedio de sus
+# rangos (scipy.stats.rankdata).
+fn rangos(s: Serie) -> Serie {
+    let n = s.v.len()
+    let pares: Vec<Par> = vec_new()
+    for i in 0..n {
+        pares.push(Par { valor: s.v.get(i).unwrap_or(0.0), pos: i })
+    }
+    let o = colecciones.ordenar_por(pares, _antes_par)
+    let r = nueva()
+    for i in 0..n {
+        r.v.push(0.0)
+    }
+    let mut i = 0
+    while i < n {
+        let mut j = i
+        let mut vi = 0.0
+        let mut o1 = o.get(i)
+        while let Some(p) = o1 {
+            vi = p.valor
+            o1 = None
+        }
+        let mut seguir = true
+        while seguir {
+            j = j + 1
+            seguir = false
+            if j < n {
+                let mut o2 = o.get(j)
+                while let Some(p) = o2 {
+                    if p.valor == vi {
+                        seguir = true
+                    }
+                    o2 = None
+                }
+            }
+        }
+        let promedio = (to_f64(i + 1) + to_f64(j)) / 2.0
+        for k in i..j {
+            let mut o3 = o.get(k)
+            while let Some(p) = o3 {
+                r.v.set(p.pos, promedio)
+                o3 = None
+            }
+        }
+        i = j
+    }
+    return r
+}
+
+# Correlación de Spearman: la de Pearson entre los rangos.
+fn correlacion_spearman(x: Serie, y: Serie) -> f64 {
+    return correlacion(rangos(x), rangos(y))
+}
+
+# ---------- regresión ----------
+
+struct Recta {
+    pendiente: f64
+    intercepto: f64
+    r2: f64
+    n: i32
+}
+
+# La recta y = pendiente·x + intercepto que mejor se ajusta (mínimos cuadrados), con su
+# r² (1 - suma de residuos² / suma total²; 1 si y no varía y la recta la acierta).
+fn regresion_lineal(x: Serie, y: Serie) -> Recta {
+    let n = x.v.len()
+    if n != y.v.len() or n < 2 {
+        return Recta { pendiente: _nan(), intercepto: _nan(), r2: _nan(), n: n }
+    }
+    let mx = media(x)
+    let my = media(y)
+    let pxy = nueva()
+    let pxx = nueva()
+    let pyy = nueva()
+    for i in 0..n {
+        let a = x.v.get(i).unwrap_or(0.0) - mx
+        let b = y.v.get(i).unwrap_or(0.0) - my
+        pxy.v.push(a * b)
+        pxx.v.push(a * a)
+        pyy.v.push(b * b)
+    }
+    let sxx = suma(pxx)
+    let sxy = suma(pxy)
+    let syy = suma(pyy)
+    if sxx == 0.0 {
+        return Recta { pendiente: _nan(), intercepto: _nan(), r2: _nan(), n: n }
+    }
+    let pendiente = sxy / sxx
+    let intercepto = my - pendiente * mx
+    let mut r2 = 1.0
+    if syy > 0.0 {
+        r2 = (sxy * sxy) / (sxx * syy)
+    }
+    return Recta { pendiente: pendiente, intercepto: intercepto, r2: r2, n: n }
+}
+
+fn predecir(r: Recta, x: f64) -> f64 {
+    return r.pendiente * x + r.intercepto
+}
+
+struct Matriz {
+    a: Vec<f64>
+    filas: i32
+    cols: i32
+}
+
+fn _m(m: Matriz, i: i32, j: i32) -> f64 {
+    return m.a.get(i * m.cols + j).unwrap_or(0.0)
+}
+
+fn _poner(m: Matriz, i: i32, j: i32, v: f64) {
+    m.a.set(i * m.cols + j, v)
+}
+
+# Mínimos cuadrados de A·c ≈ y con A de `filas` x `cols` (por filas, dentro de una
+# Serie), con reflexiones de Householder (estable aunque las columnas se parezcan).
+# Devuelve los `cols` coeficientes.
+fn minimos_cuadrados(a: Serie, filas: i32, cols: i32, y: Serie) -> Serie {
+    let r = nueva()
+    if filas < cols or cols < 1 or a.v.len() != filas * cols or y.v.len() != filas {
+        for i in 0..max(cols, 0) {
+            r.v.push(_nan())
+        }
+        return r
+    }
+    let m = Matriz { a: _copia(a), filas: filas, cols: cols }
+    let b = _copia(y)
+    for k in 0..cols {
+        let mut norma = 0.0
+        for i in k..filas {
+            norma = norma + _m(m, i, k) * _m(m, i, k)
+        }
+        norma = sqrt(norma)
+        if norma > 0.0 {
+            let akk = _m(m, k, k)
+            let mut alfa = 0.0 - norma
+            if akk < 0.0 {
+                alfa = norma
+            }
+            # v = columna k desde la fila k, con v[0] = akk - alfa
+            let v: Vec<f64> = vec_new()
+            for i in k..filas {
+                v.push(_m(m, i, k))
+            }
+            v.set(0, akk - alfa)
+            let mut vv = 0.0
+            for i in 0..v.len() {
+                vv = vv + v.get(i).unwrap_or(0.0) * v.get(i).unwrap_or(0.0)
+            }
+            if vv > 0.0 {
+                for j in k..cols {
+                    let mut d = 0.0
+                    for i in 0..v.len() {
+                        d = d + v.get(i).unwrap_or(0.0) * _m(m, k + i, j)
+                    }
+                    let f = 2.0 * d / vv
+                    for i in 0..v.len() {
+                        _poner(m, k + i, j, _m(m, k + i, j) - f * v.get(i).unwrap_or(0.0))
+                    }
+                }
+                let mut db = 0.0
+                for i in 0..v.len() {
+                    db = db + v.get(i).unwrap_or(0.0) * b.get(k + i).unwrap_or(0.0)
+                }
+                let fb = 2.0 * db / vv
+                for i in 0..v.len() {
+                    b.set(k + i, b.get(k + i).unwrap_or(0.0) - fb * v.get(i).unwrap_or(0.0))
+                }
+            }
+        }
+    }
+    # sustitución hacia atrás con la triangular R
+    for i in 0..cols {
+        r.v.push(0.0)
+    }
+    let mut k = cols - 1
+    while k >= 0 {
+        let mut t = b.get(k).unwrap_or(0.0)
+        for j in k + 1..cols {
+            t = t - _m(m, k, j) * r.v.get(j).unwrap_or(0.0)
+        }
+        let d = _m(m, k, k)
+        if d == 0.0 {
+            r.v.set(k, _nan())
+        } else {
+            r.v.set(k, t / d)
+        }
+        k = k - 1
+    }
+    return r
+}
+
+# Los coeficientes del polinomio de ese grado que mejor ajusta (x, y), del término
+# independiente al de mayor grado: c[0] + c[1]·x + c[2]·x² ... (numpy.polyfit, pero en
+# el otro orden). Por dentro centra y escala x para que sea estable.
+fn ajustar_polinomio(x: Serie, y: Serie, grado: i32) -> Serie {
+    let n = x.v.len()
+    let g = max(grado, 0)
+    let fallo = nueva()
+    for i in 0..g + 1 {
+        fallo.v.push(_nan())
+    }
+    if n != y.v.len() or n < g + 1 {
+        return fallo
+    }
+    let cx = (minimo(x) + maximo(x)) / 2.0
+    let mut sx = (maximo(x) - minimo(x)) / 2.0
+    if sx == 0.0 {
+        sx = 1.0
+    }
+    let a = nueva()
+    for i in 0..n {
+        let u = (x.v.get(i).unwrap_or(0.0) - cx) / sx
+        let mut p = 1.0
+        for j in 0..g + 1 {
+            a.v.push(p)
+            p = p * u
+        }
+    }
+    let cu = minimos_cuadrados(a, n, g + 1, y)
+    let res = _poli_en_x(cu, cx, sx, g)
+    # Pasar de u a x resta números grandes: con x ~ 1e10, el término independiente sale de
+    # restar dos números de 1e10 y pierde cifras. Pero en mínimos cuadrados con término
+    # independiente los residuos suman cero, así que c0 es el promedio de y - (c1·x + c2·x² ...):
+    # cada resta es casi exacta (y y la suma se parecen) y el promedio achica el error.
+    if g >= 1 {
+        let mut s = 0.0
+        for i in 0..n {
+            let xi = x.v.get(i).unwrap_or(0.0)
+            let mut q = 0.0
+            let mut j = g
+            while j >= 1 {
+                q = q * xi + res.v.get(j).unwrap_or(0.0)
+                j = j - 1
+            }
+            s = s + (y.v.get(i).unwrap_or(0.0) - q * xi)
+        }
+        res.v.set(0, s / to_f64(n))
+    }
+    return res
+}
+
+# Los coeficientes cu de p(u), con u = (x - cx) / sx, pasados a coeficientes en x
+# (Horner sobre polinomios).
+fn _poli_en_x(cu: Serie, cx: f64, sx: f64, g: i32) -> Serie {
+    let mut res: Vec<f64> = vec_new()
+    res.push(0.0)
+    let mut k = g
+    while k >= 0 {
+        # res = res * ((x - cx) / sx) + cu[k]
+        let nuevo: Vec<f64> = vec_new()
+        for i in 0..res.len() + 1 {
+            nuevo.push(0.0)
+        }
+        for i in 0..res.len() {
+            let c = res.get(i).unwrap_or(0.0)
+            nuevo.set(i + 1, nuevo.get(i + 1).unwrap_or(0.0) + c / sx)
+            nuevo.set(i, nuevo.get(i).unwrap_or(0.0) - c * cx / sx)
+        }
+        nuevo.set(0, nuevo.get(0).unwrap_or(0.0) + cu.v.get(k).unwrap_or(0.0))
+        res = nuevo
+        k = k - 1
+    }
+    let salida = nueva()
+    for i in 0..g + 1 {
+        salida.v.push(res.get(i).unwrap_or(0.0))
+    }
+    return salida
+}
+
+# El valor del polinomio (coeficientes del independiente al de mayor grado) en x.
+fn evaluar_polinomio(c: Serie, x: f64) -> f64 {
+    let mut r = 0.0
+    let mut k = c.v.len() - 1
+    while k >= 0 {
+        r = r * x + c.v.get(k).unwrap_or(0.0)
+        k = k - 1
+    }
+    return r
+}
+
+# ---------- histograma ----------
+
+# `cajas` + 1 bordes entre el mínimo y el máximo (numpy.linspace).
+fn bordes(s: Serie, cajas: i32) -> Serie {
+    let mut lo = minimo(s)
+    let mut hi = maximo(s)
+    if hi == lo {
+        lo = lo - 0.5
+        hi = hi + 0.5
+    }
+    let r = nueva()
+    let paso = (hi - lo) / to_f64(max(cajas, 1))
+    for i in 0..max(cajas, 1) {
+        r.v.push(lo + to_f64(i) * paso)
+    }
+    r.v.push(hi)
+    return r
+}
+
+# Cuántos datos caen en cada caja (numpy.histogram: la última incluye el máximo).
+fn histograma(s: Serie, cajas: i32) -> Vec<i32> {
+    let c = max(cajas, 1)
+    let b = bordes(s, c)
+    let lo = b.v.get(0).unwrap_or(0.0)
+    let hi = b.v.get(c).unwrap_or(1.0)
+    let norma = to_f64(c) / (hi - lo)
+    let r: Vec<i32> = vec_new()
+    for i in 0..c {
+        r.push(0)
+    }
+    for i in 0..s.v.len() {
+        let x = s.v.get(i).unwrap_or(0.0)
+        if x == x and x >= lo and x <= hi {
+            let mut k = to_i32(floor((x - lo) * norma))
+            if k >= c {
+                k = c - 1
+            }
+            if x < b.v.get(k).unwrap_or(lo) {
+                k = k - 1
+            } else {
+                if x >= b.v.get(k + 1).unwrap_or(hi) and k != c - 1 {
+                    k = k + 1
+                }
+            }
+            r.set(k, r.get(k).unwrap_or(0) + 1)
+        }
+    }
+    return r
+}
+
+# ---------- ventanas móviles ----------
+
+# Cada ventana de `ancho` datos seguidos da un valor: salen n - ancho + 1 valores.
+fn movil_media(s: Serie, ancho: i32) -> Serie {
+    let r = nueva()
+    let n = s.v.len()
+    if ancho < 1 or ancho > n {
+        return r
+    }
+    for i in 0..n - ancho + 1 {
+        let w = nueva()
+        for j in 0..ancho {
+            w.v.push(s.v.get(i + j).unwrap_or(0.0))
+        }
+        r.v.push(media(w))
+    }
+    return r
+}
+
+fn movil_desviacion(s: Serie, ancho: i32) -> Serie {
+    let r = nueva()
+    let n = s.v.len()
+    if ancho < 2 or ancho > n {
+        return r
+    }
+    for i in 0..n - ancho + 1 {
+        let w = nueva()
+        for j in 0..ancho {
+            w.v.push(s.v.get(i + j).unwrap_or(0.0))
+        }
+        r.v.push(desviacion(w))
+    }
+    return r
+}
+
+# El percentil p (0 a 100) de cada ventana. Mantiene la ventana ordenada y le saca y le
+# pone un dato por paso (n·ancho en total), en vez de ordenar de nuevo cada vez.
+fn movil_percentil(s: Serie, ancho: i32, p: f64) -> Serie {
+    let r = nueva()
+    let n = s.v.len()
+    if ancho < 1 or ancho > n or p != p or p < 0.0 or p > 100.0 {
+        return r
+    }
+    let ini = nueva()
+    for j in 0..ancho {
+        ini.v.push(s.v.get(j).unwrap_or(0.0))
+    }
+    let ven = ordenada(ini)
+    r.v.push(cuantil_ordenado(ven, p / 100.0))
+    for i in 1..n - ancho + 1 {
+        let sale = s.v.get(i - 1).unwrap_or(0.0)
+        let entra = s.v.get(i + ancho - 1).unwrap_or(0.0)
+        # posición de `sale` (búsqueda binaria) y se corre todo lo de la derecha
+        let mut lo = 0
+        let mut hi = ancho
+        while lo < hi {
+            let medio = (lo + hi) / 2
+            if ven.v.get(medio).unwrap_or(0.0) < sale {
+                lo = medio + 1
+            } else {
+                hi = medio
+            }
+        }
+        let mut k = lo
+        while k < ancho - 1 {
+            ven.v.set(k, ven.v.get(k + 1).unwrap_or(0.0))
+            k = k + 1
+        }
+        # `entra` se mete en su lugar desde el final
+        let mut q = ancho - 1
+        while q > 0 and ven.v.get(q - 1).unwrap_or(0.0) > entra {
+            ven.v.set(q, ven.v.get(q - 1).unwrap_or(0.0))
+            q = q - 1
+        }
+        ven.v.set(q, entra)
+        r.v.push(cuantil_ordenado(ven, p / 100.0))
+    }
+    return r
+}
+
+fn movil_mediana(s: Serie, ancho: i32) -> Serie {
+    return movil_percentil(s, ancho, 50.0)
+}
+
+# ---------- transformaciones ----------
+
+# (x - media) / desviación de cada dato (con n - 1, como scipy.stats.zscore(ddof=1)).
+fn zscore(s: Serie) -> Serie {
+    let m = media(s)
+    let d = desviacion(s)
+    let r = nueva()
+    for i in 0..s.v.len() {
+        r.v.push((s.v.get(i).unwrap_or(0.0) - m) / d)
+    }
+    return r
+}
+
+# La suma acumulada: el dato i es la suma de los i + 1 primeros.
+fn acumulada(s: Serie) -> Serie {
+    let r = nueva()
+    let mut t = 0.0
+    for i in 0..s.v.len() {
+        t = t + s.v.get(i).unwrap_or(0.0)
+        r.v.push(t)
+    }
+    return r
+}
+
+# Cada dato llevado al rango 0..1.
+fn normalizar(s: Serie) -> Serie {
+    let lo = minimo(s)
+    let d = maximo(s) - lo
+    let r = nueva()
+    for i in 0..s.v.len() {
+        r.v.push((s.v.get(i).unwrap_or(0.0) - lo) / d)
+    }
+    return r
+}

@@ -1,0 +1,98 @@
+# lib/motor3d contra una referencia en Python: lo corre
+# pruebas/test_motor3d_python.py. Dibuja escenas (un cubo, una esfera y un
+# modelo .obj que deja Python en la carpeta arg(0)) con varias rotaciones,
+# cámaras, modos de luz y una cámara que corta el modelo con el plano
+# cercano, y escribe los parámetros de cada una y el lienzo, píxel por píxel.
+
+use "mate"
+use "lienzo"
+use "texto"
+use "motor3d"
+
+fn hex(p: i32) -> str {
+    let d = "0123456789abcdef"
+    let mut r = ""
+    for k in 0..8 {
+        r = r + d[(p >> (28 - 4 * k)) & 15]
+    }
+    return r
+}
+
+fn volcar(l: lienzo.Lienzo) -> str {
+    let mut v: Vec<str> = vec_new()
+    for y in 0..lienzo.alto(l) {
+        for x in 0..lienzo.ancho(l) {
+            v.push(hex(lienzo.leer(l, x, y)))
+        }
+    }
+    return texto.unir(v, "")
+}
+
+fn main() -> i32 {
+    let mut dir = ""
+    match arg(0) {
+        Some(a) => { dir = a + "" }
+        None => {
+            print("falta la carpeta")
+            return 2
+        }
+    }
+    let mut obj = ""
+    match file_open(dir + "/modelo.obj", "r") {
+        Ok(f) => {
+            match f.read_all() {
+                Ok(s) => { obj = s + "" }
+                Err(e) => {}
+            }
+            f.close()
+        }
+        Err(e) => {
+            print("no hay modelo.obj:", e)
+            return 2
+        }
+    }
+    let g = mate.azar(3)
+    for k in 0..24 {
+        let tipo = k % 3                       # 0 cubo, 1 esfera, 2 .obj
+        let modo = (k / 3) % 3                 # plano, gouraud, alambre
+        let w = 48 + mate.azar_entero(g, 0, 16)
+        let h = 32 + mate.azar_entero(g, 0, 12)
+        let ang = mate.azar_entre(g, 0.0 - 3.0, 3.0)
+        let dist = if k >= 18 { 2.4 } else { mate.azar_entre(g, 3.0, 6.0) }
+        let ox = mate.azar_entre(g, 0.0 - 1.0, 1.0) * dist
+        let oy = mate.azar_entre(g, 0.2, 1.0) * dist
+        let oz = dist
+        # en las últimas, el plano cercano pasa 0,4 antes del centro: corta el modelo
+        let cerca = if k >= 18 { sqrt(ox * ox + oy * oy + oz * oz) - 0.4 } else { 0.1 }
+        let fov = mate.azar_entre(g, 0.6, 1.2)
+        let lx = mate.azar_entre(g, 0.0 - 1.0, 1.0)
+        let ly = 0.0 - 1.0
+        let lz = mate.azar_entre(g, 0.0 - 1.0, 1.0)
+        let col = lienzo.color(mate.azar_entero(g, 60, 255), mate.azar_entero(g, 60, 255), mate.azar_entero(g, 60, 255))
+        let r = motor3d.nuevo(w, h, lienzo.color(5, 5, 20))
+        let cam = motor3d.camara(mate.v3(ox, oy, oz), mate.v3(0.0, 0.0, 0.0), mate.v3(0.0, 1.0, 0.0), fov, cerca, 30.0)
+        let luz = motor3d.luz(mate.v3(lx, ly, lz), 0.15, 0.85)
+        let modelo = mate.m4_producto(mate.m4_rotacion_y(ang), mate.m4_rotacion_x(ang * 0.5))
+        if tipo == 0 {
+            motor3d.dibujar(r, motor3d.cubo(1.6), modelo, cam, luz, col, modo)
+        } else if tipo == 1 {
+            motor3d.dibujar(r, motor3d.esfera(1.0, 12, 8), modelo, cam, luz, col, modo)
+        } else {
+            match motor3d.de_obj(obj) {
+                Ok(m) => { motor3d.dibujar(r, m, modelo, cam, luz, col, modo) }
+                Err(e) => { print("ERR obj", e) }
+            }
+        }
+        print("ESC", k, tipo, modo, w, h, ang, ox, oy, oz, fov, lx, ly, lz, cerca, col, volcar(r.lienzo))
+    }
+    # el .obj con errores
+    match motor3d.de_obj("v 1 2\nf 1 2 3\n") {
+        Ok(m) => { print("OBJMAL coordenadas: se leyó") }
+        Err(e) => { print("OBJMAL coordenadas:", e) }
+    }
+    match motor3d.de_obj("v 0 0 0\nv 1 0 0\nf 1 2 9\n") {
+        Ok(m) => { print("OBJMAL índice: se leyó") }
+        Err(e) => { print("OBJMAL índice:", e) }
+    }
+    return 0
+}

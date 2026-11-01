@@ -1,0 +1,46 @@
+# Capítulo 9: tareas, regiones y canales.
+#
+#   scar run ejemplos/09_tareas.scar
+#
+# Tres tareas trabajadoras leen números de un mismo canal y suman sus
+# cuadrados; main reparte el trabajo, cierra el canal y junta los resultados.
+
+struct Resultado {
+    trabajadora: i32
+    procesados: i32
+    suma: i64
+}
+
+task trabajar(id: i32, entrada: Chan<i32>) -> Resultado {
+    let r = Resultado { trabajadora: id, procesados: 0, suma: 0 }
+    while let Some(n) = entrada.recv() {
+        r.procesados = r.procesados + 1
+        r.suma = r.suma + to_i64(n) * to_i64(n)
+    }
+    return r
+}
+
+fn main() {
+    let trabajo: Chan<i32> = chan_new(100)    # con capacidad: send espera si está lleno
+
+    let equipo: Vec<Task<Resultado, trabajar>> = vec_new()
+    for id in 1..4 {
+        equipo.push(spawn trabajar(id, trabajo))
+    }
+
+    for n in 1..1001 {
+        trabajo.send(n)
+    }
+    trabajo.close()                           # ya no llega nada más
+
+    let mut total: i64 = 0
+    let mut procesados = 0
+    while let Some(t) = equipo.pop() {
+        let r = t.join()
+        total = total + r.suma
+        procesados = procesados + r.procesados
+    }
+    # cuánto hizo cada una depende de quién llegó primero; el total, no
+    print("procesados:", procesados)
+    print("suma de los cuadrados del 1 al 1000:", total)
+}

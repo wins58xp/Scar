@@ -1,0 +1,54 @@
+# Capítulo 7: texto.
+#
+#   scar run ejemplos/07_texto.scar
+
+use "texto"
+
+fn invertir(s: str) -> str {
+    let mut r = ""
+    let mut i = len(s) - 1
+    while i >= 0 {
+        r = r + s[i]
+        i = i - 1
+    }
+    return r
+}
+
+fn es_palindromo(s: str) -> bool {
+    return s == invertir(s)
+}
+
+fn vocales(s: str) -> i32 {
+    let mut n = 0
+    for i in 0..len(s) {
+        let c = s[i]
+        if texto.contiene("aeiouáéíóú", c) {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+fn main() {
+    print(invertir("ñandú"), es_palindromo("reconocer"), es_palindromo("hola"))
+    print("vocales en 'murciélago':", vocales("murciélago"))
+
+    # leer números de un texto, saltando los que no son números
+    let partes = texto.dividir("4,8,quince,16,23,42", ",")
+    let mut suma = 0
+    for i in 0..partes.len() {
+        match partes.get(i) {
+            Some(p) => {
+                match int(p) {
+                    Ok(n) => {
+                        suma = suma + n
+                    }
+                    Err(e) => print("salto:", e)
+                }
+            }
+            None => {}
+        }
+    }
+    print("suma:", suma)
+    print("con dos decimales:", texto.decimales(to_f64(suma) / 7.0, 2))
+}

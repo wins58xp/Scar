@@ -1,0 +1,65 @@
+# Capítulo 6: Vec y Map.
+#
+#   scar run ejemplos/06_vec_y_map.scar
+
+struct Item {
+    nombre: str
+    precio: i64
+    cantidad: i32
+}
+
+fn total(carro: Vec<Item>) -> i64 {
+    let mut suma: i64 = 0
+    for i in 0..carro.len() {
+        match carro.get(i) {
+            Some(it) => {
+                suma = suma + it.precio * to_i64(it.cantidad)
+            }
+            None => {}
+        }
+    }
+    return suma
+}
+
+fn maximo(v: Vec<i32>) -> Option<i32> {
+    let mut mejor: Option<i32> = None
+    for i in 0..v.len() {
+        let x = v.get(i).unwrap_or(0)
+        if mejor.is_none() or x > mejor.unwrap_or(0) {
+            mejor = Some(x)
+        }
+    }
+    return mejor
+}
+
+fn main() {
+    # una lista de structs
+    let carro: Vec<Item> = vec_new()
+    carro.push(Item { nombre: "pan", precio: 1500, cantidad: 2 })
+    carro.push(Item { nombre: "leche", precio: 1100, cantidad: 3 })
+    print("total del carro:", total(carro))
+
+    # Option cuando puede no haber respuesta
+    print("máximo:", maximo([4, 17, 9]), "en una lista vacía:", maximo(vec_new()))
+
+    # contar con un Map
+    let mut letras: Map<str, i32> = map_new()
+    let texto = ["a", "b", "a", "c", "a", "b"]
+    for i in 0..texto.len() {
+        match texto.get(i) {
+            Some(l) => {
+                letras.set(l, letras.get(l).unwrap_or(0) + 1)
+            }
+            None => {}
+        }
+    }
+    print("letras:", letras)
+
+    # vaciar una lista con while let
+    let mut pila = [1, 2, 3]
+    let mut invertida: Vec<i32> = vec_new()
+    while let Some(x) = pila.pop() {
+        invertida.push(x)
+    }
+    print("invertida:", invertida)
+}

@@ -1,0 +1,636 @@
+# lib/zlib.scar: comprimir y descomprimir con DEFLATE (use "zlib").
+#
+#   use "zlib"
+#
+#   let datos = [104, 111, 108, 97, 104, 111, 108, 97, 104, 111, 108, 97]   # "holaholahola"
+#   let z = zlib.comprimir(datos)                # formato zlib (RFC 1950)
+#   match zlib.descomprimir(z) {
+#       Ok(v) => print(v.len())                  # 12
+#       Err(e) => print(e)
+#   }
+#
+# Escrito entero en SCAR, para que imagen lea y escriba PNG sin C:
+# - comprimir: LZ77 (ventana de 32 KB, cadenas de búsqueda con un tope) y
+#   Huffman fijo (RFC 1951, bloques de tipo 1). Da archivos que abre cualquier
+#   zlib, aunque algo más grandes que los de zlib -9, que arma un Huffman a
+#   medida en cada bloque. comprimir_guardado no comprime (bloques de tipo 0).
+# - descomprimir: inflate completo, los tres tipos de bloque (guardado,
+#   Huffman fijo y Huffman dinámico), y comprueba el Adler-32 del final.
+# - deflate/inflate hacen lo mismo sin el encabezado de zlib (DEFLATE crudo),
+#   y crc32/adler32 son las sumas de control de zlib.
+#
+# Los bytes van en un Vec<i32> con valores de 0 a 255 (como read_bytes y
+# write_bytes). Como toda fn que recibe un Vec, estas se quedan con él.
+
+# ---- sumas de control ------------------------------------------------------------
+
+# Unos bytes adentro de un struct, para prestarlos (una fn que recibe un Vec se
+# queda con él; un struct, no).
+struct Bytes {
+    v: Vec<i32>
+}
+
+fn _b(d: Bytes, i: i32) -> i32 {
+    return d.v.get(i).unwrap_or(0)
+}
+
+# CRC-32 (el de zlib, PNG y gzip) de los bytes de d desde i hasta f (sin f),
+# como entero de 32 bits (puede salir negativo). Para sacarlo de un pedazo sin
+# copiarlo (como los chunks de un PNG).
+fn crc32_parte(d: Bytes, i: i32, f: i32) -> i32 {
+    let mut tabla: Vec<i32> = vec_new(256)
+    for n in 0..256 {
+        let mut c = n
+        for k in 0..8 {
+            if c & 1 == 1 {
+                c = (0 - 306674912) ^ ((c >> 1) & 2147483647)     # 0xEDB88320
+            } else {
+                c = (c >> 1) & 2147483647
+            }
+        }
+        tabla.push(c)
+    }
+    let mut crc = 0 - 1
+    let mut k = i
+    while k < f {
+        crc = tabla.get((crc ^ _b(d, k)) & 255).unwrap_or(0) ^ ((crc >> 8) & 16777215)
+        k = k + 1
+    }
+    return crc ^ (0 - 1)
+}
+
+# CRC-32 de todos los bytes.
+fn crc32(datos: Vec<i32>) -> i32 {
+    let d = Bytes { v: datos }
+    return crc32_parte(d, 0, d.v.len())
+}
+
+fn _adler32_de(d: Bytes) -> i32 {
+    let mut a = 1
+    let mut b = 0
+    for k in 0..d.v.len() {
+        a = (a + _b(d, k)) % 65521
+        b = (b + a) % 65521
+    }
+    return (b << 16) | a
+}
+
+# Adler-32 (el del final de un flujo zlib).
+fn adler32(datos: Vec<i32>) -> i32 {
+    return _adler32_de(Bytes { v: datos })
+}
+
+# ---- escribir bits -----------------------------------------------------------------
+
+struct Escritor {
+    v: Vec<i32>
+    acum: i32
+    nbits: i32
+}
+
+fn _escritor() -> Escritor {
+    return Escritor { v: vec_new(), acum: 0, nbits: 0 }
+}
+
+# n bits de valor, del menos significativo al más (como pide DEFLATE).
+fn _bits(e: Escritor, valor: i32, n: i32) {
+    e.acum = e.acum | (valor << e.nbits)
+    e.nbits = e.nbits + n
+    while e.nbits >= 8 {
+        e.v.push(e.acum & 255)
+        e.acum = (e.acum >> 8) & 16777215
+        e.nbits = e.nbits - 8
+    }
+}
+
+# Un código de Huffman de n bits: va del más significativo al menos.
+fn _codigo(e: Escritor, codigo: i32, n: i32) {
+    let mut r = 0
+    for k in 0..n {
+        r = (r << 1) | ((codigo >> k) & 1)
+    }
+    _bits(e, r, n)
+}
+
+fn _alinear(e: Escritor) {
+    if e.nbits > 0 {
+        e.v.push(e.acum & 255)
+        e.acum = 0
+        e.nbits = 0
+    }
+}
+
+# ---- deflate ------------------------------------------------------------------------
+
+# Longitudes 3..258: el código (257..285) y sus bits extra, de la tabla de RFC 1951.
+fn _base_largo() -> Vec<i32> {
+    return [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
+            131, 163, 195, 227, 258]
+}
+
+fn _extra_largo() -> Vec<i32> {
+    return [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+}
+
+fn _base_dist() -> Vec<i32> {
+    return [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+            2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+}
+
+fn _extra_dist() -> Vec<i32> {
+    return [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+}
+
+struct Tablas {
+    base_largo: Vec<i32>
+    extra_largo: Vec<i32>
+    base_dist: Vec<i32>
+    extra_dist: Vec<i32>
+}
+
+fn _tablas() -> Tablas {
+    return Tablas { base_largo: _base_largo(), extra_largo: _extra_largo(), base_dist: _base_dist(),
+                    extra_dist: _extra_dist() }
+}
+
+# Un símbolo de literal/largo (0..287) con el Huffman fijo.
+fn _fijo(e: Escritor, s: i32) {
+    if s < 144 {
+        _codigo(e, 48 + s, 8)
+    } else if s < 256 {
+        _codigo(e, 400 + s - 144, 9)
+    } else if s < 280 {
+        _codigo(e, s - 256, 7)
+    } else {
+        _codigo(e, 192 + s - 280, 8)
+    }
+}
+
+fn _par(e: Escritor, t: Tablas, largo: i32, dist: i32) {
+    let mut k = 28
+    while t.base_largo.get(k).unwrap_or(0) > largo {
+        k = k - 1
+    }
+    _fijo(e, 257 + k)
+    let el = t.extra_largo.get(k).unwrap_or(0)
+    if el > 0 {
+        _bits(e, largo - t.base_largo.get(k).unwrap_or(0), el)
+    }
+    let mut j = 29
+    while t.base_dist.get(j).unwrap_or(0) > dist {
+        j = j - 1
+    }
+    _codigo(e, j, 5)
+    let ed = t.extra_dist.get(j).unwrap_or(0)
+    if ed > 0 {
+        _bits(e, dist - t.base_dist.get(j).unwrap_or(0), ed)
+    }
+}
+
+# DEFLATE crudo con LZ77 y Huffman fijo, en un solo bloque.
+fn deflate(datos: Vec<i32>) -> Vec<i32> {
+    let d = Bytes { v: datos }
+    let n = d.v.len()
+    let e = _escritor()
+    let t = _tablas()
+    _bits(e, 1, 1)          # último bloque
+    _bits(e, 1, 2)          # Huffman fijo
+    # cabeza[h]: la última posición con ese hash de 3 bytes; previa[i % 32768]:
+    # la anterior con el mismo hash (la cadena por la que se busca)
+    # con pocos datos, tablas chicas (armarlas cuesta más que comprimir)
+    let mascara = if n > 16384 { 32767 } else { 1023 }
+    let mut cabeza: Vec<i32> = vec_new(mascara + 1)
+    for k in 0..mascara + 1 {
+        cabeza.push(0 - 1)
+    }
+    let tam_previa = min(n, 32768) + 1
+    let mut previa: Vec<i32> = vec_new(tam_previa)
+    for k in 0..tam_previa {
+        previa.push(0 - 1)
+    }
+    let mut i = 0
+    while i < n {
+        let mut mejor = 0
+        let mut mejor_dist = 0
+        if i + 2 < n {
+            let h = ((_b(d, i) << 7) ^ (_b(d, i + 1) << 4) ^ _b(d, i + 2)) & mascara
+            let mut cand = cabeza.get(h).unwrap_or(0 - 1)
+            let mut vueltas = 0
+            let tope = min(258, n - i)
+            while cand >= 0 and i - cand <= 32768 and vueltas < 48 and mejor < tope {
+                if _b(d, cand + mejor) == _b(d, i + mejor) {
+                    let mut m = 0
+                    while m < tope and _b(d, cand + m) == _b(d, i + m) {
+                        m = m + 1
+                    }
+                    if m > mejor {
+                        mejor = m
+                        mejor_dist = i - cand
+                    }
+                }
+                let sig = previa.get(cand % 32768).unwrap_or(0 - 1)
+                cand = if sig < cand { sig } else { 0 - 1 }
+                vueltas = vueltas + 1
+            }
+            previa.set(i % 32768, cabeza.get(h).unwrap_or(0 - 1))
+            cabeza.set(h, i)
+        }
+        if mejor >= 3 {
+            _par(e, t, mejor, mejor_dist)
+            # registrar en la cadena las posiciones que se saltan
+            let mut k = i + 1
+            while k < i + mejor and k + 2 < n {
+                let h2 = ((_b(d, k) << 7) ^ (_b(d, k + 1) << 4) ^ _b(d, k + 2)) & mascara
+                previa.set(k % 32768, cabeza.get(h2).unwrap_or(0 - 1))
+                cabeza.set(h2, k)
+                k = k + 1
+            }
+            i = i + mejor
+        } else {
+            _fijo(e, _b(d, i))
+            i = i + 1
+        }
+    }
+    _fijo(e, 256)           # fin de bloque
+    _alinear(e)
+    return e.v
+}
+
+# DEFLATE crudo sin comprimir: bloques guardados de hasta 65535 bytes.
+fn deflate_guardado(datos: Vec<i32>) -> Vec<i32> {
+    let d = Bytes { v: datos }
+    let n = d.v.len()
+    let mut v: Vec<i32> = vec_new(n + 5 * (n / 65535 + 1))
+    let mut i = 0
+    let mut primero = true
+    while primero or i < n {
+        primero = false
+        let largo = min(65535, n - i)
+        v.push(if i + largo >= n { 1 } else { 0 })     # último bloque, tipo 0
+        v.push(largo & 255)
+        v.push((largo >> 8) & 255)
+        v.push((largo ^ 65535) & 255)
+        v.push(((largo ^ 65535) >> 8) & 255)
+        for k in 0..largo {
+            v.push(_b(d, i + k))
+        }
+        i = i + largo
+    }
+    return v
+}
+
+fn _zlib(cuerpo: Vec<i32>, adler: i32) -> Vec<i32> {
+    let c = Bytes { v: cuerpo }
+    let mut v: Vec<i32> = vec_new(c.v.len() + 6)
+    v.push(120)             # CMF: deflate, ventana de 32 KB
+    v.push(156)             # FLG (120·256 + 156 es múltiplo de 31)
+    for k in 0..c.v.len() {
+        v.push(_b(c, k))
+    }
+    v.push((adler >> 24) & 255)
+    v.push((adler >> 16) & 255)
+    v.push((adler >> 8) & 255)
+    v.push(adler & 255)
+    return v
+}
+
+# Comprime en formato zlib (encabezado, DEFLATE y Adler-32).
+fn comprimir(datos: Vec<i32>) -> Vec<i32> {
+    let d = Bytes { v: datos }
+    let adler = _adler32_de(d)
+    let mut copia: Vec<i32> = vec_new(d.v.len())
+    for k in 0..d.v.len() {
+        copia.push(_b(d, k))
+    }
+    return _zlib(deflate(copia), adler)
+}
+
+# Formato zlib sin comprimir (bloques guardados).
+fn comprimir_guardado(datos: Vec<i32>) -> Vec<i32> {
+    let d = Bytes { v: datos }
+    let adler = _adler32_de(d)
+    let mut copia: Vec<i32> = vec_new(d.v.len())
+    for k in 0..d.v.len() {
+        copia.push(_b(d, k))
+    }
+    return _zlib(deflate_guardado(copia), adler)
+}
+
+# ---- inflate --------------------------------------------------------------------------
+
+struct Lector {
+    d: Vec<i32>
+    pos: i32
+    acum: i32
+    nbits: i32
+    error: str
+}
+
+fn _bit(l: Lector) -> i32 {
+    if l.nbits == 0 {
+        if l.pos >= l.d.len() {
+            if len(l.error) == 0 {
+                l.error = "zlib: los datos se terminan antes de tiempo"
+            }
+            return 0
+        }
+        l.acum = l.d.get(l.pos).unwrap_or(0)
+        l.pos = l.pos + 1
+        l.nbits = 8
+    }
+    let b = l.acum & 1
+    l.acum = l.acum >> 1
+    l.nbits = l.nbits - 1
+    return b
+}
+
+fn _leer_bits(l: Lector, n: i32) -> i32 {
+    let mut v = 0
+    for k in 0..n {
+        v = v | (_bit(l) << k)
+    }
+    return v
+}
+
+# Un Huffman canónico como en puff.c de Mark Adler: cuántos códigos hay de cada
+# largo y los símbolos ordenados por código.
+struct Huff {
+    cuenta: Vec<i32>
+    simbolo: Vec<i32>
+}
+
+# Arma el Huffman de los largos de código largos[desde .. desde+n]. Devuelve
+# false si los largos piden más códigos de los que caben.
+fn _armar(h: Huff, largos: Vec<i32>, n: i32) -> bool {
+    let lg = Bytes { v: largos }
+    while h.cuenta.len() > 0 {
+        h.cuenta.pop()
+    }
+    while h.simbolo.len() > 0 {
+        h.simbolo.pop()
+    }
+    for k in 0..16 {
+        h.cuenta.push(0)
+    }
+    for s in 0..n {
+        let k = _b(lg, s)
+        h.cuenta.set(k, h.cuenta.get(k).unwrap_or(0) + 1)
+    }
+    let mut quedan = 1
+    for k in 1..16 {
+        quedan = quedan * 2 - h.cuenta.get(k).unwrap_or(0)
+        if quedan < 0 {
+            return false
+        }
+    }
+    let mut desde: Vec<i32> = vec_new(16)
+    desde.push(0)
+    desde.push(0)
+    for k in 1..15 {
+        desde.push(desde.get(k).unwrap_or(0) + h.cuenta.get(k).unwrap_or(0))
+    }
+    for s in 0..n {
+        h.simbolo.push(0)
+    }
+    for s in 0..n {
+        let k = _b(lg, s)
+        if k != 0 {
+            let p = desde.get(k).unwrap_or(0)
+            h.simbolo.set(p, s)
+            desde.set(k, p + 1)
+        }
+    }
+    return true
+}
+
+fn _huff() -> Huff {
+    return Huff { cuenta: vec_new(), simbolo: vec_new() }
+}
+
+fn _decodificar(l: Lector, h: Huff) -> i32 {
+    let mut codigo = 0
+    let mut primero = 0
+    let mut indice = 0
+    for largo in 1..16 {
+        codigo = codigo | _bit(l)
+        let cuenta = h.cuenta.get(largo).unwrap_or(0)
+        if codigo - cuenta < primero {
+            return h.simbolo.get(indice + (codigo - primero)).unwrap_or(0)
+        }
+        indice = indice + cuenta
+        primero = (primero + cuenta) << 1
+        codigo = codigo << 1
+    }
+    if len(l.error) == 0 {
+        l.error = "zlib: código de Huffman inválido"
+    }
+    return 0 - 1
+}
+
+struct Salida {
+    v: Vec<i32>
+}
+
+fn _bloque_huffman(l: Lector, s: Salida, lit: Huff, dist: Huff, t: Tablas) -> bool {
+    while true {
+        let sim = _decodificar(l, lit)
+        if len(l.error) > 0 {
+            return false
+        }
+        if sim < 256 {
+            s.v.push(sim)
+        } else if sim == 256 {
+            return true
+        } else {
+            let k = sim - 257
+            if k >= 29 {
+                l.error = "zlib: largo inválido (" + a_texto(sim) + ")"
+                return false
+            }
+            let largo = t.base_largo.get(k).unwrap_or(0) + _leer_bits(l, t.extra_largo.get(k).unwrap_or(0))
+            let ds = _decodificar(l, dist)
+            if ds < 0 or ds >= 30 {
+                if len(l.error) == 0 {
+                    l.error = "zlib: distancia inválida"
+                }
+                return false
+            }
+            let d = t.base_dist.get(ds).unwrap_or(0) + _leer_bits(l, t.extra_dist.get(ds).unwrap_or(0))
+            let n = s.v.len()
+            if d > n {
+                l.error = "zlib: una distancia apunta antes del principio"
+                return false
+            }
+            for k2 in 0..largo {
+                s.v.push(s.v.get(n - d + k2).unwrap_or(0))
+            }
+        }
+    }
+    return false
+}
+
+fn _bloque_dinamico(l: Lector, s: Salida, t: Tablas) -> bool {
+    let nlit = _leer_bits(l, 5) + 257
+    let ndist = _leer_bits(l, 5) + 1
+    let ncod = _leer_bits(l, 4) + 4
+    if nlit > 286 or ndist > 30 {
+        l.error = "zlib: bloque dinámico con demasiados códigos"
+        return false
+    }
+    let orden = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+    let mut largos_cod: Vec<i32> = vec_new(19)
+    for k in 0..19 {
+        largos_cod.push(0)
+    }
+    for k in 0..ncod {
+        largos_cod.set(orden.get(k).unwrap_or(0), _leer_bits(l, 3))
+    }
+    let hc = _huff()
+    if not _armar(hc, largos_cod, 19) {
+        l.error = "zlib: código de largos inválido"
+        return false
+    }
+    let mut largos: Vec<i32> = vec_new(nlit + ndist)
+    while largos.len() < nlit + ndist {
+        let sim = _decodificar(l, hc)
+        if len(l.error) > 0 {
+            return false
+        }
+        if sim < 16 {
+            largos.push(sim)
+        } else {
+            let mut repetir = 0
+            let mut valor = 0
+            if sim == 16 {
+                if largos.len() == 0 {
+                    l.error = "zlib: repetición sin largo anterior"
+                    return false
+                }
+                valor = largos.get(largos.len() - 1).unwrap_or(0)
+                repetir = 3 + _leer_bits(l, 2)
+            } else if sim == 17 {
+                repetir = 3 + _leer_bits(l, 3)
+            } else {
+                repetir = 11 + _leer_bits(l, 7)
+            }
+            if largos.len() + repetir > nlit + ndist {
+                l.error = "zlib: demasiados largos"
+                return false
+            }
+            for k in 0..repetir {
+                largos.push(valor)
+            }
+        }
+    }
+    let mut ll: Vec<i32> = vec_new(nlit)
+    let mut ld: Vec<i32> = vec_new(ndist)
+    for k in 0..nlit {
+        ll.push(largos.get(k).unwrap_or(0))
+    }
+    for k in 0..ndist {
+        ld.push(largos.get(nlit + k).unwrap_or(0))
+    }
+    if ll.get(256).unwrap_or(0) == 0 {
+        l.error = "zlib: el bloque no tiene código de fin"
+        return false
+    }
+    let lit = _huff()
+    let dist = _huff()
+    if not _armar(lit, ll, nlit) or not _armar(dist, ld, ndist) {
+        l.error = "zlib: códigos de Huffman inválidos"
+        return false
+    }
+    return _bloque_huffman(l, s, lit, dist, t)
+}
+
+fn _inflate(l: Lector) -> Result<Vec<i32>> {
+    let s = Salida { v: vec_new() }
+    let t = _tablas()
+    let lit_fijo = _huff()
+    let dist_fijo = _huff()
+    let mut fijo_listo = false
+    let mut ultimo = 0
+    while ultimo == 0 {
+        ultimo = _bit(l)
+        let tipo = _leer_bits(l, 2)
+        if len(l.error) > 0 {
+            return Err(l.error)
+        }
+        if tipo == 0 {
+            l.nbits = 0                     # al próximo byte
+            if l.pos + 4 > l.d.len() {
+                return Err("zlib: bloque guardado cortado")
+            }
+            let largo = l.d.get(l.pos).unwrap_or(0) | (l.d.get(l.pos + 1).unwrap_or(0) << 8)
+            let nlargo = l.d.get(l.pos + 2).unwrap_or(0) | (l.d.get(l.pos + 3).unwrap_or(0) << 8)
+            if largo != (nlargo ^ 65535) {
+                return Err("zlib: bloque guardado con el largo mal")
+            }
+            l.pos = l.pos + 4
+            if l.pos + largo > l.d.len() {
+                return Err("zlib: bloque guardado cortado")
+            }
+            for k in 0..largo {
+                s.v.push(l.d.get(l.pos + k).unwrap_or(0))
+            }
+            l.pos = l.pos + largo
+        } else if tipo == 1 {
+            if not fijo_listo {
+                let mut ll: Vec<i32> = vec_new(288)
+                for k in 0..288 {
+                    ll.push(if k < 144 { 8 } else if k < 256 { 9 } else if k < 280 { 7 } else { 8 })
+                }
+                let mut ld: Vec<i32> = vec_new(30)
+                for k in 0..30 {
+                    ld.push(5)
+                }
+                _armar(lit_fijo, ll, 288)
+                _armar(dist_fijo, ld, 30)
+                fijo_listo = true
+            }
+            if not _bloque_huffman(l, s, lit_fijo, dist_fijo, t) {
+                return Err(l.error)
+            }
+        } else if tipo == 2 {
+            if not _bloque_dinamico(l, s, t) {
+                return Err(l.error)
+            }
+        } else {
+            return Err("zlib: tipo de bloque inválido (3)")
+        }
+    }
+    return Ok(s.v)
+}
+
+# Descomprime DEFLATE crudo (sin el encabezado de zlib).
+fn inflate(datos: Vec<i32>) -> Result<Vec<i32>> {
+    return _inflate(Lector { d: datos, pos: 0, acum: 0, nbits: 0, error: "" })
+}
+
+# Descomprime el formato zlib: comprueba el encabezado y el Adler-32.
+fn descomprimir(datos: Vec<i32>) -> Result<Vec<i32>> {
+    let n = datos.len()
+    if n < 6 {
+        return Err("zlib: datos demasiado cortos")
+    }
+    let cmf = datos.get(0).unwrap_or(0)
+    let flg = datos.get(1).unwrap_or(0)
+    if cmf & 15 != 8 or (cmf >> 4) > 7 {
+        return Err("zlib: no es DEFLATE (CMF " + a_texto(cmf) + ")")
+    }
+    if (cmf * 256 + flg) % 31 != 0 {
+        return Err("zlib: encabezado dañado")
+    }
+    if flg & 32 != 0 {
+        return Err("zlib: usa un diccionario prearmado (no se puede sin él)")
+    }
+    let fin = (datos.get(n - 4).unwrap_or(0) << 24) | (datos.get(n - 3).unwrap_or(0) << 16)
+        | (datos.get(n - 2).unwrap_or(0) << 8) | datos.get(n - 1).unwrap_or(0)
+    let l = Lector { d: datos, pos: 2, acum: 0, nbits: 0, error: "" }
+    let v = _inflate(l)?
+    let r = Bytes { v: v }
+    if _adler32_de(r) != fin {
+        return Err("zlib: el Adler-32 no coincide (datos dañados)")
+    }
+    return Ok(r.v)
+}

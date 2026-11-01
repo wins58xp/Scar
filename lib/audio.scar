@@ -1,0 +1,366 @@
+# lib/audio.scar: generar, mezclar y guardar sonido (use "audio").
+#
+#   use "audio"
+#
+#   let la = audio.seno(440.0, 0.5, 1.0, 44100)          # La 440 Hz, medio volumen, 1 s
+#   audio.adsr(la, 0.01, 0.1, 0.7, 0.2)                    # que no empiece ni termine de golpe
+#   let acorde = audio.mezclar(la, audio.seno(554.37, 0.4, 1.0, 44100))
+#   audio.guardar_wav(acorde, "/tmp/acorde.wav")?
+#
+# Un Sonido son muestras f64 entre -1 y 1, con sus canales intercalados (en
+# estéreo: izquierda, derecha, izquierda, derecha...) y su tasa de muestreo.
+# Todo se calcula en SCAR. Se guarda como WAV, o suena en vivo con
+# parlante.sonar(s) (lib/parlante.scar).
+#
+# Las formas de onda, con t = i / tasa y fase = la parte fraccionaria de f·t:
+#   seno: a·sin(2π·f·t)   cuadrada: a si fase < 0,5, si no -a
+#   sierra: a·(2·fase - 1)   triangulo: a·(1 - 4·|fase - 0,5|)
+#   ruido: uniforme en [-a, a] con el xorshift32 de mate (con semilla).
+# WAV: PCM de 16 bits, mono o estéreo. Una muestra x se guarda como
+# round(x·32767), recortada a ±32767, y se lee como v / 32767.
+
+use "mate"
+
+struct Sonido {
+    canales: i32
+    tasa: i32
+    datos: Vec<f64>
+}
+
+# Silencio: `duracion` segundos con `canales` canales.
+fn silencio(canales: i32, tasa: i32, duracion: f64) -> Sonido {
+    let n = to_i32(floor(duracion * to_f64(tasa) + 0.5)) * canales
+    let s = Sonido { canales: canales, tasa: tasa, datos: vec_new(n) }
+    for i in 0..n {
+        s.datos.push(0.0)
+    }
+    return s
+}
+
+# Cuántas muestras tiene cada canal.
+fn largo(s: Sonido) -> i32 {
+    return s.datos.len() / s.canales
+}
+
+fn duracion(s: Sonido) -> f64 {
+    return to_f64(largo(s)) / to_f64(s.tasa)
+}
+
+# La muestra i del canal c.
+fn muestra(s: Sonido, i: i32, c: i32) -> f64 {
+    return s.datos.get(i * s.canales + c).unwrap_or(0.0)
+}
+
+fn poner(s: Sonido, i: i32, c: i32, v: f64) {
+    s.datos.set(i * s.canales + c, v)
+}
+
+# ---- ondas ---------------------------------------------------------------------------
+
+fn _fase(f: f64, i: i32, tasa: i32) -> f64 {
+    let x = f * to_f64(i) / to_f64(tasa)
+    return x - floor(x)
+}
+
+# tipo: 0 seno, 1 cuadrada, 2 sierra, 3 triángulo.
+fn _onda(tipo: i32, f: f64, a: f64, dur: f64, tasa: i32) -> Sonido {
+    let s = silencio(1, tasa, dur)
+    for i in 0..largo(s) {
+        let v = if tipo == 0 {
+            a * sin(2.0 * mate.pi() * f * to_f64(i) / to_f64(tasa))
+        } else if tipo == 1 {
+            if _fase(f, i, tasa) < 0.5 { a } else { 0.0 - a }
+        } else if tipo == 2 {
+            a * (2.0 * _fase(f, i, tasa) - 1.0)
+        } else {
+            a * (1.0 - 4.0 * abs(_fase(f, i, tasa) - 0.5))
+        }
+        s.datos.set(i, v)
+    }
+    return s
+}
+
+# Una onda de frecuencia f (Hz), amplitud a (0 a 1) y `dur` segundos, mono.
+fn seno(f: f64, a: f64, dur: f64, tasa: i32) -> Sonido {
+    return _onda(0, f, a, dur, tasa)
+}
+
+fn cuadrada(f: f64, a: f64, dur: f64, tasa: i32) -> Sonido {
+    return _onda(1, f, a, dur, tasa)
+}
+
+fn sierra(f: f64, a: f64, dur: f64, tasa: i32) -> Sonido {
+    return _onda(2, f, a, dur, tasa)
+}
+
+fn triangulo(f: f64, a: f64, dur: f64, tasa: i32) -> Sonido {
+    return _onda(3, f, a, dur, tasa)
+}
+
+# Ruido blanco de amplitud a; la misma semilla da el mismo ruido.
+fn ruido(a: f64, dur: f64, tasa: i32, semilla: i32) -> Sonido {
+    let s = silencio(1, tasa, dur)
+    let g = mate.azar(semilla)
+    for i in 0..largo(s) {
+        s.datos.set(i, mate.azar_entre(g, 0.0 - a, a))
+    }
+    return s
+}
+
+# ---- envolvente y mezcla -------------------------------------------------------------
+
+# La envolvente ADSR en el momento t de un sonido de `dur` segundos: sube de 0
+# a 1 en `ataque`, baja a `sostenido` en `decaimiento`, se queda ahí y baja a 0
+# en los últimos `liberacion` segundos (si el sonido es más corto que todo eso,
+# la liberación arranca desde donde esté).
+fn envolvente(t: f64, dur: f64, ataque: f64, decaimiento: f64, sostenido: f64, liberacion: f64) -> f64 {
+    let suelta = dur - liberacion
+    if liberacion > 0.0 and t >= suelta {
+        return _ads(max(suelta, 0.0), ataque, decaimiento, sostenido) * max(0.0, (dur - t) / liberacion)
+    }
+    return _ads(t, ataque, decaimiento, sostenido)
+}
+
+# Ataque, decaimiento y sostenido (sin la liberación).
+fn _ads(t: f64, ataque: f64, decaimiento: f64, sostenido: f64) -> f64 {
+    if t < ataque {
+        return t / ataque
+    }
+    if t < ataque + decaimiento {
+        return 1.0 - (1.0 - sostenido) * (t - ataque) / decaimiento
+    }
+    return sostenido
+}
+
+# Le aplica la envolvente ADSR a s (en el lugar, a todos los canales).
+fn adsr(s: Sonido, ataque: f64, decaimiento: f64, sostenido: f64, liberacion: f64) {
+    let n = largo(s)
+    let dur = duracion(s)
+    for i in 0..n {
+        let e = envolvente(to_f64(i) / to_f64(s.tasa), dur, ataque, decaimiento, sostenido, liberacion)
+        for c in 0..s.canales {
+            poner(s, i, c, muestra(s, i, c) * e)
+        }
+    }
+}
+
+# Multiplica todo por k (en el lugar).
+fn ganancia(s: Sonido, k: f64) {
+    for i in 0..s.datos.len() {
+        s.datos.set(i, s.datos.get(i).unwrap_or(0.0) * k)
+    }
+}
+
+# La suma de a y b, recortada a [-1, 1]; dura lo que el más largo. Tienen que
+# tener los mismos canales y la misma tasa.
+fn mezclar(a: Sonido, b: Sonido) -> Sonido {
+    if a.canales != b.canales or a.tasa != b.tasa {
+        panic("audio.mezclar: los dos sonidos tienen que tener los mismos canales y la misma tasa")
+    }
+    let n = max(a.datos.len(), b.datos.len())
+    let s = Sonido { canales: a.canales, tasa: a.tasa, datos: vec_new(n) }
+    for i in 0..n {
+        let v = a.datos.get(i).unwrap_or(0.0) + b.datos.get(i).unwrap_or(0.0)
+        s.datos.push(mate.recortar(v, 0.0 - 1.0, 1.0))
+    }
+    return s
+}
+
+# a y después b.
+fn concatenar(a: Sonido, b: Sonido) -> Sonido {
+    if a.canales != b.canales or a.tasa != b.tasa {
+        panic("audio.concatenar: los dos sonidos tienen que tener los mismos canales y la misma tasa")
+    }
+    let s = Sonido { canales: a.canales, tasa: a.tasa, datos: vec_new(a.datos.len() + b.datos.len()) }
+    for i in 0..a.datos.len() {
+        s.datos.push(a.datos.get(i).unwrap_or(0.0))
+    }
+    for i in 0..b.datos.len() {
+        s.datos.push(b.datos.get(i).unwrap_or(0.0))
+    }
+    return s
+}
+
+# Un sonido estéreo con izq en el canal izquierdo y der en el derecho (dos
+# sonidos mono de la misma tasa; dura lo que el más largo).
+fn estereo(izq: Sonido, der: Sonido) -> Sonido {
+    if izq.canales != 1 or der.canales != 1 or izq.tasa != der.tasa {
+        panic("audio.estereo: hacen falta dos sonidos mono de la misma tasa")
+    }
+    let n = max(izq.datos.len(), der.datos.len())
+    let s = Sonido { canales: 2, tasa: izq.tasa, datos: vec_new(2 * n) }
+    for i in 0..n {
+        s.datos.push(izq.datos.get(i).unwrap_or(0.0))
+        s.datos.push(der.datos.get(i).unwrap_or(0.0))
+    }
+    return s
+}
+
+# ---- WAV ---------------------------------------------------------------------------
+
+struct Bytes {
+    v: Vec<i32>
+}
+
+fn _le16(b: Bytes, n: i32) {
+    b.v.push(n & 255)
+    b.v.push((n >> 8) & 255)
+}
+
+fn _le32(b: Bytes, n: i32) {
+    b.v.push(n & 255)
+    b.v.push((n >> 8) & 255)
+    b.v.push((n >> 16) & 255)
+    b.v.push((n >> 24) & 255)
+}
+
+fn _texto4(b: Bytes, s: str) {
+    for i in 0..4 {
+        b.v.push(ord(s[i]))
+    }
+}
+
+# Una muestra como entero de 16 bits.
+fn a_16(x: f64) -> i32 {
+    let v = to_i32(floor(mate.recortar(x, 0.0 - 1.0, 1.0) * 32767.0 + 0.5))
+    return max(0 - 32767, min(32767, v))
+}
+
+# Los bytes de un WAV PCM de 16 bits con el sonido s.
+fn a_wav(s: Sonido) -> Vec<i32> {
+    let n = s.datos.len()
+    let b = Bytes { v: vec_new(44 + 2 * n) }
+    _texto4(b, "RIFF")
+    _le32(b, 36 + 2 * n)
+    _texto4(b, "WAVE")
+    _texto4(b, "fmt ")
+    _le32(b, 16)
+    _le16(b, 1)                             # PCM
+    _le16(b, s.canales)
+    _le32(b, s.tasa)
+    _le32(b, s.tasa * s.canales * 2)        # bytes por segundo
+    _le16(b, s.canales * 2)                 # bytes por cuadro
+    _le16(b, 16)
+    _texto4(b, "data")
+    _le32(b, 2 * n)
+    for i in 0..n {
+        _le16(b, a_16(s.datos.get(i).unwrap_or(0.0)))
+    }
+    let mut out: Vec<i32> = vec_new(b.v.len())
+    for i in 0..b.v.len() {
+        out.push(b.v.get(i).unwrap_or(0))
+    }
+    return out
+}
+
+# Guarda s como WAV; devuelve cuántos bytes escribió.
+fn guardar_wav(s: Sonido, ruta: str) -> Result<i32> {
+    let bytes = a_wav(s)
+    let n = bytes.len()
+    let f = file_open(ruta, "w")?
+    f.write_bytes(bytes)?
+    f.close()
+    return Ok(n)
+}
+
+fn _u16(b: Bytes, i: i32) -> i32 {
+    return b.v.get(i).unwrap_or(0) | (b.v.get(i + 1).unwrap_or(0) << 8)
+}
+
+fn _u32(b: Bytes, i: i32) -> i32 {
+    return _u16(b, i) | (_u16(b, i + 2) << 16)
+}
+
+fn _es(b: Bytes, i: i32, s: str) -> bool {
+    for k in 0..4 {
+        if b.v.get(i + k).unwrap_or(0 - 1) != ord(s[k]) {
+            return false
+        }
+    }
+    return true
+}
+
+fn _nombre(b: Bytes, i: i32) -> str {
+    let mut t = ""
+    for k in 0..4 {
+        let c = b.v.get(i + k).unwrap_or(63)
+        t = t + (if c >= 32 and c < 127 { chr(c) } else { "?" })
+    }
+    return t
+}
+
+# El sonido de los bytes de un WAV PCM de 16 bits (mono o estéreo; los chunks
+# que no son fmt ni data se saltan). Como toda fn que recibe un Vec, se queda
+# con él.
+fn de_wav(bytes: Vec<i32>) -> Result<Sonido> {
+    let b = Bytes { v: bytes }
+    let n = b.v.len()
+    if n < 12 or not _es(b, 0, "RIFF") or not _es(b, 8, "WAVE") {
+        return Err("audio: no es un WAV (no empieza con RIFF....WAVE)")
+    }
+    let mut pos = 12
+    let mut canales = 0
+    let mut tasa = 0
+    let mut bits = 0
+    let mut desde = 0 - 1
+    let mut tam_datos = 0
+    while pos + 8 <= n {
+        let tam = _u32(b, pos + 4)
+        if tam < 0 or tam > n - pos - 8 {
+            return Err("audio: WAV cortado (el chunk " + _nombre(b, pos) + " no entra)")
+        }
+        if _es(b, pos, "fmt ") {
+            let formato = _u16(b, pos + 8)
+            canales = _u16(b, pos + 10)
+            tasa = _u32(b, pos + 12)
+            bits = _u16(b, pos + 22)
+            if formato != 1 {
+                return Err("audio: WAV con formato " + a_texto(formato) + " (solo PCM, 1)")
+            }
+        } else if _es(b, pos, "data") {
+            desde = pos + 8
+            tam_datos = tam
+        }
+        pos = pos + 8 + tam + tam % 2
+    }
+    if canales == 0 {
+        return Err("audio: WAV sin chunk fmt")
+    }
+    if bits != 16 {
+        return Err("audio: WAV de " + a_texto(bits) + " bits por muestra todavía no (solo 16)")
+    }
+    if canales != 1 and canales != 2 {
+        return Err("audio: WAV de " + a_texto(canales) + " canales todavía no (solo 1 o 2)")
+    }
+    if desde < 0 {
+        return Err("audio: WAV sin chunk data")
+    }
+    let cuantas = (tam_datos / (2 * canales)) * canales
+    let s = Sonido { canales: canales, tasa: tasa, datos: vec_new(cuantas) }
+    for i in 0..cuantas {
+        let mut v = _u16(b, desde + 2 * i)
+        if v >= 32768 {
+            v = v - 65536
+        }
+        s.datos.push(max(0.0 - 1.0, to_f64(v) / 32767.0))
+    }
+    return Ok(s)
+}
+
+# Lee un WAV PCM de 16 bits.
+fn leer_wav(ruta: str) -> Result<Sonido> {
+    let f = file_open(ruta, "r")?
+    let mut todo: Vec<i32> = vec_new()
+    let mut sigue = true
+    while sigue {
+        let trozo = f.read_bytes(65536)?
+        if trozo.len() == 0 {
+            sigue = false
+        }
+        for i in 0..trozo.len() {
+            todo.push(trozo.get(i).unwrap_or(0))
+        }
+    }
+    f.close()
+    return de_wav(todo)
+}

@@ -1,0 +1,428 @@
+# lib/fecha.scar: fechas, horas, zonas y formato (use "fecha").
+#
+#   use "fecha"
+#
+#   let t = fecha.de_iso("2026-10-26T16:30:00-03:00")?        # segundos desde 1970 (UTC)
+#   let f = fecha.local(t, fecha.chile())                     # la fecha en Chile continental
+#   print(fecha.formato(f, "%A %d de %B de %Y, %H:%M"))       # lunes 26 de octubre de 2026, 16:30
+#   print(fecha.iso(t), fecha.dia_semana(f))                  # 2026-10-26T19:30:00Z 1
+#   let manana = fecha.sumar_dias(f, 1)
+#
+# Un instante es un i64: segundos desde el 1 de enero de 1970 a las 00:00 UTC
+# (sin segundos intercalares, como todo el mundo). Una Fecha son sus campos
+# (año, mes, día, hora, minuto, segundo), en el calendario gregoriano
+# proléptico, sin zona: lo que muestra un reloj. Las cuentas son las de Howard
+# Hinnant (days_from_civil), sin depender de C.
+#
+# Zonas: utc(), fija(minutos) para un desfase que no cambia, y las de Chile
+# con su horario de verano: chile() (continental), magallanes() (UTC−3 todo el
+# año) y pascua() (dos horas menos que el continente). El verano empieza el
+# primer domingo desde el 2 de septiembre a las 04:00 UTC y termina el primer
+# domingo desde el 2 de abril a las 03:00 UTC, como en la base tz desde 2019
+# (con su excepción de 2022, el 11 de septiembre); para otros años se usa la
+# misma regla, así que antes de 2019 no coincide con la historia.
+#
+# La hora actual no la sabe el lenguaje (now() es un reloj para medir
+# duraciones); el instante se le pasa a estas funciones desde afuera.
+
+struct Fecha {
+    anio: i32
+    mes: i32
+    dia: i32
+    hora: i32
+    minuto: i32
+    segundo: i32
+}
+
+fn fecha(anio: i32, mes: i32, dia: i32, hora: i32, minuto: i32, segundo: i32) -> Fecha {
+    return Fecha { anio: anio, mes: mes, dia: dia, hora: hora, minuto: minuto, segundo: segundo }
+}
+
+# ---- calendario -------------------------------------------------------------------
+
+fn es_bisiesto(anio: i32) -> bool {
+    return (anio % 4 == 0 and anio % 100 != 0) or anio % 400 == 0
+}
+
+fn dias_del_mes(anio: i32, mes: i32) -> i32 {
+    if mes == 2 {
+        return if es_bisiesto(anio) { 29 } else { 28 }
+    }
+    if mes == 4 or mes == 6 or mes == 9 or mes == 11 {
+        return 30
+    }
+    return 31
+}
+
+# División entera hacia abajo (la de SCAR trunca hacia cero).
+fn _div(a: i64, b: i64) -> i64 {
+    let q = a / b
+    return if (a % b != 0) and ((a < 0) != (b < 0)) { q - 1 } else { q }
+}
+
+# Días desde el 1970-01-01 del año, mes y día dados (days_from_civil).
+fn dias_desde_civil(anio: i32, mes: i32, dia: i32) -> i64 {
+    let y = to_i64(if mes <= 2 { anio - 1 } else { anio })
+    let era = _div(y, 400)
+    let yoe = y - era * 400
+    let m = to_i64(mes)
+    let mp = if m > 2 { m - 3 } else { m + 9 }
+    let doy = (153 * mp + 2) / 5 + to_i64(dia) - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+# La fecha (a las 00:00) de un número de días desde 1970 (civil_from_days).
+fn civil_desde_dias(z0: i64) -> Fecha {
+    let z = z0 + 719468
+    let era = _div(z, 146097)
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }
+    let y = yoe + era * 400 + (if m <= 2 { 1 } else { 0 })
+    return Fecha { anio: to_i32(y), mes: to_i32(m), dia: to_i32(d), hora: 0, minuto: 0, segundo: 0 }
+}
+
+# 0 domingo, 1 lunes ... 6 sábado.
+fn dia_semana(f: Fecha) -> i32 {
+    let d = dias_desde_civil(f.anio, f.mes, f.dia)
+    return to_i32(d - _div(d + 4, 7) * 7 + 4) % 7
+}
+
+# 1 para el 1 de enero.
+fn dia_del_anio(f: Fecha) -> i32 {
+    return to_i32(dias_desde_civil(f.anio, f.mes, f.dia) - dias_desde_civil(f.anio, 1, 1)) + 1
+}
+
+# ---- instantes ----------------------------------------------------------------------
+
+# La fecha en UTC de un instante.
+fn de_segundos(s: i64) -> Fecha {
+    let dias = _div(s, 86400)
+    let resto = s - dias * 86400
+    let f = civil_desde_dias(dias)
+    f.hora = to_i32(resto / 3600)
+    f.minuto = to_i32((resto % 3600) / 60)
+    f.segundo = to_i32(resto % 60)
+    return f
+}
+
+# El instante de una fecha leída en UTC.
+fn a_segundos(f: Fecha) -> i64 {
+    return dias_desde_civil(f.anio, f.mes, f.dia) * 86400 + to_i64(f.hora) * 3600 + to_i64(f.minuto) * 60
+        + to_i64(f.segundo)
+}
+
+# La misma fecha corrida n segundos, días, horas o minutos (en el reloj, sin
+# zona: una fecha local más un día es la misma hora del día siguiente).
+fn sumar_segundos(f: Fecha, n: i64) -> Fecha {
+    return de_segundos(a_segundos(f) + n)
+}
+
+fn sumar_dias(f: Fecha, n: i32) -> Fecha {
+    return sumar_segundos(f, to_i64(n) * 86400)
+}
+
+# n meses después (o antes, si es negativo); si el día no existe en ese mes
+# (31 de enero más un mes), queda el último del mes.
+fn sumar_meses(f: Fecha, n: i32) -> Fecha {
+    let total = f.anio * 12 + (f.mes - 1) + n
+    let anio = to_i32(_div(to_i64(total), 12))
+    let mes = total - anio * 12 + 1
+    return Fecha { anio: anio, mes: mes, dia: min(f.dia, dias_del_mes(anio, mes)), hora: f.hora,
+                   minuto: f.minuto, segundo: f.segundo }
+}
+
+# b - a en segundos y en días enteros (hacia abajo).
+fn diferencia_segundos(a: Fecha, b: Fecha) -> i64 {
+    return a_segundos(b) - a_segundos(a)
+}
+
+fn diferencia_dias(a: Fecha, b: Fecha) -> i64 {
+    return _div(diferencia_segundos(a, b), 86400)
+}
+
+# ---- zonas ------------------------------------------------------------------------
+
+struct Zona {
+    tipo: i32           # 0 fija, 1 Chile continental, 2 Isla de Pascua
+    minutos: i32        # el desfase, si es fija
+}
+
+fn utc() -> Zona {
+    return Zona { tipo: 0, minutos: 0 }
+}
+
+# Un desfase fijo en minutos (-180 es UTC−3).
+fn fija(minutos: i32) -> Zona {
+    return Zona { tipo: 0, minutos: minutos }
+}
+
+fn chile() -> Zona {
+    return Zona { tipo: 1, minutos: 0 }
+}
+
+fn magallanes() -> Zona {
+    return Zona { tipo: 0, minutos: 0 - 180 }
+}
+
+fn pascua() -> Zona {
+    return Zona { tipo: 2, minutos: 0 }
+}
+
+# El primer domingo desde el día `desde` del mes, en días desde 1970.
+fn _domingo_desde(anio: i32, mes: i32, desde: i32) -> i64 {
+    let d = dias_desde_civil(anio, mes, desde)
+    let ds = dia_semana(Fecha { anio: anio, mes: mes, dia: desde, hora: 0, minuto: 0, segundo: 0 })
+    return d + to_i64((7 - ds) % 7)
+}
+
+# Si en el instante s es verano en Chile.
+fn verano_chile(s: i64) -> bool {
+    let anio = de_segundos(s).anio
+    let termina = _domingo_desde(anio, 4, 2) * 86400 + 3 * 3600
+    let desde_sep = if anio == 2022 { 9 } else { 2 }
+    let empieza = _domingo_desde(anio, 9, desde_sep) * 86400 + 4 * 3600
+    return s < termina or s >= empieza
+}
+
+# Los minutos que la zona le suma a UTC en el instante s.
+fn desfase(z: Zona, s: i64) -> i32 {
+    if z.tipo == 0 {
+        return z.minutos
+    }
+    let base = if verano_chile(s) { 0 - 180 } else { 0 - 240 }
+    return if z.tipo == 2 { base - 120 } else { base }
+}
+
+# La fecha que muestra un reloj en la zona z en el instante s.
+fn local(s: i64, z: Zona) -> Fecha {
+    return de_segundos(s + to_i64(desfase(z, s)) * 60)
+}
+
+# El instante de una fecha local de la zona z. Si esa hora pasa dos veces
+# (cuando termina el verano) es la primera; si no existe (cuando empieza) se
+# usa el desfase de antes del cambio: como zoneinfo de Python con fold=0.
+fn instante(f: Fecha, z: Zona) -> i64 {
+    let l = a_segundos(f)
+    if z.tipo == 0 {
+        return l - to_i64(z.minutos) * 60
+    }
+    let verano = if z.tipo == 2 { 0 - 300 } else { 0 - 180 }
+    let invierno = verano - 60
+    let con_verano = desfase(z, l - to_i64(verano) * 60) == verano
+    let con_invierno = desfase(z, l - to_i64(invierno) * 60) == invierno
+    if con_verano and con_invierno {
+        # pasa dos veces: la primera (de las dos, la que sigue en verano)
+        return l - to_i64(verano) * 60
+    }
+    if con_verano {
+        return l - to_i64(verano) * 60
+    }
+    if con_invierno {
+        return l - to_i64(invierno) * 60
+    }
+    # no existe (se adelantó el reloj): el desfase de antes, el de invierno
+    return l - to_i64(invierno) * 60
+}
+
+# ---- texto -----------------------------------------------------------------------
+
+fn _2(n: i32) -> str {
+    return if n < 10 and n >= 0 { "0" + a_texto(n) } else { a_texto(n) }
+}
+
+fn _anio(n: i32) -> str {
+    if n >= 0 and n < 1000 {
+        let t = a_texto(n)
+        return if n < 10 { "000" + t } else if n < 100 { "00" + t } else { "0" + t }
+    }
+    return a_texto(n)
+}
+
+fn _desfase_texto(min: i32) -> str {
+    let signo = if min < 0 { "-" } else { "+" }
+    let m = abs(min)
+    return signo + _2(m / 60) + ":" + _2(m % 60)
+}
+
+# "2026-10-26T19:30:00Z": el instante en UTC, en ISO 8601.
+fn iso(s: i64) -> str {
+    let f = de_segundos(s)
+    return _anio(f.anio) + "-" + _2(f.mes) + "-" + _2(f.dia) + "T" + _2(f.hora) + ":" + _2(f.minuto) + ":"
+        + _2(f.segundo) + "Z"
+}
+
+# "2026-10-26T16:30:00-03:00": el instante en la zona z, con su desfase.
+fn iso_local(s: i64, z: Zona) -> str {
+    let f = local(s, z)
+    return _anio(f.anio) + "-" + _2(f.mes) + "-" + _2(f.dia) + "T" + _2(f.hora) + ":" + _2(f.minuto) + ":"
+        + _2(f.segundo) + _desfase_texto(desfase(z, s))
+}
+
+fn _numero(t: str, desde: i32, cuantos: i32) -> i32 {
+    let mut n = 0
+    for k in 0..cuantos {
+        let c = ord(t[desde + k])
+        if c < 48 or c > 57 {
+            return 0 - 1
+        }
+        n = n * 10 + c - 48
+    }
+    return n
+}
+
+# El instante de un texto ISO 8601: "2026-10-26", "2026-10-26T16:30",
+# "2026-10-26 16:30:05", con fracción de segundo (se descarta), y con "Z",
+# "+HH:MM", "-HH:MM" o "-HHMM" al final; sin zona, se toma como UTC.
+fn de_iso(t0: str) -> Result<i64> {
+    let mut t = t0
+    while len(t) > 0 and (t[len(t) - 1] == " " or t[len(t) - 1] == "\n") {
+        t = _pedazo(t, 0, len(t) - 1)
+    }
+    let n = len(t)
+    let mal = "no se pudo leer '" + t0 + "' como fecha ISO 8601"
+    if n < 10 or t[4] != "-" or t[7] != "-" {
+        return Err(mal)
+    }
+    let anio = _numero(t, 0, 4)
+    let mes = _numero(t, 5, 2)
+    let dia = _numero(t, 8, 2)
+    if anio < 0 or mes < 1 or mes > 12 or dia < 1 or dia > dias_del_mes(anio, mes) {
+        return Err(mal)
+    }
+    let mut hora = 0
+    let mut minuto = 0
+    let mut segundo = 0
+    let mut i = 10
+    if i < n and (t[i] == "T" or t[i] == " ") {
+        if i + 6 > n or t[i + 3] != ":" {
+            return Err(mal)
+        }
+        hora = _numero(t, i + 1, 2)
+        minuto = _numero(t, i + 4, 2)
+        i = i + 6
+        if i < n and t[i] == ":" {
+            if i + 3 > n {
+                return Err(mal)
+            }
+            segundo = _numero(t, i + 1, 2)
+            i = i + 3
+            if i < n and (t[i] == "." or t[i] == ",") {
+                i = i + 1
+                while i < n and ord(t[i]) >= 48 and ord(t[i]) <= 57 {
+                    i = i + 1
+                }
+            }
+        }
+        if hora < 0 or hora > 23 or minuto < 0 or minuto > 59 or segundo < 0 or segundo > 59 {
+            return Err(mal)
+        }
+    }
+    let mut zona_min = 0
+    if i < n {
+        if t[i] == "Z" and i + 1 == n {
+            zona_min = 0
+        } else if (t[i] == "+" or t[i] == "-") and (i + 6 == n or i + 5 == n or i + 3 == n) {
+            let hh = _numero(t, i + 1, 2)
+            let mut mm = 0
+            if i + 6 == n {
+                if t[i + 3] != ":" {
+                    return Err(mal)
+                }
+                mm = _numero(t, i + 4, 2)
+            } else if i + 5 == n {
+                mm = _numero(t, i + 3, 2)
+            }
+            if hh < 0 or mm < 0 or hh > 23 or mm > 59 {
+                return Err(mal)
+            }
+            zona_min = (hh * 60 + mm) * (if t[i] == "-" { 0 - 1 } else { 1 })
+        } else {
+            return Err(mal)
+        }
+    }
+    let f = Fecha { anio: anio, mes: mes, dia: dia, hora: hora, minuto: minuto, segundo: segundo }
+    return Ok(a_segundos(f) - to_i64(zona_min) * 60)
+}
+
+fn _pedazo(s: str, a: i32, b: i32) -> str {
+    let mut r = ""
+    for i in a..b {
+        r = r + s[i]
+    }
+    return r
+}
+
+fn nombre_dia(d: i32) -> str {
+    let nombres = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"]
+    let mut r = ""
+    match nombres.get(d) {
+        Some(x) => { r = x + "" }
+        None => {}
+    }
+    return r
+}
+
+fn nombre_mes(m: i32) -> str {
+    let nombres = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre",
+                   "octubre", "noviembre", "diciembre"]
+    let mut r = ""
+    match nombres.get(m - 1) {
+        Some(x) => { r = x + "" }
+        None => {}
+    }
+    return r
+}
+
+# La fecha con una plantilla, como strftime: %Y año, %m mes, %d día, %H hora,
+# %M minuto, %S segundo (con dos cifras), %j día del año (tres), %A el día de
+# la semana y %B el mes en español ("lunes", "octubre"), %a y %b sus tres
+# primeras letras ("lun", "oct"), %% un %. Lo demás va tal cual.
+fn formato(f: Fecha, plantilla: str) -> str {
+    let n = len(plantilla)
+    let mut r = ""
+    let mut i = 0
+    while i < n {
+        let c = plantilla[i]
+        if c == "%" and i + 1 < n {
+            let k = plantilla[i + 1]
+            if k == "Y" {
+                r = r + _anio(f.anio)
+            } else if k == "m" {
+                r = r + _2(f.mes)
+            } else if k == "d" {
+                r = r + _2(f.dia)
+            } else if k == "H" {
+                r = r + _2(f.hora)
+            } else if k == "M" {
+                r = r + _2(f.minuto)
+            } else if k == "S" {
+                r = r + _2(f.segundo)
+            } else if k == "j" {
+                let d = dia_del_anio(f)
+                r = r + (if d < 10 { "00" } else if d < 100 { "0" } else { "" }) + a_texto(d)
+            } else if k == "A" {
+                r = r + nombre_dia(dia_semana(f))
+            } else if k == "a" {
+                r = r + _pedazo(nombre_dia(dia_semana(f)), 0, 3)
+            } else if k == "B" {
+                r = r + nombre_mes(f.mes)
+            } else if k == "b" {
+                r = r + _pedazo(nombre_mes(f.mes), 0, 3)
+            } else if k == "%" {
+                r = r + "%"
+            } else {
+                r = r + c + k
+            }
+            i = i + 2
+        } else {
+            r = r + c
+            i = i + 1
+        }
+    }
+    return r
+}

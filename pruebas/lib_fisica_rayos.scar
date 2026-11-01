@@ -1,0 +1,35 @@
+# lib/fisica: rayos y consultas. Un rayo sale de un "cañón" en (0, 0) hacia un blanco y dice a qué cuerpo
+# da, a qué distancia y con qué normal; después se le da un empujón (impulso) al cuerpo que tocó y se pregunta
+# qué hay en un punto y qué toca a qué.
+
+use "fisica"
+
+fn contar(l: Vec<i32>) -> i32 {
+    return l.len()
+}
+
+fn main() -> i32 {
+    let m = fisica.mundo(0.0, 0.0)
+    let pared = fisica.caja(m, 6.0, 0.0, 1.0, 6.0, 0.0)
+    let bola = fisica.circulo(m, 3.0, 2.0, 0.5, 1.0)
+    let cajon = fisica.caja(m, 3.0, 0.0 - 2.0, 1.0, 1.0, 2.0)
+    print("cuerpos " + a_texto(fisica.cuerpos(m)) + " (pared " + a_texto(pared) + ", bola " + a_texto(bola) + ", cajón " + a_texto(cajon) + ")")
+    let r1 = fisica.rayo(m, 0.0, 0.0, 1.0, 0.0, 20.0)
+    print("rayo recto: cuerpo " + a_texto(r1.cuerpo) + " t " + a_texto(r1.t) + " normal " + a_texto(r1.nx) + " " + a_texto(r1.ny))
+    let r2 = fisica.rayo(m, 0.0, 0.0, 3.0, 2.0, 20.0)
+    print("rayo a la bola: cuerpo " + a_texto(r2.cuerpo) + " t " + a_texto(r2.t) + " punto " + a_texto(r2.x) + " " + a_texto(r2.y))
+    let r3 = fisica.rayo(m, 0.0, 0.0, 3.0, 0.0 - 2.0, 3.0)
+    print("rayo corto al cajón (alcance 3): cuerpo " + a_texto(r3.cuerpo))
+    let r4 = fisica.rayo(m, 0.0, 0.0, 0.0 - 1.0, 0.0, 20.0)
+    print("rayo para atrás: cuerpo " + a_texto(r4.cuerpo))
+    print("qué hay en (3, 2): " + a_texto(fisica.cuerpo_en(m, 3.0, 2.0)) + ", en (0, 5): " + a_texto(fisica.cuerpo_en(m, 0.0, 5.0)))
+    fisica.impulso(m, bola, 4.0, 0.0)
+    print("la bola, con el empujón: velocidad " + a_texto(fisica.vx(m, bola)) + " " + a_texto(fisica.vy(m, bola)))
+    fisica.impulso(m, pared, 4.0, 0.0)
+    print("la pared (fija) sigue quieta: " + a_texto(fisica.vx(m, pared)))
+    for i in 0..30 {
+        fisica.paso(m, 1.0 / 60.0)
+    }
+    print("la bola tocó a " + a_texto(contar(fisica.contactos_de(m, bola))) + " cuerpos; la pared a " + a_texto(contar(fisica.contactos_de(m, pared))))
+    return 0
+}

@@ -1,0 +1,395 @@
+# lib/colecciones contra Python: lo corre pruebas/test_colecciones_python.py.
+# Hace operaciones al azar (con semilla) sobre pilas, colas, mapas y conjuntos,
+# y ordena listas al azar, y escribe cada operación con su resultado. Python
+# repite las mismas operaciones con list, collections.deque, dict y sorted, y
+# compara. Los textos van como códigos de carácter ("=97.241" es "añ").
+
+use "mate"
+use "colecciones"
+
+struct Par {
+    clave: i32
+    id: i32
+}
+
+fn menor_clave(a: Par, b: Par) -> bool {
+    return a.clave < b.clave
+}
+
+fn menor_largo(a: str, b: str) -> bool {
+    return len(a) < len(b)
+}
+
+fn cod(s: str) -> str {
+    let mut r = "="
+    for i in 0..len(s) {
+        if i > 0 {
+            r = r + "."
+        }
+        r = r + a_texto(ord(s[i]))
+    }
+    return r
+}
+
+fn op_i32(o: Option<i32>) -> str {
+    let mut r = "N"
+    match o {
+        Some(x) => {
+            r = a_texto(x)
+        }
+        None => {}
+    }
+    return r
+}
+
+fn op_str(o: Option<str>) -> str {
+    let mut r = "N"
+    match o {
+        Some(x) => {
+            r = cod(x)
+        }
+        None => {}
+    }
+    return r
+}
+
+fn texto_azar(g: mate.Azar, largo_max: i32) -> str {
+    let letras = ["a", "b", "c", "A", "Z", "ñ", "é", "ü", "0", " ", "ß", "ō", "中", "😀", "z"]
+    let n = mate.azar_entero(g, 0, largo_max)
+    let mut r = ""
+    for i in 0..n {
+        match letras.get(mate.azar_entero(g, 0, letras.len() - 1)) {
+            Some(c) => {
+                r = r + c
+            }
+            None => {}
+        }
+    }
+    return r
+}
+
+fn volcar_mapa(m: colecciones.Mapa<i32>) {
+    let mut r = "MDUMP " + a_texto(colecciones.largo(m))
+    for i in 0..colecciones.largo(m) {
+        r = r + " " + cod(colecciones.clave(m, i)) + ":" + op_i32(colecciones.valor(m, i))
+    }
+    print(r)
+}
+
+fn volcar_mapa_ent(m: colecciones.MapaEnt<str>) {
+    let mut r = "EDUMP " + a_texto(colecciones.largo_ent(m))
+    for i in 0..colecciones.largo_ent(m) {
+        r = r + " " + a_texto(colecciones.clave_ent(m, i)) + ":" + op_str(colecciones.valor_ent(m, i))
+    }
+    print(r)
+}
+
+fn volcar_conj(etq: str, c: colecciones.Conjunto) {
+    let mut r = etq + " " + a_texto(colecciones.cardinal(c))
+    for i in 0..colecciones.cardinal(c) {
+        r = r + " " + cod(colecciones.elemento(c, i))
+    }
+    print(r)
+}
+
+fn volcar_conj_ent(etq: str, c: colecciones.ConjuntoEnt) {
+    let mut r = etq + " " + a_texto(colecciones.cardinal_ent(c))
+    for i in 0..colecciones.cardinal_ent(c) {
+        r = r + " " + a_texto(colecciones.elemento_ent(c, i))
+    }
+    print(r)
+}
+
+fn lista_i32(v: Vec<i32>) -> str {
+    let mut r = a_texto(v.len())
+    for i in 0..v.len() {
+        r = r + " " + a_texto(v.get(i).unwrap_or(0))
+    }
+    return r
+}
+
+fn main() {
+    let g = mate.azar(2024)
+
+    # ---- pila y cola
+    let p = colecciones.pila(0)
+    let c = colecciones.cola("")
+    for k in 0..3000 {
+        let o = mate.azar_entero(g, 0, 9)
+        if o < 5 {
+            let x = mate.azar_entero(g, 0 - 1000, 1000)
+            colecciones.apilar(p, x)
+            print("PUSH", x)
+        } else {
+            if o < 8 {
+                print("POP", op_i32(colecciones.desapilar(p)))
+            } else {
+                print("TOP", op_i32(colecciones.tope(p)), colecciones.pila_largo(p), colecciones.pila_vacia(p))
+            }
+        }
+        let q = mate.azar_entero(g, 0, 9)
+        if q < 5 {
+            let s = texto_azar(g, 4)
+            print("ENQ", cod(s))
+            colecciones.encolar(c, s)
+        } else {
+            if q < 8 {
+                print("DEQ", op_str(colecciones.desencolar(c)))
+            } else {
+                print("FRONT", op_str(colecciones.frente(c)), colecciones.cola_largo(c), colecciones.cola_vacia(c))
+            }
+        }
+    }
+
+    # ---- mapa str -> i32, con claves de un grupo chico (así se repiten)
+    let claves: Vec<str> = vec_new()
+    for k in 0..60 {
+        claves.push(texto_azar(g, 3))
+    }
+    let m = colecciones.mapa(0)
+    for k in 0..6000 {
+        let mut clave = ""
+        match claves.get(mate.azar_entero(g, 0, claves.len() - 1)) {
+            Some(x) => {
+                clave = x + ""
+            }
+            None => {}
+        }
+        let o = mate.azar_entero(g, 0, 19)
+        if o < 6 {
+            let v = mate.azar_entero(g, 0 - 50, 50)
+            print("MPUT", cod(clave), v)
+            colecciones.poner(m, clave, v)
+        } else {
+            if o < 9 {
+                let d = mate.azar_entero(g, 0 - 5, 5)
+                print("MADD", cod(clave), d)
+                colecciones.sumar(m, clave, d)
+            } else {
+                if o < 13 {
+                    print("MDEL", cod(clave), colecciones.quitar(m, clave))
+                } else {
+                    if o < 17 {
+                        print("MGET", cod(clave), op_i32(colecciones.obtener(m, clave)), colecciones.contiene(m, clave))
+                    } else {
+                        if o == 17 {
+                            volcar_mapa(m)
+                        } else {
+                            let ks = colecciones.claves(m)
+                            let mut r = "MKEYS " + a_texto(ks.len())
+                            for i in 0..ks.len() {
+                                r = r + " " + op_str(ks.get(i))
+                            }
+                            print(r)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    volcar_mapa(m)
+
+    # ---- mapa i32 -> str, con claves negativas y grandes
+    let e = colecciones.mapa_ent("")
+    for k in 0..6000 {
+        let mut clave = mate.azar_entero(g, 0 - 40, 40)
+        if k % 7 == 0 {
+            clave = clave * 50000000
+        }
+        let o = mate.azar_entero(g, 0, 19)
+        if o < 8 {
+            let v = texto_azar(g, 3)
+            print("EPUT", clave, cod(v))
+            colecciones.poner_ent(e, clave, v)
+        } else {
+            if o < 12 {
+                print("EDEL", clave, colecciones.quitar_ent(e, clave))
+            } else {
+                if o < 18 {
+                    print("EGET", clave, op_str(colecciones.obtener_ent(e, clave)), colecciones.contiene_ent(e, clave))
+                } else {
+                    volcar_mapa_ent(e)
+                }
+            }
+        }
+    }
+    volcar_mapa_ent(e)
+    let cuenta = colecciones.mapa_ent(0.0)
+    for k in 0..500 {
+        let clave = mate.azar_entero(g, 0, 20)
+        let d = to_f64(mate.azar_entero(g, 0, 8)) * 0.25
+        print("FADD", clave, d)
+        colecciones.sumar_ent(cuenta, clave, d)
+    }
+    let mut r = "FDUMP " + a_texto(colecciones.largo_ent(cuenta))
+    for i in 0..colecciones.largo_ent(cuenta) {
+        r = r + " " + a_texto(colecciones.clave_ent(cuenta, i)) + ":" + a_texto(colecciones.valor_ent(cuenta, i).unwrap_or(0.0))
+    }
+    print(r)
+
+    # ---- conjuntos
+    for ronda in 0..40 {
+        let a = colecciones.conjunto()
+        let b = colecciones.conjunto()
+        let ae = colecciones.conjunto_ent()
+        let be = colecciones.conjunto_ent()
+        for k in 0..mate.azar_entero(g, 0, 30) {
+            let s = texto_azar(g, 2)
+            print("SADD A", cod(s))
+            colecciones.agregar(a, s)
+            let x = mate.azar_entero(g, 0 - 20, 20)
+            print("SADDE A", x)
+            colecciones.agregar_ent(ae, x)
+        }
+        for k in 0..mate.azar_entero(g, 0, 30) {
+            let s = texto_azar(g, 2)
+            print("SADD B", cod(s))
+            colecciones.agregar(b, s)
+            let x = mate.azar_entero(g, 0 - 20, 20)
+            print("SADDE B", x)
+            colecciones.agregar_ent(be, x)
+        }
+        for k in 0..5 {
+            let s = texto_azar(g, 2)
+            print("SDEL A", cod(s), colecciones.sacar(a, s), colecciones.tiene(a, s))
+            let x = mate.azar_entero(g, 0 - 20, 20)
+            print("SDELE A", x, colecciones.sacar_ent(ae, x), colecciones.tiene_ent(ae, x))
+        }
+        volcar_conj("SUNION", colecciones.union(a, b))
+        volcar_conj("SINTER", colecciones.interseccion(a, b))
+        volcar_conj("SDIFF", colecciones.diferencia(a, b))
+        volcar_conj_ent("SUNIONE", colecciones.union_ent(ae, be))
+        volcar_conj_ent("SINTERE", colecciones.interseccion_ent(ae, be))
+        volcar_conj_ent("SDIFFE", colecciones.diferencia_ent(ae, be))
+        print("SFIN")
+    }
+
+    # ---- ordenar
+    for ronda in 0..120 {
+        let n = mate.azar_entero(g, 0, 300)
+        let tipo = ronda % 6
+        let v: Vec<i32> = vec_new()
+        for i in 0..n {
+            if tipo == 0 {
+                v.push(mate.azar_entero(g, 0 - 1000000, 1000000))
+            } else {
+                if tipo == 1 {
+                    v.push(mate.azar_entero(g, 0, 3))
+                } else {
+                    if tipo == 2 {
+                        v.push(i)
+                    } else {
+                        if tipo == 3 {
+                            v.push(n - i)
+                        } else {
+                            if tipo == 4 {
+                                v.push((i * 7919) % 13)
+                            } else {
+                                v.push(5)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        print("ORD_IN", lista_i32(colecciones.ordenar(colecciones.ordenar_desc(v))))
+    }
+    for ronda in 0..60 {
+        let n = mate.azar_entero(g, 0, 200)
+        let v: Vec<i32> = vec_new()
+        let mut entrada = ""
+        for i in 0..n {
+            let x = mate.azar_entero(g, 0 - 30, 30)
+            v.push(x)
+            entrada = entrada + " " + a_texto(x)
+        }
+        print("ORD", n, entrada)
+        print("ORDR", lista_i32(colecciones.ordenar(v)))
+        let w: Vec<i32> = vec_new()
+        let mut entrada2 = ""
+        for i in 0..n {
+            let x = mate.azar_entero(g, 0 - 30, 30)
+            w.push(x)
+            entrada2 = entrada2 + " " + a_texto(x)
+        }
+        print("DESC", n, entrada2)
+        print("DESCR", lista_i32(colecciones.ordenar_desc(w)))
+    }
+    for ronda in 0..40 {
+        let n = mate.azar_entero(g, 0, 150)
+        let v: Vec<f64> = vec_new()
+        let u: Vec<i64> = vec_new()
+        let mut entrada = ""
+        let mut entrada_u = ""
+        for i in 0..n {
+            let x = mate.azar_entre(g, 0.0 - 1000.0, 1000.0)
+            v.push(x)
+            entrada = entrada + " " + a_texto(x)
+            let y = to_i64(mate.azar_entero(g, 0 - 1000000, 1000000)) * to_i64(1000003)
+            u.push(y)
+            entrada_u = entrada_u + " " + a_texto(y)
+        }
+        print("ORDF", n, entrada)
+        let o = colecciones.ordenar(v)
+        let mut salida = ""
+        for i in 0..o.len() {
+            salida = salida + " " + a_texto(o.get(i).unwrap_or(0.0))
+        }
+        print("ORDFR", n, salida)
+        print("ORDL", n, entrada_u)
+        let ou = colecciones.ordenar(u)
+        let mut salida_u = ""
+        for i in 0..ou.len() {
+            salida_u = salida_u + " " + a_texto(ou.get(i).unwrap_or(to_i64(0)))
+        }
+        print("ORDLR", n, salida_u)
+    }
+    for ronda in 0..60 {
+        let n = mate.azar_entero(g, 0, 120)
+        let v: Vec<str> = vec_new()
+        let w: Vec<str> = vec_new()
+        let mut entrada = ""
+        for i in 0..n {
+            let s = texto_azar(g, 1 + ronda % 5)
+            entrada = entrada + " " + cod(s)
+            w.push(s + "")
+            v.push(s)
+        }
+        print("TXT", n, entrada)
+        let o = colecciones.ordenar_textos(v)
+        let mut salida = ""
+        for i in 0..o.len() {
+            salida = salida + " " + op_str(o.get(i))
+        }
+        print("TXTR", n, salida)
+        let e2 = colecciones.ordenar_por(w, menor_largo)
+        let mut salida2 = ""
+        for i in 0..e2.len() {
+            salida2 = salida2 + " " + op_str(e2.get(i))
+        }
+        print("TXTL", n, salida2)
+    }
+    for ronda in 0..60 {
+        let n = mate.azar_entero(g, 0, 250)
+        let v: Vec<Par> = vec_new()
+        let mut entrada = ""
+        for i in 0..n {
+            let k = mate.azar_entero(g, 0, 1 + ronda)
+            v.push(Par { clave: k, id: i })
+            entrada = entrada + " " + a_texto(k)
+        }
+        print("EST", n, entrada)
+        let o = colecciones.ordenar_por(v, menor_clave)
+        let mut salida = ""
+        for i in 0..o.len() {
+            match o.get(i) {
+                Some(x) => {
+                    salida = salida + " " + a_texto(x.clave) + ":" + a_texto(x.id)
+                }
+                None => {}
+            }
+        }
+        print("ESTR", n, salida)
+    }
+    print("FIN")
+}

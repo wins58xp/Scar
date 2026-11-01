@@ -1,0 +1,160 @@
+# lib/codigos contra hashlib, hmac, base64, zlib, uuid y urllib: lo corre
+# pruebas/test_codigos_python.py. Lee "casos.json" (en la carpeta donde corre) con las
+# listas "datos" (bytes en hexadecimal y clave de HMAC), "decodificar" (textos base64 y
+# hexadecimales buenos y malos), "textos" (para el escape de URL) y "uuid", y escribe
+# cada resultado en una línea "ETIQUETA k valor".
+
+use "json"
+use "codigos"
+
+fn hexa(d: json.Doc, ruta: str) -> codigos.Datos {
+    match codigos.de_hex(json.texto(d, ruta)) {
+        Ok(x) => {
+            return x
+        }
+        Err(e) => {
+            print("ERROR hex en el caso", ruta)
+            return codigos.vacio()
+        }
+    }
+    return codigos.vacio()
+}
+
+fn sal(etiqueta: str, k: i32, valor: str) {
+    print(etiqueta + " " + a_texto(k) + " " + valor)
+}
+
+fn resultado(r: Result<codigos.Datos>) -> str {
+    match r {
+        Ok(x) => {
+            return "OK:" + codigos.hex(x)
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn resultado_txt(r: Result<str>) -> str {
+    match r {
+        Ok(x) => {
+            return "OK:" + x
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn resultado_hex(r: Result<str>) -> str {
+    match r {
+        Ok(x) => {
+            return "OK:" + codigos.hex(codigos.de_texto(x))
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn caso_datos(d: json.Doc, k: i32) {
+    let r = "datos." + a_texto(k)
+    let x = hexa(d, r + ".x")
+    let clave = hexa(d, r + ".clave")
+    sal("HEX", k, codigos.hex(x))
+    sal("B64", k, codigos.base64(x))
+    sal("B64U", k, codigos.base64_url(x, true))
+    sal("B64UN", k, codigos.base64_url(x, false))
+    sal("SHA256", k, codigos.sha256_hex(x))
+    sal("SHA1", k, codigos.sha1_hex(x))
+    sal("MD5", k, codigos.md5_hex(x))
+    sal("CRC", k, a_texto(codigos.crc32(x)))
+    sal("ADLER", k, a_texto(codigos.adler32(x)))
+    sal("HMAC256", k, resultado_txt(codigos.hmac_hex("sha256", clave, x)))
+    sal("HMAC1", k, resultado_txt(codigos.hmac_hex("sha1", clave, x)))
+    sal("HMACM", k, resultado_txt(codigos.hmac_hex("md5", clave, x)))
+    sal("VUELTAB64", k, resultado(codigos.de_base64(codigos.base64(x))))
+    sal("VUELTAB64U", k, resultado(codigos.de_base64_url(codigos.base64_url(x, false))))
+    sal("VUELTAHEX", k, resultado(codigos.de_hex(codigos.hex(x))))
+}
+
+fn caso_decodificar(d: json.Doc, k: i32) {
+    let r = "decodificar." + a_texto(k)
+    let t = json.texto(d, r + ".t")
+    sal("DB64", k, resultado(codigos.de_base64(t)))
+    sal("DB64U", k, resultado(codigos.de_base64_url(t)))
+    sal("DHEX", k, resultado(codigos.de_hex(t)))
+}
+
+fn caso_texto(d: json.Doc, k: i32) {
+    let t = json.texto(d, "textos." + a_texto(k))
+    let b = codigos.de_texto(t)
+    sal("UTF8", k, codigos.hex(b))
+    sal("URL", k, codigos.url_codificar(t, false))
+    sal("URLP", k, codigos.url_codificar(t, true))
+    sal("VUELTAURL", k, resultado_hex(codigos.url_decodificar(codigos.url_codificar(t, false), false)))
+    sal("VUELTAURLP", k, resultado_hex(codigos.url_decodificar(codigos.url_codificar(t, true), true)))
+    sal("ACADENA", k, resultado_hex(codigos.a_cadena(b)))
+}
+
+fn caso_url(d: json.Doc, k: i32) {
+    let t = json.texto(d, "urls." + a_texto(k))
+    sal("UNQ", k, resultado_txt(codigos.url_decodificar(t, false)))
+    sal("UNQP", k, resultado_txt(codigos.url_decodificar(t, true)))
+}
+
+fn caso_utf8(d: json.Doc, k: i32) {
+    let x = hexa(d, "utf8." + a_texto(k))
+    sal("DEC", k, resultado_txt(codigos.a_cadena(x)))
+}
+
+fn caso_uuid(d: json.Doc, k: i32) {
+    sal("UUID", k, resultado_txt(codigos.uuid4_de(hexa(d, "uuid." + a_texto(k)))))
+}
+
+fn main() {
+    match json.leer_archivo("casos.json") {
+        Err(e) => {
+            print("ERROR no se pudo leer casos.json")
+        }
+        Ok(d) => {
+            for k in 0..json.largo(d, "datos") {
+                caso_datos(d, k)
+            }
+            for k in 0..json.largo(d, "decodificar") {
+                caso_decodificar(d, k)
+            }
+            for k in 0..json.largo(d, "textos") {
+                caso_texto(d, k)
+            }
+            for k in 0..json.largo(d, "urls") {
+                caso_url(d, k)
+            }
+            for k in 0..json.largo(d, "utf8") {
+                caso_utf8(d, k)
+            }
+            for k in 0..json.largo(d, "uuid") {
+                caso_uuid(d, k)
+            }
+            match codigos.uuid4() {
+                Ok(u) => {
+                    print("UUIDAZAR 0 " + u)
+                }
+                Err(e) => {
+                    print("UUIDAZAR 0 ERR")
+                }
+            }
+            match codigos.uuid4() {
+                Ok(u) => {
+                    print("UUIDAZAR 1 " + u)
+                }
+                Err(e) => {
+                    print("UUIDAZAR 1 ERR")
+                }
+            }
+        }
+    }
+}

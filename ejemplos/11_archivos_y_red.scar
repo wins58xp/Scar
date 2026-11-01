@@ -1,0 +1,62 @@
+# Capítulo 11: archivos y red.
+#
+#   scar run ejemplos/11_archivos_y_red.scar
+#
+# Un servidor de eco en una tarea: devuelve en mayúsculas cada mensaje que
+# recibe. main se conecta, le manda tres mensajes y guarda las respuestas en
+# un archivo.
+
+use "texto"
+
+task servidor_eco(escucha: Listener, mensajes: i32) -> i32 {
+    match escucha.accept() {
+        Ok(conexion) => {
+            for i in 0..mensajes {
+                match conexion.read() {
+                    Ok(m) => {
+                        conexion.write(texto.mayusculas(m))
+                    }
+                    Err(e) => {
+                        return i
+                    }
+                }
+            }
+            conexion.close()
+        }
+        Err(e) => print("el servidor no recibió a nadie:", e)
+    }
+    escucha.close()
+    return mensajes
+}
+
+fn conversar(puerto: i32) -> Result<i32> {
+    let escucha = tcp_listen(puerto)?
+    let servidor = spawn servidor_eco(escucha, 3)
+
+    let c = tcp_connect("127.0.0.1", puerto)?
+    let salida = file_open("/tmp/scar_eco.txt", "w")?
+    let frases = ["hola", "qué tal", "chao"]
+    for i in 0..frases.len() {
+        match frases.get(i) {
+            Some(f) => {
+                c.write(f)?
+                let respuesta = c.read()?
+                salida.write(f + " -> " + respuesta + "\n")?
+            }
+            None => {}
+        }
+    }
+    c.close()
+    salida.close()
+    return Ok(servidor.join())
+}
+
+fn main() -> Result<i32> {
+    let atendidos = conversar(19291)?
+    print("el servidor atendió", atendidos, "mensajes")
+
+    let f = file_open("/tmp/scar_eco.txt", "r")?
+    print(f.read_all()?)
+    f.close()
+    return Ok(0)
+}

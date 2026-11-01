@@ -1,0 +1,2439 @@
+# lib/colores.scar: colores, espacios de color, paletas y mapas de color (use "colores").
+#
+#   use "colores"
+#
+#   let c = colores.rgb(255, 128, 0)                     # un color, como en lienzo.color
+#   print(colores.a_hex(c))                              # #ff8000
+#   let m = colores.mezclar_oklab(c, colores.rgb(0, 0, 255), 0.5)
+#   let hsl = colores.a_hsl(c)                           # tono en grados, saturación y luz de 0 a 1
+#   print(colores.contraste(c, colores.rgb(255, 255, 255)))   # relación de contraste WCAG
+#   match colores.mapa("viridis") {                      # un mapa de color de 256 pasos
+#       Ok(v) => print(colores.a_hex(colores.mapa_en(v, 0.3)))
+#       Err(e) => print(e)
+#   }
+#   match colores.con_nombre("rebeccapurple") {          # los 148 nombres de CSS
+#       Ok(p) => print(colores.a_hex(p))
+#       Err(e) => print(e)
+#   }
+#
+# Escrita entera en SCAR. Un color es un i32 con
+# alfa, rojo, verde y azul de 8 bits (0xAARRGGBB), igual que lienzo.color y
+# grafico.color_rgb: lo que arma esta lib se pasa tal cual a lienzo, imagen y grafico.
+# gui usa solo rojo, verde y azul: `colores.a_gui(c)` le quita el alfa.
+#
+# - Espacios: HSV, HSL (tono en grados), CIE Lab (D65, 2°) y Oklab, de ida y de vuelta;
+# - operaciones: mezclar (en sRGB o en Oklab, que da degradados más parejos), aclarar,
+#   oscurecer, saturar, girar el tono, invertir, gris, complementario;
+# - accesibilidad: luminancia y contraste WCAG, el texto blanco o negro que se lee mejor
+#   sobre un fondo, diferencia de color CIEDE2000 y simulación de daltonismo (protanopia,
+#   deuteranopia, tritanopia y acromatopsia, modelo de Machado, Oliveira y Fernandes);
+# - 148 colores con nombre de CSS (con_nombre, nombre_mas_cercano);
+# - paletas de colores distintos (las de matplotlib: tab10, tab20, set1, set2, set3,
+#   dark2, paired, accent, pastel1, pastel2, y okabe_ito, pensada para daltonismo) y
+#   mapas continuos de 256 pasos (viridis, magma, inferno, plasma, cividis, turbo,
+#   coolwarm, rdbu, spectral, ylgnbu, greys, hot), que dan lo mismo que matplotlib;
+# - degradados entre varios colores y `paleta_n`, n colores bien repartidos.
+#
+# Las tablas de nombres, paletas y mapas salen de matplotlib.
+# Probada contra colorsys, scikit-image y matplotlib.
+
+use "texto"
+
+# ---------- colores sueltos ----------
+
+fn _tope(x: i32) -> i32 {
+    if x < 0 {
+        return 0
+    }
+    if x > 255 {
+        return 255
+    }
+    return x
+}
+
+# Un color opaco con rojo, verde y azul de 0 a 255 (lo que pase de ahí se recorta).
+fn rgb(r: i32, g: i32, b: i32) -> i32 {
+    return rgba(r, g, b, 255)
+}
+
+# Un color con alfa (0 transparente, 255 opaco).
+fn rgba(r: i32, g: i32, b: i32, a: i32) -> i32 {
+    return (_tope(a) << 24) | (_tope(r) << 16) | (_tope(g) << 8) | _tope(b)
+}
+
+fn canal_r(c: i32) -> i32 {
+    return (c >> 16) & 255
+}
+
+fn canal_g(c: i32) -> i32 {
+    return (c >> 8) & 255
+}
+
+fn canal_b(c: i32) -> i32 {
+    return c & 255
+}
+
+fn canal_a(c: i32) -> i32 {
+    return (c >> 24) & 255
+}
+
+# El color sin alfa, para gui (0xRRGGBB).
+fn a_gui(c: i32) -> i32 {
+    return c & 16777215
+}
+
+# Un color opaco a partir de un 0xRRGGBB.
+fn de_gui(c: i32) -> i32 {
+    return (255 << 24) | (c & 16777215)
+}
+
+fn _digito(n: i32) -> str {
+    let t = "0123456789abcdef"
+    return t[n]
+}
+
+fn _dos_hex(n: i32) -> str {
+    return _digito((n >> 4) & 15) + _digito(n & 15)
+}
+
+# "#rrggbb" en minúsculas.
+fn a_hex(c: i32) -> str {
+    return "#" + _dos_hex(canal_r(c)) + _dos_hex(canal_g(c)) + _dos_hex(canal_b(c))
+}
+
+# "#rrggbbaa" (CSS), con el alfa al final.
+fn a_hex_a(c: i32) -> str {
+    return a_hex(c) + _dos_hex(canal_a(c))
+}
+
+fn _valor_hex(ch: str) -> i32 {
+    let k = ord(ch)
+    if k >= 48 and k <= 57 {
+        return k - 48
+    }
+    if k >= 97 and k <= 102 {
+        return k - 87
+    }
+    if k >= 65 and k <= 70 {
+        return k - 55
+    }
+    return 0 - 1
+}
+
+# Lee "#rgb", "#rgba", "#rrggbb" o "#rrggbbaa" (el # es opcional; mayúsculas o
+# minúsculas).
+fn de_hex(s: str) -> Result<i32> {
+    let mut t = s
+    if t.len() > 0 and t[0] == "#" {
+        t = texto.subtexto(t, 1, t.len())
+    }
+    let n = t.len()
+    if n != 3 and n != 4 and n != 6 and n != 8 {
+        return Err("color: '" + s + "' no es un color hexadecimal (#rgb, #rgba, #rrggbb o #rrggbbaa)")
+    }
+    let v: Vec<i32> = vec_new()
+    for i in 0..n {
+        let d = _valor_hex(t[i])
+        if d < 0 {
+            return Err("color: '" + s + "' tiene un carácter que no es hexadecimal")
+        }
+        v.push(d)
+    }
+    if n <= 4 {
+        let a = if n == 4 { v.get(3).unwrap_or(15) * 17 } else { 255 }
+        return Ok(rgba(v.get(0).unwrap_or(0) * 17, v.get(1).unwrap_or(0) * 17, v.get(2).unwrap_or(0) * 17, a))
+    }
+    let a = if n == 8 { v.get(6).unwrap_or(15) * 16 + v.get(7).unwrap_or(15) } else { 255 }
+    return Ok(rgba(v.get(0).unwrap_or(0) * 16 + v.get(1).unwrap_or(0), v.get(2).unwrap_or(0) * 16 + v.get(3).unwrap_or(0), v.get(4).unwrap_or(0) * 16 + v.get(5).unwrap_or(0), a))
+}
+
+# ---------- base: sRGB lineal, redondeo ----------
+
+fn _lin(u: f64) -> f64 {
+    if u <= 0.04045 {
+        return u / 12.92
+    }
+    return pow((u + 0.055) / 1.055, 2.4)
+}
+
+fn _gam(u: f64) -> f64 {
+    if u <= 0.0031308 {
+        return 12.92 * u
+    }
+    return 1.055 * pow(u, 1.0 / 2.4) - 0.055
+}
+
+fn _cbrt(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - pow(0.0 - x, 1.0 / 3.0)
+    }
+    return pow(x, 1.0 / 3.0)
+}
+
+fn _uno(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0
+    }
+    if x > 1.0 {
+        return 1.0
+    }
+    return x
+}
+
+# 0..1 a 0..255, redondeando al más cercano (la mitad hacia arriba).
+fn _a_byte(x: f64) -> i32 {
+    return to_i32(floor(_uno(x) * 255.0 + 0.5))
+}
+
+fn _r(c: i32) -> f64 {
+    return to_f64(canal_r(c)) / 255.0
+}
+
+fn _g(c: i32) -> f64 {
+    return to_f64(canal_g(c)) / 255.0
+}
+
+fn _b(c: i32) -> f64 {
+    return to_f64(canal_b(c)) / 255.0
+}
+
+# Un color a partir de rojo, verde y azul de 0 a 1 (con el alfa de `a`).
+fn _de_f(r: f64, g: f64, b: f64, a: i32) -> i32 {
+    return rgba(_a_byte(r), _a_byte(g), _a_byte(b), a)
+}
+
+# ---------- HSV y HSL ----------
+
+struct Hsv {
+    h: f64
+    s: f64
+    v: f64
+}
+
+struct Hsl {
+    h: f64
+    s: f64
+    l: f64
+}
+
+fn _modulo360(h: f64) -> f64 {
+    let mut x = h - 360.0 * floor(h / 360.0)
+    if x >= 360.0 {
+        x = 0.0
+    }
+    return x
+}
+
+# El tono, en grados, de un color con esos canales (0 a 1), y el máximo y el mínimo.
+fn _tono(r: f64, g: f64, b: f64, mx: f64, mn: f64) -> f64 {
+    let d = mx - mn
+    if d == 0.0 {
+        return 0.0
+    }
+    let mut h = 0.0
+    if mx == r {
+        h = (g - b) / d
+    } else {
+        if mx == g {
+            h = 2.0 + (b - r) / d
+        } else {
+            h = 4.0 + (r - g) / d
+        }
+    }
+    return _modulo360(h * 60.0)
+}
+
+# Tono (0 a 360), saturación y valor (0 a 1), como colorsys.rgb_to_hsv.
+fn a_hsv(c: i32) -> Hsv {
+    let r = _r(c)
+    let g = _g(c)
+    let b = _b(c)
+    let mx = max(r, max(g, b))
+    let mn = min(r, min(g, b))
+    let s = if mx == 0.0 { 0.0 } else { (mx - mn) / mx }
+    return Hsv { h: _tono(r, g, b, mx, mn), s: s, v: mx }
+}
+
+# De tono (en grados, cualquier valor: da la vuelta), saturación y valor (0 a 1) a colores.
+fn de_hsv(h: f64, s: f64, v: f64) -> i32 {
+    return de_hsv_a(h, s, v, 255)
+}
+
+fn de_hsv_a(h: f64, s: f64, v: f64, a: i32) -> i32 {
+    let ss = _uno(s)
+    let vv = _uno(v)
+    let hh = _modulo360(h) / 60.0
+    let i = floor(hh)
+    let f = hh - i
+    let p = vv * (1.0 - ss)
+    let q = vv * (1.0 - ss * f)
+    let t = vv * (1.0 - ss * (1.0 - f))
+    let k = to_i32(i) % 6
+    if k == 0 {
+        return _de_f(vv, t, p, a)
+    }
+    if k == 1 {
+        return _de_f(q, vv, p, a)
+    }
+    if k == 2 {
+        return _de_f(p, vv, t, a)
+    }
+    if k == 3 {
+        return _de_f(p, q, vv, a)
+    }
+    if k == 4 {
+        return _de_f(t, p, vv, a)
+    }
+    return _de_f(vv, p, q, a)
+}
+
+# Tono (0 a 360), saturación y luz (0 a 1), como colorsys.rgb_to_hls.
+fn a_hsl(c: i32) -> Hsl {
+    let r = _r(c)
+    let g = _g(c)
+    let b = _b(c)
+    let mx = max(r, max(g, b))
+    let mn = min(r, min(g, b))
+    let l = (mx + mn) / 2.0
+    let d = mx - mn
+    let mut s = 0.0
+    if d != 0.0 {
+        if l <= 0.5 {
+            s = d / (mx + mn)
+        } else {
+            s = d / (2.0 - mx - mn)
+        }
+    }
+    return Hsl { h: _tono(r, g, b, mx, mn), s: s, l: l }
+}
+
+fn _hsl_valor(m1: f64, m2: f64, h: f64) -> f64 {
+    let x = h - floor(h)
+    if x < 1.0 / 6.0 {
+        return m1 + (m2 - m1) * x * 6.0
+    }
+    if x < 0.5 {
+        return m2
+    }
+    if x < 2.0 / 3.0 {
+        return m1 + (m2 - m1) * (2.0 / 3.0 - x) * 6.0
+    }
+    return m1
+}
+
+fn de_hsl(h: f64, s: f64, l: f64) -> i32 {
+    return de_hsl_a(h, s, l, 255)
+}
+
+fn de_hsl_a(h: f64, s: f64, l: f64, a: i32) -> i32 {
+    let ss = _uno(s)
+    let ll = _uno(l)
+    if ss == 0.0 {
+        return _de_f(ll, ll, ll, a)
+    }
+    let m2 = if ll <= 0.5 { ll * (1.0 + ss) } else { ll + ss - ll * ss }
+    let m1 = 2.0 * ll - m2
+    let t = _modulo360(h) / 360.0
+    return _de_f(_hsl_valor(m1, m2, t + 1.0 / 3.0), _hsl_valor(m1, m2, t), _hsl_valor(m1, m2, t - 1.0 / 3.0), a)
+}
+
+# ---------- CIE Lab (D65, 2°) ----------
+
+struct Lab {
+    l: f64
+    a: f64
+    b: f64
+}
+
+fn _xyz_x(r: f64, g: f64, b: f64) -> f64 {
+    return 0.412453 * r + 0.35758 * g + 0.180423 * b
+}
+
+fn _xyz_y(r: f64, g: f64, b: f64) -> f64 {
+    return 0.212671 * r + 0.71516 * g + 0.072169 * b
+}
+
+fn _xyz_z(r: f64, g: f64, b: f64) -> f64 {
+    return 0.019334 * r + 0.119193 * g + 0.950227 * b
+}
+
+fn _f_lab(t: f64) -> f64 {
+    if t > 0.008856 {
+        return _cbrt(t)
+    }
+    return 7.787 * t + 16.0 / 116.0
+}
+
+# L (0 a 100), a y b, como skimage.colores.rgb2lab.
+fn a_lab(c: i32) -> Lab {
+    let r = _lin(_r(c))
+    let g = _lin(_g(c))
+    let b = _lin(_b(c))
+    let x = _f_lab(_xyz_x(r, g, b) / 0.95047)
+    let y = _f_lab(_xyz_y(r, g, b))
+    let z = _f_lab(_xyz_z(r, g, b) / 1.08883)
+    return Lab { l: 116.0 * y - 16.0, a: 500.0 * (x - y), b: 200.0 * (y - z) }
+}
+
+fn _g_lab(t: f64) -> f64 {
+    if t > 0.2068966 {
+        return t * t * t
+    }
+    return (t - 16.0 / 116.0) / 7.787
+}
+
+# Lo contrario (lo que no cabe en sRGB se recorta), como skimage.colores.lab2rgb.
+fn de_lab(l: f64, a: f64, b: f64) -> i32 {
+    return de_lab_a(l, a, b, 255)
+}
+
+fn de_lab_a(l: f64, a: f64, b: f64, alfa: i32) -> i32 {
+    let fy = (l + 16.0) / 116.0
+    let fx = a / 500.0 + fy
+    let mut fz = fy - b / 200.0
+    if fz < 0.0 {
+        fz = 0.0
+    }
+    let x = _g_lab(fx) * 0.95047
+    let y = _g_lab(fy)
+    let z = _g_lab(fz) * 1.08883
+    let r = 3.2404813432005266 * x - 1.5371515162713183 * y - 0.4985363261688878 * z
+    let g = 0.0 - 0.9692549499965682 * x + 1.8759900014898907 * y + 0.04155592655829284 * z
+    let bb = 0.055646639135177166 * x - 0.20404133836651123 * y + 1.0573110696453443 * z
+    return _de_f(_gam(_uno(r)), _gam(_uno(g)), _gam(_uno(bb)), alfa)
+}
+
+# ---------- Oklab ----------
+
+struct Oklab {
+    l: f64
+    a: f64
+    b: f64
+}
+
+# L (0 a 1), a y b (Björn Ottosson, 2020): una distancia entre colores casi pareja y
+# degradados sin los grises sucios de mezclar en sRGB.
+fn a_oklab(c: i32) -> Oklab {
+    let r = _lin(_r(c))
+    let g = _lin(_g(c))
+    let b = _lin(_b(c))
+    let l = _cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+    let m = _cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+    let s = _cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+    return Oklab {
+        l: 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+        a: 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+        b: 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s
+    }
+}
+
+fn de_oklab(l: f64, a: f64, b: f64) -> i32 {
+    return de_oklab_a(l, a, b, 255)
+}
+
+fn de_oklab_a(l: f64, a: f64, b: f64, alfa: i32) -> i32 {
+    let l_ = l + 0.3963377774 * a + 0.2158037573 * b
+    let m_ = l - 0.1055613458 * a - 0.0638541728 * b
+    let s_ = l - 0.0894841775 * a - 1.291485548 * b
+    let ll = l_ * l_ * l_
+    let mm = m_ * m_ * m_
+    let ss = s_ * s_ * s_
+    let r = 4.0767416621 * ll - 3.3077115913 * mm + 0.2309699292 * ss
+    let g = 0.0 - 1.2684380046 * ll + 2.6097574011 * mm - 0.3413193965 * ss
+    let bb = 0.0 - 0.0041960863 * ll - 0.7034186147 * mm + 1.707614701 * ss
+    return _de_f(_gam(_uno(r)), _gam(_uno(g)), _gam(_uno(bb)), alfa)
+}
+
+# ---------- operaciones ----------
+
+fn _mezcla_byte(a: i32, b: i32, t: f64) -> i32 {
+    return to_i32(floor(to_f64(a) + (to_f64(b) - to_f64(a)) * t + 0.5))
+}
+
+# Mezcla `a` con `b`: t = 0 da a, t = 1 da b (en sRGB, canal por canal, alfa incluido).
+fn mezclar(a: i32, b: i32, t: f64) -> i32 {
+    let u = _uno(t)
+    return rgba(_mezcla_byte(canal_r(a), canal_r(b), u), _mezcla_byte(canal_g(a), canal_g(b), u), _mezcla_byte(canal_b(a), canal_b(b), u), _mezcla_byte(canal_a(a), canal_a(b), u))
+}
+
+# Lo mismo en Oklab: el degradado pasa por colores parejos en luz y sin oscurecerse
+# a mitad de camino.
+fn mezclar_oklab(a: i32, b: i32, t: f64) -> i32 {
+    let u = _uno(t)
+    let x = a_oklab(a)
+    let y = a_oklab(b)
+    return de_oklab_a(x.l + (y.l - x.l) * u, x.a + (y.a - x.a) * u, x.b + (y.b - x.b) * u, _mezcla_byte(canal_a(a), canal_a(b), u))
+}
+
+# Mezcla con blanco: t de 0 (igual) a 1 (blanco).
+fn aclarar(c: i32, t: f64) -> i32 {
+    return mezclar(c, rgba(255, 255, 255, canal_a(c)), t)
+}
+
+# Mezcla con negro: t de 0 (igual) a 1 (negro).
+fn oscurecer(c: i32, t: f64) -> i32 {
+    return mezclar(c, rgba(0, 0, 0, canal_a(c)), t)
+}
+
+# Multiplica la saturación (en HSL) por `factor` (0 apaga, 2 duplica, con tope en 1).
+fn saturar(c: i32, factor: f64) -> i32 {
+    let x = a_hsl(c)
+    return de_hsl_a(x.h, x.s * factor, x.l, canal_a(c))
+}
+
+# Gira el tono esos grados (en HSL).
+fn girar_tono(c: i32, grados: f64) -> i32 {
+    let x = a_hsl(c)
+    return de_hsl_a(x.h + grados, x.s, x.l, canal_a(c))
+}
+
+fn complementario(c: i32) -> i32 {
+    return girar_tono(c, 180.0)
+}
+
+# El negativo: 255 menos cada canal (el alfa queda).
+fn invertir(c: i32) -> i32 {
+    return rgba(255 - canal_r(c), 255 - canal_g(c), 255 - canal_b(c), canal_a(c))
+}
+
+# ---------- luminancia, contraste, diferencias ----------
+
+# La luminancia relativa de WCAG 2: 0 (negro) a 1 (blanco).
+fn luminancia(c: i32) -> f64 {
+    return 0.2126 * _lin(_r(c)) + 0.7152 * _lin(_g(c)) + 0.0722 * _lin(_b(c))
+}
+
+# El gris con la misma luminancia (opaco no: conserva el alfa).
+fn gris(c: i32) -> i32 {
+    let y = _a_byte(_gam(luminancia(c)))
+    return rgba(y, y, y, canal_a(c))
+}
+
+# La relación de contraste de WCAG entre dos colores: de 1 (iguales) a 21 (negro sobre
+# blanco). 4.5 es el mínimo para texto normal (AA) y 7, para AAA.
+fn contraste(a: i32, b: i32) -> f64 {
+    let la = luminancia(a)
+    let lb = luminancia(b)
+    let hi = max(la, lb)
+    let lo = min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+}
+
+# Negro o blanco, el que se lee mejor sobre ese fondo.
+fn texto_sobre(fondo: i32) -> i32 {
+    let n = rgb(0, 0, 0)
+    let b = rgb(255, 255, 255)
+    if contraste(fondo, n) >= contraste(fondo, b) {
+        return n
+    }
+    return b
+}
+
+fn _rad(g: f64) -> f64 {
+    return g * mate_pi() / 180.0
+}
+
+fn mate_pi() -> f64 {
+    return 3.141592653589793
+}
+
+fn _grados(r: f64) -> f64 {
+    return r * 180.0 / mate_pi()
+}
+
+# El ángulo de (b, a) en grados de 0 a 360 (atan2 sale de atan).
+fn _angulo(y: f64, x: f64) -> f64 {
+    if x == 0.0 and y == 0.0 {
+        return 0.0
+    }
+    let mut r = 0.0
+    if x > 0.0 {
+        r = atan(y / x)
+    } else {
+        if x < 0.0 {
+            if y >= 0.0 {
+                r = atan(y / x) + mate_pi()
+            } else {
+                r = atan(y / x) - mate_pi()
+            }
+        } else {
+            if y > 0.0 {
+                r = mate_pi() / 2.0
+            } else {
+                r = 0.0 - mate_pi() / 2.0
+            }
+        }
+    }
+    let mut g = _grados(r)
+    if g < 0.0 {
+        g = g + 360.0
+    }
+    return g
+}
+
+# La diferencia CIEDE2000 (ΔE) entre dos colores: 0 son iguales, 1 casi no se nota,
+# más de 5 se distinguen a simple vista (skimage.colores.deltaE_ciede2000).
+fn delta_e(a: i32, b: i32) -> f64 {
+    let x = a_lab(a)
+    let y = a_lab(b)
+    let c1 = sqrt(x.a * x.a + x.b * x.b)
+    let c2 = sqrt(y.a * y.a + y.b * y.b)
+    let cm = (c1 + c2) / 2.0
+    let cm7 = pow(cm, 7.0)
+    let g = 0.5 * (1.0 - sqrt(cm7 / (cm7 + pow(25.0, 7.0))))
+    let a1 = (1.0 + g) * x.a
+    let a2 = (1.0 + g) * y.a
+    let cp1 = sqrt(a1 * a1 + x.b * x.b)
+    let cp2 = sqrt(a2 * a2 + y.b * y.b)
+    let hp1 = _angulo(x.b, a1)
+    let hp2 = _angulo(y.b, a2)
+    let dl = y.l - x.l
+    let dc = cp2 - cp1
+    let mut dh = 0.0
+    if cp1 * cp2 != 0.0 {
+        dh = hp2 - hp1
+        if dh > 180.0 {
+            dh = dh - 360.0
+        }
+        if dh < 0.0 - 180.0 {
+            dh = dh + 360.0
+        }
+    }
+    let dhh = 2.0 * sqrt(cp1 * cp2) * sin(_rad(dh / 2.0))
+    let lm = (x.l + y.l) / 2.0
+    let cpm = (cp1 + cp2) / 2.0
+    let mut hm = hp1 + hp2
+    if cp1 * cp2 != 0.0 {
+        if abs(hp1 - hp2) > 180.0 {
+            if hp1 + hp2 < 360.0 {
+                hm = hp1 + hp2 + 360.0
+            } else {
+                hm = hp1 + hp2 - 360.0
+            }
+        }
+        hm = hm / 2.0
+    }
+    let t = 1.0 - 0.17 * cos(_rad(hm - 30.0)) + 0.24 * cos(_rad(2.0 * hm)) + 0.32 * cos(_rad(3.0 * hm + 6.0)) - 0.2 * cos(_rad(4.0 * hm - 63.0))
+    let dtheta = 30.0 * exp(0.0 - ((hm - 275.0) / 25.0) * ((hm - 275.0) / 25.0))
+    let cpm7 = pow(cpm, 7.0)
+    let rc = 2.0 * sqrt(cpm7 / (cpm7 + pow(25.0, 7.0)))
+    let sl = 1.0 + 0.015 * (lm - 50.0) * (lm - 50.0) / sqrt(20.0 + (lm - 50.0) * (lm - 50.0))
+    let sc = 1.0 + 0.045 * cpm
+    let sh = 1.0 + 0.015 * cpm * t
+    let rt = 0.0 - sin(_rad(2.0 * dtheta)) * rc
+    let el = dl / sl
+    let ec = dc / sc
+    let eh = dhh / sh
+    return sqrt(el * el + ec * ec + eh * eh + rt * ec * eh)
+}
+
+# ---------- daltonismo ----------
+
+# Cómo ve el color alguien con esa deficiencia (modelo de Machado, Oliveira y Fernandes
+# 2009, sobre sRGB lineal). `tipo`: "protanopia" (sin rojo), "deuteranopia" (sin verde),
+# "tritanopia" (sin azul) o "acromatopsia" (solo luz). `severidad` de 0 (ve normal) a 1
+# (ausencia total); los valores de en medio mezclan las matrices en línea recta. Err si
+# el tipo no existe.
+fn simular(c: i32, tipo: str, severidad: f64) -> Result<i32> {
+    let r = _lin(_r(c))
+    let g = _lin(_g(c))
+    let b = _lin(_b(c))
+    let k = _uno(severidad)
+    let mut m00 = 1.0
+    let mut m01 = 0.0
+    let mut m02 = 0.0
+    let mut m10 = 0.0
+    let mut m11 = 1.0
+    let mut m12 = 0.0
+    let mut m20 = 0.0
+    let mut m21 = 0.0
+    let mut m22 = 1.0
+    if tipo == "protanopia" {
+        m00 = 0.152286
+        m01 = 1.052583
+        m02 = 0.0 - 0.204868
+        m10 = 0.114503
+        m11 = 0.786281
+        m12 = 0.099216
+        m20 = 0.0 - 0.003882
+        m21 = 0.0 - 0.048116
+        m22 = 1.051998
+    } else {
+        if tipo == "deuteranopia" {
+            m00 = 0.367322
+            m01 = 0.860646
+            m02 = 0.0 - 0.227968
+            m10 = 0.280085
+            m11 = 0.672501
+            m12 = 0.047413
+            m20 = 0.0 - 0.01182
+            m21 = 0.04294
+            m22 = 0.968881
+        } else {
+            if tipo == "tritanopia" {
+                m00 = 1.255528
+                m01 = 0.0 - 0.076749
+                m02 = 0.0 - 0.178779
+                m10 = 0.0 - 0.078411
+                m11 = 0.930809
+                m12 = 0.147602
+                m20 = 0.004733
+                m21 = 0.691367
+                m22 = 0.3039
+            } else {
+                if tipo == "acromatopsia" {
+                    m00 = 0.2126
+                    m01 = 0.7152
+                    m02 = 0.0722
+                    m10 = 0.2126
+                    m11 = 0.7152
+                    m12 = 0.0722
+                    m20 = 0.2126
+                    m21 = 0.7152
+                    m22 = 0.0722
+                } else {
+                    return Err("color: tipo de daltonismo desconocido '" + tipo + "' (protanopia, deuteranopia, tritanopia o acromatopsia)")
+                }
+            }
+        }
+    }
+    let a00 = 1.0 + k * (m00 - 1.0)
+    let a01 = k * m01
+    let a02 = k * m02
+    let a10 = k * m10
+    let a11 = 1.0 + k * (m11 - 1.0)
+    let a12 = k * m12
+    let a20 = k * m20
+    let a21 = k * m21
+    let a22 = 1.0 + k * (m22 - 1.0)
+    let nr = a00 * r + a01 * g + a02 * b
+    let ng = a10 * r + a11 * g + a12 * b
+    let nb = a20 * r + a21 * g + a22 * b
+    return Ok(_de_f(_gam(_uno(nr)), _gam(_uno(ng)), _gam(_uno(nb)), canal_a(c)))
+}
+
+# ---------- degradados ----------
+
+# Una lista de colores (un Vec adentro de un struct, para poder prestarlo).
+struct Lista {
+    v: Vec<i32>
+}
+
+fn lista() -> Lista {
+    let v: Vec<i32> = vec_new()
+    return Lista { v: v }
+}
+
+fn lista_agregar(l: Lista, c: i32) {
+    l.v.push(c)
+}
+
+fn lista_largo(l: Lista) -> i32 {
+    return l.v.len()
+}
+
+fn lista_color(l: Lista, i: i32) -> i32 {
+    return l.v.get(i).unwrap_or(0)
+}
+
+# El color en la posición t (0 a 1) de un degradado con esos colores repartidos parejo.
+# Con `oklab` mezcla en Oklab (mejor para el ojo); si no, en sRGB. Con la lista vacía,
+# negro.
+fn degradado(l: Lista, t: f64, oklab: bool) -> i32 {
+    let n = l.v.len()
+    if n == 0 {
+        return rgb(0, 0, 0)
+    }
+    if n == 1 {
+        return l.v.get(0).unwrap_or(0)
+    }
+    let u = _uno(t) * to_f64(n - 1)
+    let mut i = to_i32(floor(u))
+    if i >= n - 1 {
+        i = n - 2
+    }
+    let f = u - to_f64(i)
+    let a = l.v.get(i).unwrap_or(0)
+    let b = l.v.get(i + 1).unwrap_or(0)
+    if oklab {
+        return mezclar_oklab(a, b, f)
+    }
+    return mezclar(a, b, f)
+}
+
+# El color i de n colores bien repartidos en el círculo de tonos de Oklab, con la misma
+# luz y el mismo croma: n colores distintos para n series de datos. n y los índices
+# arrancan en 0 y dan la vuelta (i % n).
+fn paleta_n(n: i32, i: i32) -> i32 {
+    if n < 1 {
+        return rgb(0, 0, 0)
+    }
+    let k = i % n
+    let h = _rad(360.0 * to_f64(k) / to_f64(n) + 29.0)
+    return de_oklab(0.72, 0.13 * cos(h), 0.13 * sin(h))
+}
+
+# ---------- nombres de CSS ----------
+
+# Un color de la tabla de nombres de CSS (148), sin importar mayúsculas. Err si no existe.
+fn con_nombre(nombre: str) -> Result<i32> {
+    let v = _css_busca(texto.minusculas(texto.recortar(nombre)))
+    if v < 0 {
+        return Err("color: no conozco el color '" + nombre + "'")
+    }
+    return Ok((255 << 24) | v)
+}
+
+fn cantidad_nombres() -> i32 {
+    return 148
+}
+
+# El nombre número i (de 0 a 147, en orden alfabético).
+fn nombre_en(i: i32) -> str {
+    return _css_nombre(i)
+}
+
+fn color_en(i: i32) -> i32 {
+    return (255 << 24) | _css_valor(i)
+}
+
+# El nombre de CSS del color más parecido (la menor diferencia CIEDE2000).
+fn nombre_mas_cercano(c: i32) -> str {
+    let mut mejor = 0
+    let mut dmin = 1000000.0
+    for i in 0..148 {
+        let d = delta_e(c, color_en(i))
+        if d < dmin {
+            dmin = d
+            mejor = i
+        }
+    }
+    return _css_nombre(mejor)
+}
+
+# ---------- paletas y mapas ----------
+
+struct Paleta {
+    v: Vec<i32>
+}
+
+struct Mapa {
+    v: Vec<i32>
+}
+
+# Una paleta de colores distintos por nombre: "tab10", "tab20", "set1", "set2", "set3",
+# "dark2", "paired", "accent", "pastel1", "pastel2" u "okabe_ito". Err si no existe.
+fn paleta(nombre: str) -> Result<Paleta> {
+    let v = _cat(texto.minusculas(nombre))
+    if v.len() == 0 {
+        return Err("color: no conozco la paleta '" + nombre + "'")
+    }
+    return Ok(Paleta { v: v })
+}
+
+fn paleta_largo(p: Paleta) -> i32 {
+    return p.v.len()
+}
+
+# El color i de la paleta (da la vuelta cuando i pasa del largo).
+fn paleta_color(p: Paleta, i: i32) -> i32 {
+    let n = p.v.len()
+    if n == 0 {
+        return rgb(0, 0, 0)
+    }
+    let mut k = i % n
+    if k < 0 {
+        k = k + n
+    }
+    return (255 << 24) | p.v.get(k).unwrap_or(0)
+}
+
+fn cantidad_paletas() -> i32 {
+    return 11
+}
+
+fn nombre_paleta(i: i32) -> str {
+    return _cat_nombre(i)
+}
+
+# Un mapa de color continuo de 256 pasos por nombre: "viridis", "magma", "inferno",
+# "plasma", "cividis", "turbo", "coolwarm", "rdbu", "spectral", "ylgnbu", "greys" o
+# "hot". Err si no existe.
+fn mapa(nombre: str) -> Result<Mapa> {
+    let v = _lut(texto.minusculas(nombre))
+    if v.len() == 0 {
+        return Err("color: no conozco el mapa de color '" + nombre + "'")
+    }
+    return Ok(Mapa { v: v })
+}
+
+# El color del mapa en t (de 0 a 1; fuera de ese rango se recorta), con el mismo paso
+# que matplotlib: el casillero int(t * 256).
+fn mapa_en(m: Mapa, t: f64) -> i32 {
+    let n = m.v.len()
+    if n == 0 {
+        return rgb(0, 0, 0)
+    }
+    let mut i = to_i32(floor(_uno(t) * to_f64(n)))
+    if i >= n {
+        i = n - 1
+    }
+    return (255 << 24) | m.v.get(i).unwrap_or(0)
+}
+
+fn cantidad_mapas() -> i32 {
+    return 12
+}
+
+fn nombre_mapa(i: i32) -> str {
+    return _lut_nombre(i)
+}
+
+# ---- TABLAS (generadas por pruebas/gen_colores_tablas.py: no se editan a mano) ----
+# matplotlib 3.11.2
+
+# --- nombres de CSS ---
+
+fn _css_nombre(i: i32) -> str {
+    if i == 0 {
+        return "aliceblue"
+    }
+    if i == 1 {
+        return "antiquewhite"
+    }
+    if i == 2 {
+        return "aqua"
+    }
+    if i == 3 {
+        return "aquamarine"
+    }
+    if i == 4 {
+        return "azure"
+    }
+    if i == 5 {
+        return "beige"
+    }
+    if i == 6 {
+        return "bisque"
+    }
+    if i == 7 {
+        return "black"
+    }
+    if i == 8 {
+        return "blanchedalmond"
+    }
+    if i == 9 {
+        return "blue"
+    }
+    if i == 10 {
+        return "blueviolet"
+    }
+    if i == 11 {
+        return "brown"
+    }
+    if i == 12 {
+        return "burlywood"
+    }
+    if i == 13 {
+        return "cadetblue"
+    }
+    if i == 14 {
+        return "chartreuse"
+    }
+    if i == 15 {
+        return "chocolate"
+    }
+    if i == 16 {
+        return "coral"
+    }
+    if i == 17 {
+        return "cornflowerblue"
+    }
+    if i == 18 {
+        return "cornsilk"
+    }
+    if i == 19 {
+        return "crimson"
+    }
+    if i == 20 {
+        return "cyan"
+    }
+    if i == 21 {
+        return "darkblue"
+    }
+    if i == 22 {
+        return "darkcyan"
+    }
+    if i == 23 {
+        return "darkgoldenrod"
+    }
+    if i == 24 {
+        return "darkgray"
+    }
+    if i == 25 {
+        return "darkgreen"
+    }
+    if i == 26 {
+        return "darkgrey"
+    }
+    if i == 27 {
+        return "darkkhaki"
+    }
+    if i == 28 {
+        return "darkmagenta"
+    }
+    if i == 29 {
+        return "darkolivegreen"
+    }
+    if i == 30 {
+        return "darkorange"
+    }
+    if i == 31 {
+        return "darkorchid"
+    }
+    if i == 32 {
+        return "darkred"
+    }
+    if i == 33 {
+        return "darksalmon"
+    }
+    if i == 34 {
+        return "darkseagreen"
+    }
+    if i == 35 {
+        return "darkslateblue"
+    }
+    if i == 36 {
+        return "darkslategray"
+    }
+    if i == 37 {
+        return "darkslategrey"
+    }
+    if i == 38 {
+        return "darkturquoise"
+    }
+    if i == 39 {
+        return "darkviolet"
+    }
+    if i == 40 {
+        return "deeppink"
+    }
+    if i == 41 {
+        return "deepskyblue"
+    }
+    if i == 42 {
+        return "dimgray"
+    }
+    if i == 43 {
+        return "dimgrey"
+    }
+    if i == 44 {
+        return "dodgerblue"
+    }
+    if i == 45 {
+        return "firebrick"
+    }
+    if i == 46 {
+        return "floralwhite"
+    }
+    if i == 47 {
+        return "forestgreen"
+    }
+    if i == 48 {
+        return "fuchsia"
+    }
+    if i == 49 {
+        return "gainsboro"
+    }
+    if i == 50 {
+        return "ghostwhite"
+    }
+    if i == 51 {
+        return "gold"
+    }
+    if i == 52 {
+        return "goldenrod"
+    }
+    if i == 53 {
+        return "gray"
+    }
+    if i == 54 {
+        return "green"
+    }
+    if i == 55 {
+        return "greenyellow"
+    }
+    if i == 56 {
+        return "grey"
+    }
+    if i == 57 {
+        return "honeydew"
+    }
+    if i == 58 {
+        return "hotpink"
+    }
+    if i == 59 {
+        return "indianred"
+    }
+    if i == 60 {
+        return "indigo"
+    }
+    if i == 61 {
+        return "ivory"
+    }
+    if i == 62 {
+        return "khaki"
+    }
+    if i == 63 {
+        return "lavender"
+    }
+    if i == 64 {
+        return "lavenderblush"
+    }
+    if i == 65 {
+        return "lawngreen"
+    }
+    if i == 66 {
+        return "lemonchiffon"
+    }
+    if i == 67 {
+        return "lightblue"
+    }
+    if i == 68 {
+        return "lightcoral"
+    }
+    if i == 69 {
+        return "lightcyan"
+    }
+    if i == 70 {
+        return "lightgoldenrodyellow"
+    }
+    if i == 71 {
+        return "lightgray"
+    }
+    if i == 72 {
+        return "lightgreen"
+    }
+    if i == 73 {
+        return "lightgrey"
+    }
+    if i == 74 {
+        return "lightpink"
+    }
+    if i == 75 {
+        return "lightsalmon"
+    }
+    if i == 76 {
+        return "lightseagreen"
+    }
+    if i == 77 {
+        return "lightskyblue"
+    }
+    if i == 78 {
+        return "lightslategray"
+    }
+    if i == 79 {
+        return "lightslategrey"
+    }
+    if i == 80 {
+        return "lightsteelblue"
+    }
+    if i == 81 {
+        return "lightyellow"
+    }
+    if i == 82 {
+        return "lime"
+    }
+    if i == 83 {
+        return "limegreen"
+    }
+    if i == 84 {
+        return "linen"
+    }
+    if i == 85 {
+        return "magenta"
+    }
+    if i == 86 {
+        return "maroon"
+    }
+    if i == 87 {
+        return "mediumaquamarine"
+    }
+    if i == 88 {
+        return "mediumblue"
+    }
+    if i == 89 {
+        return "mediumorchid"
+    }
+    if i == 90 {
+        return "mediumpurple"
+    }
+    if i == 91 {
+        return "mediumseagreen"
+    }
+    if i == 92 {
+        return "mediumslateblue"
+    }
+    if i == 93 {
+        return "mediumspringgreen"
+    }
+    if i == 94 {
+        return "mediumturquoise"
+    }
+    if i == 95 {
+        return "mediumvioletred"
+    }
+    if i == 96 {
+        return "midnightblue"
+    }
+    if i == 97 {
+        return "mintcream"
+    }
+    if i == 98 {
+        return "mistyrose"
+    }
+    if i == 99 {
+        return "moccasin"
+    }
+    if i == 100 {
+        return "navajowhite"
+    }
+    if i == 101 {
+        return "navy"
+    }
+    if i == 102 {
+        return "oldlace"
+    }
+    if i == 103 {
+        return "olive"
+    }
+    if i == 104 {
+        return "olivedrab"
+    }
+    if i == 105 {
+        return "orange"
+    }
+    if i == 106 {
+        return "orangered"
+    }
+    if i == 107 {
+        return "orchid"
+    }
+    if i == 108 {
+        return "palegoldenrod"
+    }
+    if i == 109 {
+        return "palegreen"
+    }
+    if i == 110 {
+        return "paleturquoise"
+    }
+    if i == 111 {
+        return "palevioletred"
+    }
+    if i == 112 {
+        return "papayawhip"
+    }
+    if i == 113 {
+        return "peachpuff"
+    }
+    if i == 114 {
+        return "peru"
+    }
+    if i == 115 {
+        return "pink"
+    }
+    if i == 116 {
+        return "plum"
+    }
+    if i == 117 {
+        return "powderblue"
+    }
+    if i == 118 {
+        return "purple"
+    }
+    if i == 119 {
+        return "rebeccapurple"
+    }
+    if i == 120 {
+        return "red"
+    }
+    if i == 121 {
+        return "rosybrown"
+    }
+    if i == 122 {
+        return "royalblue"
+    }
+    if i == 123 {
+        return "saddlebrown"
+    }
+    if i == 124 {
+        return "salmon"
+    }
+    if i == 125 {
+        return "sandybrown"
+    }
+    if i == 126 {
+        return "seagreen"
+    }
+    if i == 127 {
+        return "seashell"
+    }
+    if i == 128 {
+        return "sienna"
+    }
+    if i == 129 {
+        return "silver"
+    }
+    if i == 130 {
+        return "skyblue"
+    }
+    if i == 131 {
+        return "slateblue"
+    }
+    if i == 132 {
+        return "slategray"
+    }
+    if i == 133 {
+        return "slategrey"
+    }
+    if i == 134 {
+        return "snow"
+    }
+    if i == 135 {
+        return "springgreen"
+    }
+    if i == 136 {
+        return "steelblue"
+    }
+    if i == 137 {
+        return "tan"
+    }
+    if i == 138 {
+        return "teal"
+    }
+    if i == 139 {
+        return "thistle"
+    }
+    if i == 140 {
+        return "tomato"
+    }
+    if i == 141 {
+        return "turquoise"
+    }
+    if i == 142 {
+        return "violet"
+    }
+    if i == 143 {
+        return "wheat"
+    }
+    if i == 144 {
+        return "white"
+    }
+    if i == 145 {
+        return "whitesmoke"
+    }
+    if i == 146 {
+        return "yellow"
+    }
+    if i == 147 {
+        return "yellowgreen"
+    }
+    return ""
+}
+
+fn _css_valores() -> Vec<i32> {
+    let v: Vec<i32> = [
+        15792383, 16444375, 65535, 8388564, 15794175, 16119260, 16770244, 0, 16772045, 255, 9055202, 10824234,
+        14596231, 6266528, 8388352, 13789470, 16744272, 6591981, 16775388, 14423100, 65535, 139, 35723, 12092939,
+        11119017, 25600, 11119017, 12433259, 9109643, 5597999, 16747520, 10040012, 9109504, 15308410, 9419919, 4734347,
+        3100495, 3100495, 52945, 9699539, 16716947, 49151, 6908265, 6908265, 2003199, 11674146, 16775920, 2263842,
+        16711935, 14474460, 16316671, 16766720, 14329120, 8421504, 32768, 11403055, 8421504, 15794160, 16738740, 13458524,
+        4915330, 16777200, 15787660, 15132410, 16773365, 8190976, 16775885, 11393254, 15761536, 14745599, 16448210, 13882323,
+        9498256, 13882323, 16758465, 16752762, 2142890, 8900346, 7833753, 7833753, 11584734, 16777184, 65280, 3329330,
+        16445670, 16711935, 8388608, 6737322, 205, 12211667, 9662683, 3978097, 8087790, 64154, 4772300, 13047173,
+        1644912, 16121850, 16770273, 16770229, 16768685, 128, 16643558, 8421376, 7048739, 16753920, 16729344, 14315734,
+        15657130, 10025880, 11529966, 14381203, 16773077, 16767673, 13468991, 16761035, 14524637, 11591910, 8388736, 6697881,
+        16711680, 12357519, 4286945, 9127187, 16416882, 16032864, 3050327, 16774638, 10506797, 12632256, 8900331, 6970061,
+        7372944, 7372944, 16775930, 65407, 4620980, 13808780, 32896, 14204888, 16737095, 4251856, 15631086, 16113331,
+        16777215, 16119285, 16776960, 10145074
+    ]
+    return v
+}
+
+fn _css_valor(i: i32) -> i32 {
+    let v = _css_valores()
+    return v.get(i).unwrap_or(0)
+}
+
+fn _css_busca(nombre: str) -> i32 {
+    if nombre == "aliceblue" {
+        return 15792383
+    }
+    if nombre == "antiquewhite" {
+        return 16444375
+    }
+    if nombre == "aqua" {
+        return 65535
+    }
+    if nombre == "aquamarine" {
+        return 8388564
+    }
+    if nombre == "azure" {
+        return 15794175
+    }
+    if nombre == "beige" {
+        return 16119260
+    }
+    if nombre == "bisque" {
+        return 16770244
+    }
+    if nombre == "black" {
+        return 0
+    }
+    if nombre == "blanchedalmond" {
+        return 16772045
+    }
+    if nombre == "blue" {
+        return 255
+    }
+    if nombre == "blueviolet" {
+        return 9055202
+    }
+    if nombre == "brown" {
+        return 10824234
+    }
+    if nombre == "burlywood" {
+        return 14596231
+    }
+    if nombre == "cadetblue" {
+        return 6266528
+    }
+    if nombre == "chartreuse" {
+        return 8388352
+    }
+    if nombre == "chocolate" {
+        return 13789470
+    }
+    if nombre == "coral" {
+        return 16744272
+    }
+    if nombre == "cornflowerblue" {
+        return 6591981
+    }
+    if nombre == "cornsilk" {
+        return 16775388
+    }
+    if nombre == "crimson" {
+        return 14423100
+    }
+    if nombre == "cyan" {
+        return 65535
+    }
+    if nombre == "darkblue" {
+        return 139
+    }
+    if nombre == "darkcyan" {
+        return 35723
+    }
+    if nombre == "darkgoldenrod" {
+        return 12092939
+    }
+    if nombre == "darkgray" {
+        return 11119017
+    }
+    if nombre == "darkgreen" {
+        return 25600
+    }
+    if nombre == "darkgrey" {
+        return 11119017
+    }
+    if nombre == "darkkhaki" {
+        return 12433259
+    }
+    if nombre == "darkmagenta" {
+        return 9109643
+    }
+    if nombre == "darkolivegreen" {
+        return 5597999
+    }
+    if nombre == "darkorange" {
+        return 16747520
+    }
+    if nombre == "darkorchid" {
+        return 10040012
+    }
+    if nombre == "darkred" {
+        return 9109504
+    }
+    if nombre == "darksalmon" {
+        return 15308410
+    }
+    if nombre == "darkseagreen" {
+        return 9419919
+    }
+    if nombre == "darkslateblue" {
+        return 4734347
+    }
+    if nombre == "darkslategray" {
+        return 3100495
+    }
+    if nombre == "darkslategrey" {
+        return 3100495
+    }
+    if nombre == "darkturquoise" {
+        return 52945
+    }
+    if nombre == "darkviolet" {
+        return 9699539
+    }
+    if nombre == "deeppink" {
+        return 16716947
+    }
+    if nombre == "deepskyblue" {
+        return 49151
+    }
+    if nombre == "dimgray" {
+        return 6908265
+    }
+    if nombre == "dimgrey" {
+        return 6908265
+    }
+    if nombre == "dodgerblue" {
+        return 2003199
+    }
+    if nombre == "firebrick" {
+        return 11674146
+    }
+    if nombre == "floralwhite" {
+        return 16775920
+    }
+    if nombre == "forestgreen" {
+        return 2263842
+    }
+    if nombre == "fuchsia" {
+        return 16711935
+    }
+    if nombre == "gainsboro" {
+        return 14474460
+    }
+    if nombre == "ghostwhite" {
+        return 16316671
+    }
+    if nombre == "gold" {
+        return 16766720
+    }
+    if nombre == "goldenrod" {
+        return 14329120
+    }
+    if nombre == "gray" {
+        return 8421504
+    }
+    if nombre == "green" {
+        return 32768
+    }
+    if nombre == "greenyellow" {
+        return 11403055
+    }
+    if nombre == "grey" {
+        return 8421504
+    }
+    if nombre == "honeydew" {
+        return 15794160
+    }
+    if nombre == "hotpink" {
+        return 16738740
+    }
+    if nombre == "indianred" {
+        return 13458524
+    }
+    if nombre == "indigo" {
+        return 4915330
+    }
+    if nombre == "ivory" {
+        return 16777200
+    }
+    if nombre == "khaki" {
+        return 15787660
+    }
+    if nombre == "lavender" {
+        return 15132410
+    }
+    if nombre == "lavenderblush" {
+        return 16773365
+    }
+    if nombre == "lawngreen" {
+        return 8190976
+    }
+    if nombre == "lemonchiffon" {
+        return 16775885
+    }
+    if nombre == "lightblue" {
+        return 11393254
+    }
+    if nombre == "lightcoral" {
+        return 15761536
+    }
+    if nombre == "lightcyan" {
+        return 14745599
+    }
+    if nombre == "lightgoldenrodyellow" {
+        return 16448210
+    }
+    if nombre == "lightgray" {
+        return 13882323
+    }
+    if nombre == "lightgreen" {
+        return 9498256
+    }
+    if nombre == "lightgrey" {
+        return 13882323
+    }
+    if nombre == "lightpink" {
+        return 16758465
+    }
+    if nombre == "lightsalmon" {
+        return 16752762
+    }
+    if nombre == "lightseagreen" {
+        return 2142890
+    }
+    if nombre == "lightskyblue" {
+        return 8900346
+    }
+    if nombre == "lightslategray" {
+        return 7833753
+    }
+    if nombre == "lightslategrey" {
+        return 7833753
+    }
+    if nombre == "lightsteelblue" {
+        return 11584734
+    }
+    if nombre == "lightyellow" {
+        return 16777184
+    }
+    if nombre == "lime" {
+        return 65280
+    }
+    if nombre == "limegreen" {
+        return 3329330
+    }
+    if nombre == "linen" {
+        return 16445670
+    }
+    if nombre == "magenta" {
+        return 16711935
+    }
+    if nombre == "maroon" {
+        return 8388608
+    }
+    if nombre == "mediumaquamarine" {
+        return 6737322
+    }
+    if nombre == "mediumblue" {
+        return 205
+    }
+    if nombre == "mediumorchid" {
+        return 12211667
+    }
+    if nombre == "mediumpurple" {
+        return 9662683
+    }
+    if nombre == "mediumseagreen" {
+        return 3978097
+    }
+    if nombre == "mediumslateblue" {
+        return 8087790
+    }
+    if nombre == "mediumspringgreen" {
+        return 64154
+    }
+    if nombre == "mediumturquoise" {
+        return 4772300
+    }
+    if nombre == "mediumvioletred" {
+        return 13047173
+    }
+    if nombre == "midnightblue" {
+        return 1644912
+    }
+    if nombre == "mintcream" {
+        return 16121850
+    }
+    if nombre == "mistyrose" {
+        return 16770273
+    }
+    if nombre == "moccasin" {
+        return 16770229
+    }
+    if nombre == "navajowhite" {
+        return 16768685
+    }
+    if nombre == "navy" {
+        return 128
+    }
+    if nombre == "oldlace" {
+        return 16643558
+    }
+    if nombre == "olive" {
+        return 8421376
+    }
+    if nombre == "olivedrab" {
+        return 7048739
+    }
+    if nombre == "orange" {
+        return 16753920
+    }
+    if nombre == "orangered" {
+        return 16729344
+    }
+    if nombre == "orchid" {
+        return 14315734
+    }
+    if nombre == "palegoldenrod" {
+        return 15657130
+    }
+    if nombre == "palegreen" {
+        return 10025880
+    }
+    if nombre == "paleturquoise" {
+        return 11529966
+    }
+    if nombre == "palevioletred" {
+        return 14381203
+    }
+    if nombre == "papayawhip" {
+        return 16773077
+    }
+    if nombre == "peachpuff" {
+        return 16767673
+    }
+    if nombre == "peru" {
+        return 13468991
+    }
+    if nombre == "pink" {
+        return 16761035
+    }
+    if nombre == "plum" {
+        return 14524637
+    }
+    if nombre == "powderblue" {
+        return 11591910
+    }
+    if nombre == "purple" {
+        return 8388736
+    }
+    if nombre == "rebeccapurple" {
+        return 6697881
+    }
+    if nombre == "red" {
+        return 16711680
+    }
+    if nombre == "rosybrown" {
+        return 12357519
+    }
+    if nombre == "royalblue" {
+        return 4286945
+    }
+    if nombre == "saddlebrown" {
+        return 9127187
+    }
+    if nombre == "salmon" {
+        return 16416882
+    }
+    if nombre == "sandybrown" {
+        return 16032864
+    }
+    if nombre == "seagreen" {
+        return 3050327
+    }
+    if nombre == "seashell" {
+        return 16774638
+    }
+    if nombre == "sienna" {
+        return 10506797
+    }
+    if nombre == "silver" {
+        return 12632256
+    }
+    if nombre == "skyblue" {
+        return 8900331
+    }
+    if nombre == "slateblue" {
+        return 6970061
+    }
+    if nombre == "slategray" {
+        return 7372944
+    }
+    if nombre == "slategrey" {
+        return 7372944
+    }
+    if nombre == "snow" {
+        return 16775930
+    }
+    if nombre == "springgreen" {
+        return 65407
+    }
+    if nombre == "steelblue" {
+        return 4620980
+    }
+    if nombre == "tan" {
+        return 13808780
+    }
+    if nombre == "teal" {
+        return 32896
+    }
+    if nombre == "thistle" {
+        return 14204888
+    }
+    if nombre == "tomato" {
+        return 16737095
+    }
+    if nombre == "turquoise" {
+        return 4251856
+    }
+    if nombre == "violet" {
+        return 15631086
+    }
+    if nombre == "wheat" {
+        return 16113331
+    }
+    if nombre == "white" {
+        return 16777215
+    }
+    if nombre == "whitesmoke" {
+        return 16119285
+    }
+    if nombre == "yellow" {
+        return 16776960
+    }
+    if nombre == "yellowgreen" {
+        return 10145074
+    }
+    return 0 - 1
+}
+
+# --- paletas de colores distintos ---
+
+fn _cat_tab10() -> Vec<i32> {
+    let v: Vec<i32> = [
+        2062260, 16744206, 2924588, 14034728, 9725885, 9197131, 14907330, 8355711, 12369186, 1556175
+    ]
+    return v
+}
+
+fn _cat_tab20() -> Vec<i32> {
+    let v: Vec<i32> = [
+        2062260, 11454440, 16744206, 16759672, 2924588, 10018698, 14034728, 16750742, 9725885, 12955861, 9197131, 12885140,
+        14907330, 16234194, 8355711, 13092807, 12369186, 14408589, 1556175, 10410725
+    ]
+    return v
+}
+
+fn _cat_set1() -> Vec<i32> {
+    let v: Vec<i32> = [
+        14948892, 3636920, 5091146, 9981603, 16744192, 16777011, 10901032, 16220607, 10066329
+    ]
+    return v
+}
+
+fn _cat_set2() -> Vec<i32> {
+    let v: Vec<i32> = [
+        6734501, 16551266, 9281739, 15174339, 10934356, 16767279, 15058068, 11776947
+    ]
+    return v
+}
+
+fn _cat_set3() -> Vec<i32> {
+    let v: Vec<i32> = [
+        9294791, 16777139, 12499674, 16482418, 8434131, 16626786, 11787881, 16567781, 14277081, 12353725, 13429701, 16772463
+    ]
+    return v
+}
+
+fn _cat_dark2() -> Vec<i32> {
+    let v: Vec<i32> = [
+        1810039, 14245634, 7696563, 15149450, 6727198, 15117058, 10909213, 6710886
+    ]
+    return v
+}
+
+fn _cat_paired() -> Vec<i32> {
+    let v: Vec<i32> = [
+        10931939, 2062516, 11722634, 3383340, 16489113, 14883356, 16629615, 16744192, 13284054, 6962586, 16777113, 11622696
+    ]
+    return v
+}
+
+fn _cat_accent() -> Vec<i32> {
+    let v: Vec<i32> = [
+        8374655, 12496596, 16629894, 16777113, 3697840, 15729279, 12540695, 6710886
+    ]
+    return v
+}
+
+fn _cat_pastel1() -> Vec<i32> {
+    let v: Vec<i32> = [
+        16495790, 11783651, 13429701, 14601188, 16701862, 16777164, 15063229, 16636652, 15921906
+    ]
+    return v
+}
+
+fn _cat_pastel2() -> Vec<i32> {
+    let v: Vec<i32> = [
+        11789005, 16633260, 13358568, 16042724, 15136201, 16773806, 15852236, 13421772
+    ]
+    return v
+}
+
+fn _cat_okabe_ito() -> Vec<i32> {
+    let v: Vec<i32> = [
+        15113984, 5682409, 40563, 15787074, 29362, 13983232, 13400487, 0
+    ]
+    return v
+}
+
+fn _cat(nombre: str) -> Vec<i32> {
+    if nombre == "tab10" {
+        return _cat_tab10()
+    }
+    if nombre == "tab20" {
+        return _cat_tab20()
+    }
+    if nombre == "set1" {
+        return _cat_set1()
+    }
+    if nombre == "set2" {
+        return _cat_set2()
+    }
+    if nombre == "set3" {
+        return _cat_set3()
+    }
+    if nombre == "dark2" {
+        return _cat_dark2()
+    }
+    if nombre == "paired" {
+        return _cat_paired()
+    }
+    if nombre == "accent" {
+        return _cat_accent()
+    }
+    if nombre == "pastel1" {
+        return _cat_pastel1()
+    }
+    if nombre == "pastel2" {
+        return _cat_pastel2()
+    }
+    if nombre == "okabe_ito" {
+        return _cat_okabe_ito()
+    }
+    let vacio: Vec<i32> = vec_new()
+    return vacio
+}
+
+fn _cat_nombre(i: i32) -> str {
+    if i == 0 {
+        return "tab10"
+    }
+    if i == 1 {
+        return "tab20"
+    }
+    if i == 2 {
+        return "set1"
+    }
+    if i == 3 {
+        return "set2"
+    }
+    if i == 4 {
+        return "set3"
+    }
+    if i == 5 {
+        return "dark2"
+    }
+    if i == 6 {
+        return "paired"
+    }
+    if i == 7 {
+        return "accent"
+    }
+    if i == 8 {
+        return "pastel1"
+    }
+    if i == 9 {
+        return "pastel2"
+    }
+    if i == 10 {
+        return "okabe_ito"
+    }
+    return ""
+}
+
+# --- mapas de color de 256 pasos (matplotlib, cmap(t, bytes=True)) ---
+
+fn _lut_viridis() -> Vec<i32> {
+    let v: Vec<i32> = [
+        4456788, 4457045, 4457303, 4523352, 4523610, 4524123, 4589916, 4590430, 4590687, 4591201,
+        4656994, 4657507, 4657765, 4658278, 4658535, 4658793, 4659306, 4725099, 4725356, 4725870,
+        4726127, 4726384, 4726897, 4727154, 4727411, 4727668, 4662645, 4662902, 4663159, 4663416,
+        4663929, 4664186, 4664443, 4599164, 4599676, 4599933, 4600190, 4534911, 4535423, 4535680,
+        4535937, 4470657, 4471170, 4405891, 4406147, 4406404, 4341124, 4341381, 4341893, 4276614,
+        4276870, 4211591, 4211847, 4146567, 4147080, 4081800, 4082057, 4016777, 4017033, 4017289,
+        3952010, 3952266, 3887242, 3887498, 3822219, 3822475, 3757195, 3757451, 3692171, 3692428,
+        3627148, 3627404, 3562124, 3562380, 3497100, 3497356, 3432077, 3432333, 3367053, 3367309,
+        3302029, 3302285, 3237005, 3237261, 3237517, 3172237, 3172493, 3107213, 3107469, 3042190,
+        3042446, 3042702, 2977422, 2977678, 2912398, 2912654, 2912910, 2847630, 2847886, 2782606,
+        2782862, 2783118, 2717838, 2718094, 2652814, 2652814, 2653070, 2587790, 2588046, 2588302,
+        2523022, 2523278, 2523534, 2458254, 2458509, 2393229, 2393485, 2393741, 2328461, 2328717,
+        2328973, 2263437, 2263693, 2263949, 2198669, 2198924, 2199180, 2133900, 2134156, 2134412,
+        2069132, 2069387, 2069643, 2069899, 2070155, 2004874, 2005130, 2005386, 2005386, 2005641,
+        2005897, 2006153, 2006408, 2006664, 2006920, 2007175, 2072967, 2073222, 2073478, 2139269,
+        2139525, 2205317, 2205572, 2271108, 2336899, 2337154, 2402946, 2468737, 2534529, 2600320,
+        2666111, 2731903, 2797694, 2863485, 2929021, 3060348, 3126139, 3191930, 3323258, 3389049,
+        3520376, 3586167, 3717494, 3783030, 3914357, 4045684, 4111475, 4242802, 4374129, 4505200,
+        4570991, 4702318, 4833645, 4964972, 5096043, 5227369, 5358696, 5490023, 5621350, 5752421,
+        5883748, 6015074, 6211937, 6343008, 6474335, 6605661, 6802524, 6933595, 7064921, 7196248,
+        7392854, 7524181, 7655508, 7852114, 7983441, 8180303, 8311374, 8508236, 8639307, 8836169,
+        8967495, 9164102, 9295428, 9492035, 9623361, 9819967, 9951294, 10147900, 10344762, 10475832,
+        10672695, 10869301, 11000627, 11197234, 11394096, 11525166, 11722028, 11918635, 12049705, 12246567,
+        12443174, 12574500, 12771106, 12967713, 13099039, 13295646, 13492253, 13623580, 13820187, 13951258,
+        14148121, 14344728, 14475800, 14672664, 14803736, 15000344, 15197209, 15328281, 15524890, 15656219,
+        15852828, 15983902, 16180767, 16311841, 16442914, 16639780
+    ]
+    return v
+}
+
+fn _lut_magma() -> Vec<i32> {
+    let v: Vec<i32> = [
+        3, 4, 6, 65543, 65801, 65803, 131597, 131599, 197393, 262931,
+        263189, 328727, 394521, 460059, 525853, 591647, 657186, 722980, 788774, 854568,
+        920106, 985900, 1051695, 1117233, 1183027, 1314101, 1379896, 1445434, 1511228, 1576767,
+        1708097, 1773636, 1839174, 1970249, 2036043, 2101581, 2232656, 2298194, 2429269, 2494807,
+        2625881, 2756956, 2822494, 2953312, 3084386, 3149925, 3280999, 3412072, 3477354, 3608428,
+        3739502, 3870575, 3936113, 4067186, 4198259, 4329332, 4394869, 4525942, 4657015, 4722808,
+        4853881, 4919417, 5050746, 5181819, 5247611, 5378684, 5444476, 5575549, 5706877, 5772670,
+        5903742, 5969534, 6100862, 6166399, 6297727, 6363263, 6494591, 6625920, 6691456, 6822784,
+        6888576, 7019648, 7085440, 7216769, 7282305, 7413633, 7544705, 7610497, 7741825, 7807361,
+        7938689, 8004225, 8135553, 8266881, 8332417, 8463745, 8529281, 8660609, 8726145, 8857473,
+        8988801, 9054337, 9185664, 9251200, 9382528, 9513600, 9579392, 9710464, 9776256, 9907327,
+        10038655, 10104191, 10235519, 10366590, 10432382, 10563454, 10694782, 10760317, 10891645, 10957181,
+        11088508, 11219836, 11285371, 11416699, 11547771, 11613562, 11744634, 11875961, 11941497, 12072824,
+        12138360, 12269687, 12401015, 12466550, 12597877, 12728949, 12794740, 12926068, 12991603, 13122930,
+        13254258, 13319793, 13451120, 13516912, 13648239, 13714030, 13845101, 13910893, 14042220, 14108011,
+        14239338, 14305129, 14436457, 14502248, 14568039, 14699366, 14765158, 14830949, 14962276, 15028323,
+        15094114, 15159906, 15225953, 15357280, 15423072, 15489119, 15554911, 15620958, 15621469, 15687261,
+        15753309, 15819100, 15885148, 15951196, 15951707, 16017499, 16083547, 16084059, 16150107, 16150619,
+        16216411, 16216924, 16282972, 16283484, 16349532, 16350045, 16350557, 16416606, 16416862, 16417375,
+        16483424, 16483936, 16484449, 16484962, 16551011, 16551523, 16552036, 16552549, 16552806, 16618855,
+        16619368, 16619881, 16620394, 16620907, 16621420, 16621934, 16622191, 16622704, 16688753, 16689267,
+        16689780, 16690293, 16690806, 16691064, 16691577, 16692091, 16692604, 16693117, 16693631, 16694144,
+        16694402, 16694915, 16695429, 16695942, 16696456, 16696969, 16697227, 16697741, 16698254, 16633232,
+        16633746, 16634259, 16634517, 16635031, 16635544, 16636058, 16636572, 16637085, 16637343, 16637857,
+        16638371, 16573349, 16573862, 16574120, 16574634, 16575148, 16575662, 16576176, 16576689, 16576947,
+        16577461, 16577975, 16512953, 16513467, 16513725, 16514239
+    ]
+    return v
+}
+
+fn _lut_inferno() -> Vec<i32> {
+    let v: Vec<i32> = [
+        3, 4, 6, 65543, 65801, 65803, 131342, 131600, 197138, 262932,
+        262934, 328728, 394267, 460061, 525855, 591393, 657187, 722726, 854056, 919594,
+        985389, 1050927, 1182258, 1247796, 1313590, 1444665, 1510203, 1641278, 1706816, 1838147,
+        1903685, 2034759, 2100298, 2231116, 2362190, 2493264, 2558802, 2689876, 2820694, 2951768,
+        3017306, 3148380, 3279197, 3410271, 3475808, 3606881, 3737954, 3869028, 3934565, 4065638,
+        4196710, 4262247, 4393576, 4524649, 4590185, 4721514, 4852586, 4918379, 5049451, 5180780,
+        5246316, 5377644, 5443181, 5574509, 5705581, 5771373, 5902701, 5968238, 6099566, 6230638,
+        6296430, 6427758, 6493294, 6624622, 6690158, 6821486, 6952814, 7018350, 7149678, 7215214,
+        7346542, 7477613, 7543405, 7674733, 7740269, 7871597, 8002669, 8068460, 8199532, 8265324,
+        8396651, 8462187, 8593515, 8724586, 8790378, 8921450, 8987241, 9118313, 9249641, 9315432,
+        9446504, 9512295, 9643367, 9774694, 9840230, 9971557, 10037348, 10168420, 10234211, 10365283,
+        10496610, 10562401, 10693473, 10759264, 10890335, 10956127, 11087454, 11218525, 11284316, 11415643,
+        11481435, 11612506, 11678297, 11809624, 11875159, 12006486, 12072278, 12203605, 12269396, 12400467,
+        12466258, 12532049, 12663376, 12729167, 12860494, 12926285, 13057612, 13123147, 13188938, 13320265,
+        13386056, 13451847, 13583430, 13649220, 13715011, 13780802, 13912129, 13977920, 14043711, 14109502,
+        14241085, 14306875, 14372666, 14438457, 14504504, 14570295, 14636086, 14702132, 14833459, 14899250,
+        14965297, 15031088, 15096878, 15097389, 15163180, 15229227, 15295018, 15361064, 15426855, 15492902,
+        15558693, 15559203, 15625250, 15691041, 15757087, 15757342, 15823389, 15889436, 15889690, 15955737,
+        15956248, 16022038, 16088085, 16088596, 16154642, 16154897, 16220944, 16221454, 16287501, 16287756,
+        16288267, 16354313, 16354824, 16355336, 16421127, 16421638, 16422150, 16422662, 16488710, 16489222,
+        16489734, 16489991, 16490503, 16491016, 16491530, 16492043, 16492557, 16493070, 16493584, 16494098,
+        16494612, 16494870, 16495384, 16495898, 16496412, 16496926, 16431905, 16432419, 16432933, 16433448,
+        16368426, 16368940, 16369455, 16304433, 16304948, 16305463, 16240442, 16240956, 16175935, 16176450,
+        16111429, 16111944, 16046923, 16047183, 15982162, 15982678, 15983193, 15918173, 15918688, 15853668,
+        15853928, 15854444, 15854960, 15855220, 15855737, 15856253, 15922049, 15922309, 15988361, 16054157,
+        16119953, 16186005, 16251801, 16383133, 16448928, 16580260
+    ]
+    return v
+}
+
+fn _lut_plasma() -> Vec<i32> {
+    let v: Vec<i32> = [
+        788358, 1050503, 1246857, 1377930, 1574539, 1771148, 1902221, 2033038, 2164111, 2295184,
+        2426257, 2557330, 2688403, 2819476, 2950292, 3081365, 3212438, 3343511, 3409048, 3540120,
+        3671193, 3802266, 3867546, 3998619, 4129692, 4195228, 4326301, 4457374, 4522910, 4653727,
+        4784799, 4850336, 4981409, 5112481, 5178018, 5308834, 5374371, 5505443, 5636515, 5702052,
+        5833124, 5898405, 6029477, 6160549, 6226086, 6357158, 6422694, 6553767, 6619303, 6750375,
+        6815911, 6946983, 7078056, 7143592, 7274664, 7340200, 7471272, 7536808, 7667880, 7733672,
+        7864744, 7930280, 8061608, 8127143, 8258471, 8324007, 8455335, 8520871, 8652198, 8717990,
+        8783782, 8914853, 8980645, 9111972, 9177764, 9309348, 9375139, 9440931, 9572258, 9638049,
+        9769377, 9835168, 9900960, 10032287, 10098078, 10164126, 10295453, 10361244, 10427035, 10492827,
+        10624154, 10689945, 10755736, 10821527, 10953111, 11018902, 11084693, 11150484, 11281811, 11347602,
+        11413393, 11479184, 11545231, 11611023, 11676814, 11808141, 11873932, 11939723, 12005514, 12071561,
+        12137352, 12203143, 12268934, 12334725, 12400516, 12466307, 12532098, 12598145, 12663936, 12729728,
+        12795519, 12861310, 12927101, 12992892, 13058683, 13124730, 13190521, 13256312, 13322103, 13387894,
+        13453685, 13519477, 13585268, 13651315, 13717106, 13717361, 13783152, 13848943, 13914734, 13980525,
+        14046573, 14112364, 14112619, 14178410, 14244201, 14309992, 14375783, 14441830, 14442086, 14507877,
+        14573668, 14639459, 14639714, 14705761, 14771552, 14837344, 14903135, 14903390, 14969437, 15035228,
+        15035483, 15101274, 15167066, 15233113, 15233368, 15299159, 15364950, 15365205, 15431252, 15497044,
+        15497299, 15563090, 15563601, 15629392, 15695183, 15695438, 15761485, 15761741, 15827532, 15893579,
+        15893834, 15959625, 15959880, 16025927, 16026183, 16091974, 16092485, 16158276, 16158531, 16159042,
+        16224833, 16225089, 16291136, 16291391, 16291902, 16357693, 16357948, 16423995, 16424250, 16424762,
+        16425017, 16491064, 16491319, 16491574, 16557621, 16557877, 16558388, 16558643, 16559154, 16559409,
+        16625457, 16625712, 16626223, 16626478, 16626989, 16627245, 16627756, 16628011, 16628523, 16628778,
+        16629289, 16629801, 16630056, 16630568, 16630823, 16631334, 16566054, 16566566, 16567077, 16567333,
+        16567845, 16502820, 16503076, 16503588, 16438564, 16438820, 16439332, 16374052, 16374564, 16309540,
+        16310052, 16244772, 16245285, 16180261, 16180517, 16115494, 16116006, 16050726, 15985702, 15986214,
+        15921190, 15921446, 15856422, 15791397, 15791651, 15726625
+    ]
+    return v
+}
+
+fn _lut_cividis() -> Vec<i32> {
+    let v: Vec<i32> = [
+        8781, 9039, 9040, 9298, 9556, 9813, 9815, 10073, 10331, 10332,
+        10590, 10848, 10850, 11108, 11366, 11367, 11625, 11883, 12141, 12143,
+        12400, 12400, 12656, 12656, 275056, 537456, 734064, 930928, 1127791, 1324655,
+        1455727, 1587055, 1718383, 1849454, 1915246, 2046574, 2177902, 2243438, 2374766, 2440557,
+        2571629, 2637421, 2768749, 2834285, 2900077, 3031404, 3097196, 3162732, 3228524, 3294316,
+        3425388, 3491180, 3556972, 3622508, 3688300, 3754092, 3819627, 3885419, 4016747, 4082539,
+        4148075, 4213867, 4279659, 4345195, 4410987, 4476779, 4542315, 4608107, 4673899, 4739435,
+        4805227, 4871019, 4936812, 5002348, 5068140, 5133932, 5133932, 5199724, 5265516, 5331052,
+        5396844, 5462636, 5528172, 5593965, 5659757, 5725549, 5791085, 5856877, 5857133, 5922669,
+        5988462, 6054254, 6119790, 6185582, 6251374, 6317166, 6382703, 6382959, 6448751, 6514287,
+        6580079, 6645872, 6711664, 6777200, 6842992, 6843249, 6908785, 6974577, 7040369, 7105906,
+        7171698, 7237490, 7237747, 7303283, 7369075, 7434867, 7500660, 7566196, 7631989, 7632245,
+        7697781, 7763574, 7829366, 7895158, 7960695, 7960951, 8026743, 8092535, 8158072, 8223864,
+        8289656, 8355192, 8420984, 8486776, 8552568, 8618104, 8683896, 8749688, 8749944, 8815480,
+        8881272, 8947064, 9012856, 9078392, 9144184, 9209976, 9275768, 9341304, 9407095, 9472887,
+        9538679, 9604215, 9670007, 9735799, 9801591, 9867127, 9932918, 9998710, 10064502, 10130294,
+        10195830, 10261622, 10327413, 10393205, 10458741, 10524533, 10590324, 10656116, 10721908, 10787444,
+        10853235, 10919027, 10984819, 11050611, 11116146, 11181938, 11247730, 11313521, 11379313, 11444849,
+        11510640, 11576432, 11642224, 11708015, 11773551, 11839343, 11905134, 11970926, 12036717, 12102509,
+        12168045, 12233836, 12299628, 12365419, 12431211, 12497002, 12562538, 12693865, 12759657, 12825448,
+        12891240, 12957031, 13022567, 13088358, 13154149, 13219941, 13285732, 13351524, 13417315, 13483106,
+        13548642, 13614433, 13680224, 13811552, 13877343, 13943134, 14008926, 14074717, 14140252, 14206043,
+        14271834, 14337626, 14403417, 14469208, 14600535, 14666326, 14732117, 14797908, 14863443, 14929234,
+        14995025, 15060816, 15126607, 15257934, 15323725, 15389516, 15455307, 15521098, 15586888, 15652679,
+        15718470, 15849796, 15915587, 15981122, 16046912, 16112703, 16178493, 16309819, 16375610, 16441400,
+        16507190, 16638516, 16638771, 16639284, 16639542, 16639799
+    ]
+    return v
+}
+
+fn _lut_turbo() -> Vec<i32> {
+    let v: Vec<i32> = [
+        3150395, 3216706, 3283018, 3414865, 3481176, 3547487, 3613541, 3679852, 3746162, 3812473,
+        3878783, 3945093, 3945867, 4011921, 4078230, 4144540, 4210849, 4211622, 4277675, 4278448,
+        4344757, 4411066, 4411582, 4412354, 4478663, 4479179, 4545486, 4546258, 4546774, 4547545,
+        4613853, 4614368, 4615139, 4615654, 4616424, 4617195, 4617709, 4618480, 4618994, 4619764,
+        4620278, 4621048, 4556025, 4556795, 4557308, 4492541, 4427517, 4362750, 4297726, 4232958,
+        4167934, 4103166, 3972605, 3907836, 3777276, 3712507, 3582201, 3451640, 3386614, 3256309,
+        3125747, 2995441, 2864879, 2800109, 2669547, 2538985, 2474214, 2343652, 2213089, 2148063,
+        2017756, 1952730, 1887703, 1822676, 1757650, 1692623, 1627596, 1628106, 1563079, 1563332,
+        1563842, 1564351, 1630397, 1630650, 1696696, 1762486, 1828276, 1959857, 2025647, 2156972,
+        2288553, 2419878, 2616739, 2748064, 2944925, 3141786, 3338647, 3535764, 3732625, 3929229,
+        4191626, 4388487, 4650883, 4913280, 5110140, 5372281, 5634678, 5897074, 6159215, 6421612,
+        6683752, 6946149, 7208290, 7470431, 7667292, 7929433, 8191574, 8453715, 8715856, 8912461,
+        9174603, 9371208, 9633350, 9829956, 10026562, 10222912, 10419518, 10615869, 10812475, 10943290,
+        11139897, 11336247, 11467063, 11663414, 11794485, 11990837, 12186932, 12317748, 12514100, 12644915,
+        12841267, 12971827, 13168179, 13298995, 13495092, 13625908, 13756468, 13952821, 14083381, 14213941,
+        14344758, 14540854, 14671414, 14801975, 14932535, 15063096, 15193912, 15258936, 15389497, 15520057,
+        15585081, 15715641, 15780666, 15910970, 15975994, 16041018, 16171578, 16236601, 16301625, 16366649,
+        16366136, 16430903, 16495927, 16495414, 16560181, 16559668, 16624435, 16623922, 16623153, 16622384,
+        16687407, 16686638, 16685869, 16685100, 16618795, 16618025, 16617256, 16616487, 16550182, 16549412,
+        16483107, 16482338, 16416032, 16415263, 16348958, 16282652, 16216347, 16215578, 16149272, 16082967,
+        16016662, 15950613, 15884308, 15818003, 15686161, 15620112, 15553807, 15487502, 15355917, 15289613,
+        15223564, 15091979, 15025674, 14894090, 14828041, 14696456, 14564872, 14498823, 14367239, 14235654,
+        14104070, 14038021, 13906437, 13774853, 13643524, 13511940, 13314819, 13183235, 13051907, 12920322,
+        12788738, 12591874, 12460290, 12263169, 12131841, 11934721, 11803393, 11606273, 11409409, 11277825,
+        11080961, 10884097, 10686977, 10490113, 10293249, 10096129, 9899265, 9702401, 9505537, 9308673,
+        9111809, 8849409, 8652545, 8455682, 8193282, 7996418
+    ]
+    return v
+}
+
+fn _lut_coolwarm() -> Vec<i32> {
+    let v: Vec<i32> = [
+        3820736, 3886529, 3952579, 4084164, 4150214, 4216007, 4282057, 4348106, 4414156, 4545485,
+        4611535, 4677584, 4743377, 4809427, 4941012, 5007062, 5072855, 5138904, 5270490, 5336283,
+        5402332, 5468381, 5599710, 5665760, 5731809, 5797602, 5929187, 5994980, 6061029, 6127078,
+        6258407, 6324456, 6390506, 6521834, 6587883, 6653676, 6785261, 6851054, 6917103, 7048688,
+        7114481, 7180529, 7311858, 7377907, 7443700, 7575028, 7641077, 7706870, 7838454, 7904247,
+        8035832, 8101624, 8167673, 8299001, 8364794, 8430842, 8562171, 8627963, 8759547, 8825340,
+        8891132, 9022716, 9088509, 9154301, 9285629, 9351677, 9483006, 9548798, 9614590, 9745918,
+        9811966, 9943294, 10009086, 10074878, 10206206, 10271998, 10337790, 10469118, 10534910, 10666238,
+        10732030, 10797822, 10929149, 10994941, 11060733, 11192061, 11257852, 11323644, 11454972, 11520763,
+        11586555, 11717627, 11783418, 11849210, 11980537, 12046329, 12111864, 12177656, 12308983, 12374518,
+        12440310, 12506101, 12637173, 12702964, 12768499, 12834290, 12965362, 13031153, 13096688, 13162479,
+        13228014, 13293806, 13424877, 13490668, 13556203, 13621738, 13687529, 13753064, 13818599, 13884390,
+        14015461, 14080996, 14146530, 14212065, 14277856, 14343391, 14408926, 14474461, 14539995, 14605274,
+        14670809, 14736087, 14801622, 14866900, 14932435, 14997713, 15063248, 15128527, 15193805, 15193804,
+        15259082, 15324361, 15389639, 15455174, 15520452, 15520195, 15585473, 15585216, 15650750, 15716028,
+        15715771, 15781049, 15846328, 15846070, 15911349, 15911091, 15910834, 15976112, 15975855, 16041133,
+        16040875, 16040618, 16105896, 16105639, 16105381, 16170404, 16170146, 16169888, 16169631, 16169373,
+        16168860, 16168602, 16233880, 16233367, 16233109, 16232852, 16232594, 16232081, 16231823, 16165773,
+        16165516, 16165258, 16164745, 16164487, 16163974, 16163716, 16097666, 16097409, 16096895, 16031102,
+        16030588, 16030331, 15964281, 15963768, 15963510, 15897461, 15896947, 15831154, 15830640, 15764847,
+        15764333, 15698284, 15632234, 15631977, 15565927, 15499878, 15499364, 15433571, 15367521, 15367008,
+        15300958, 15234909, 15168860, 15103066, 15102553, 15036503, 14970454, 14904404, 14838355, 14772306,
+        14706256, 14640207, 14574158, 14508108, 14442059, 14376010, 14309960, 14243911, 14177862, 14111812,
+        14045763, 13913922, 13847872, 13781823, 13715774, 13583933, 13517884, 13451834, 13385529, 13253944,
+        13187895, 13121589, 12989748, 12923443, 12857394, 12725553, 12659248, 12527662, 12460845, 12328748,
+        12261931, 12129834, 12063017, 11930920, 11864103, 11731750
+    ]
+    return v
+}
+
+fn _lut_rdbu() -> Vec<i32> {
+    let v: Vec<i32> = [
+        6750239, 6881311, 7078175, 7275040, 7471904, 7668769, 7865633, 8062498, 8259362, 8456227,
+        8653091, 8849956, 9046820, 9243685, 9440549, 9637414, 9834278, 10031143, 10162215, 10359079,
+        10555944, 10752808, 10949673, 11146537, 11343402, 11540266, 11671851, 11803693, 11869998, 11936047,
+        12067889, 12134194, 12266035, 12332340, 12464182, 12530231, 12596536, 12728378, 12794683, 12926524,
+        12992574, 13058879, 13190721, 13257026, 13388867, 13455172, 13521222, 13653063, 13719369, 13851210,
+        13917515, 14049357, 14115407, 14181713, 14248019, 14314069, 14380375, 14512217, 14578267, 14644573,
+        14710879, 14777185, 14843235, 14975077, 15041384, 15107434, 15173740, 15240046, 15371632, 15437938,
+        15504244, 15570550, 15636600, 15702906, 15834748, 15900798, 15967104, 16033411, 16033926, 16034440,
+        16100491, 16101006, 16101520, 16167571, 16168086, 16234136, 16234907, 16235422, 16301473, 16301987,
+        16302502, 16368553, 16369067, 16369582, 16435889, 16436404, 16436918, 16502969, 16503484, 16503998,
+        16570049, 16570564, 16636871, 16571592, 16571850, 16572108, 16572366, 16507088, 16507346, 16507604,
+        16507862, 16442583, 16442841, 16443355, 16443613, 16378335, 16378593, 16378851, 16379109, 16379367,
+        16314088, 16314346, 16314604, 16315118, 16249840, 16250098, 16250356, 16250614, 16185078, 16053750,
+        15988214, 15856886, 15791093, 15660021, 15594229, 15462900, 15397364, 15266036, 15200244, 15068915,
+        15003379, 14872051, 14806259, 14675186, 14609394, 14478066, 14412273, 14281201, 14215409, 14084081,
+        14018544, 13887216, 13821424, 13755888, 13558767, 13427438, 13230573, 13098989, 12902124, 12770795,
+        12573931, 12442346, 12245481, 12114152, 11917288, 11785703, 11588838, 11457510, 11260645, 11129060,
+        10997732, 10800867, 10669538, 10472417, 10341089, 10144224, 10012895, 9815775, 9684446, 9487581,
+        9290460, 9093339, 8896218, 8699097, 8436440, 8239319, 8042198, 7845077, 7647955, 7450834,
+        7253713, 7056592, 6859471, 6662350, 6399693, 6202572, 6005451, 5808330, 5611209, 5414088,
+        5216967, 5019846, 4822725, 4625604, 4428739, 4297154, 4231105, 4165056, 4033471, 3967678,
+        3901629, 3770044, 3703995, 3638202, 3506617, 3440569, 3374520, 3243191, 3177142, 3111093,
+        2979508, 2913715, 2847666, 2716081, 2650032, 2583984, 2452655, 2386606, 2320557, 2188972,
+        2122922, 2056871, 1990820, 1924769, 1858718, 1727131, 1661080, 1595029, 1528979, 1462672,
+        1396621, 1330570, 1264519, 1198468, 1132417, 1000830, 934779, 868472, 802421, 736370,
+        670319, 604268, 538217, 472166, 406115, 340065
+    ]
+    return v
+}
+
+fn _lut_spectral() -> Vec<i32> {
+    let v: Vec<i32> = [
+        10355010, 10486594, 10618179, 10750019, 10881604, 11013188, 11145029, 11342149, 11473990, 11605574,
+        11737159, 11868999, 12000584, 12197960, 12329545, 12461129, 12592970, 12724554, 12856395, 12987979,
+        13185100, 13316940, 13448525, 13580365, 13711950, 13843534, 13975118, 14041166, 14172749, 14238797,
+        14304844, 14370892, 14436683, 14568267, 14634315, 14700362, 14766410, 14832457, 14964041, 15029832,
+        15095880, 15161927, 15293511, 15359558, 15425606, 15491397, 15557445, 15689028, 15755076, 15821123,
+        15887171, 16018755, 16019268, 16020037, 16086086, 16086855, 16087368, 16153674, 16154187, 16154956,
+        16221005, 16221774, 16222543, 16288593, 16289362, 16289875, 16356180, 16356693, 16422998, 16423512,
+        16424281, 16490330, 16491099, 16491868, 16557918, 16558687, 16559200, 16625249, 16625763, 16626277,
+        16626790, 16627304, 16627818, 16628331, 16628845, 16629358, 16629872, 16630386, 16630899, 16631413,
+        16631927, 16632440, 16632954, 16633468, 16633981, 16634495, 16635009, 16635522, 16636036, 16636550,
+        16637063, 16637577, 16703627, 16703885, 16704143, 16704401, 16704659, 16705173, 16705431, 16705689,
+        16705947, 16706205, 16706719, 16706977, 16707235, 16707493, 16708007, 16708265, 16708523, 16708781,
+        16709039, 16709553, 16709811, 16710069, 16710327, 16710585, 16711099, 16711357, 16711358, 16645820,
+        16580283, 16514489, 16448952, 16383158, 16317621, 16252083, 16186290, 16120752, 16054958, 15989421,
+        15923883, 15858090, 15792552, 15726759, 15661221, 15595684, 15529890, 15464353, 15398559, 15333022,
+        15267484, 15201691, 15136153, 15136152, 14939288, 14807960, 14676633, 14479769, 14348442, 14217114,
+        14020251, 13888923, 13757596, 13560732, 13429405, 13298077, 13101214, 12969886, 12838559, 12641695,
+        12510624, 12379296, 12247968, 12051105, 11919777, 11788450, 11591586, 11460259, 11328931, 11132068,
+        10935204, 10803876, 10607012, 10410148, 10278820, 10081956, 9885092, 9753764, 9556644, 9359780,
+        9162916, 9031588, 8834724, 8637860, 8506532, 8309668, 8112804, 7915940, 7784612, 7587748,
+        7390884, 7259556, 7062692, 6865828, 6734501, 6537125, 6405542, 6273959, 6142120, 6010537,
+        5878954, 5747371, 5615532, 5483949, 5352366, 5220527, 5088944, 4957361, 4825778, 4693939,
+        4562356, 4430773, 4299189, 4167350, 4035767, 3904184, 3772345, 3640762, 3509179, 3377596,
+        3311292, 3441851, 3572410, 3702969, 3767736, 3898295, 4028854, 4093877, 4224436, 4354738,
+        4485297, 4550320, 4680879, 4811182, 4941741, 5006764, 5137323, 5267626, 5332649, 5463208,
+        5593767, 5724070, 5789093, 5919652, 6050211, 6180770
+    ]
+    return v
+}
+
+fn _lut_ylgnbu() -> Vec<i32> {
+    let v: Vec<i32> = [
+        16777177, 16711383, 16645846, 16645845, 16580307, 16580050, 16514513, 16514512, 16448974, 16383437,
+        16383180, 16317643, 16317641, 16252104, 16251847, 16186310, 16120772, 16120771, 16055234, 16054977,
+        15989439, 15989438, 15923901, 15923644, 15858106, 15792569, 15792568, 15727031, 15726773, 15661236,
+        15661235, 15595698, 15529905, 15464369, 15398833, 15333041, 15267505, 15136177, 15070641, 15004849,
+        14939313, 14873521, 14742449, 14676658, 14611122, 14545330, 14479794, 14348466, 14282930, 14217138,
+        14151602, 14086066, 14020274, 13889202, 13823411, 13757875, 13692083, 13626547, 13495219, 13429683,
+        13363891, 13298355, 13232563, 13101491, 13035700, 12904372, 12707764, 12576436, 12445108, 12313781,
+        12116917, 11985589, 11854261, 11722934, 11526070, 11394998, 11263670, 11132342, 10935479, 10804151,
+        10672823, 10541495, 10344632, 10213560, 10082232, 9950904, 9754040, 9622713, 9491385, 9294521,
+        9163193, 9032121, 8900794, 8703930, 8572602, 8441274, 8309947, 8178875, 8047547, 7916219,
+        7784892, 7653820, 7522492, 7391165, 7259837, 7128765, 6997437, 6866110, 6735038, 6603710,
+        6537919, 6406591, 6275519, 6144191, 6012864, 5881792, 5750464, 5619137, 5487809, 5356737,
+        5225409, 5094082, 4962754, 4831682, 4700355, 4569027, 4437955, 4306627, 4240835, 4175043,
+        4109251, 4043203, 3911875, 3846083, 3780291, 3714499, 3648706, 3582658, 3516866, 3451074,
+        3319746, 3253954, 3188162, 3122370, 3056321, 2990529, 2924737, 2793409, 2727617, 2661825,
+        2595777, 2529985, 2464192, 2398400, 2332608, 2201280, 2135232, 2069440, 2003648, 1937856,
+        1937599, 1937086, 1936574, 1936317, 1935804, 1935547, 2000571, 2000058, 1999801, 1999288,
+        1999032, 1998519, 1998006, 2063285, 2062772, 2062516, 2062003, 2061490, 2061233, 2126257,
+        2126000, 2125487, 2124974, 2124718, 2124205, 2189484, 2188971, 2188459, 2188202, 2187689,
+        2187432, 2186920, 2252199, 2251686, 2251430, 2251173, 2250661, 2250404, 2250147, 2249635,
+        2249378, 2249121, 2314145, 2313888, 2313632, 2313119, 2312862, 2312606, 2312093, 2311836,
+        2311580, 2311067, 2310810, 2376090, 2375833, 2375321, 2375064, 2374807, 2374295, 2374038,
+        2373781, 2373269, 2373012, 2372756, 2372498, 2306704, 2240910, 2175372, 2109578, 2043784,
+        1978247, 1912453, 1846659, 1846401, 1780863, 1715069, 1649275, 1583481, 1517944, 1452150,
+        1386356, 1320818, 1255024, 1189230, 1188972, 1123434, 1057640, 991847, 926309, 860515,
+        794721, 728927, 663389, 597595, 531801, 531800
+    ]
+    return v
+}
+
+fn _lut_greys() -> Vec<i32> {
+    let v: Vec<i32> = [
+        16777215, 16711422, 16711422, 16645629, 16645629, 16579836, 16579836, 16514043, 16514043, 16448250,
+        16448250, 16382457, 16382457, 16316664, 16316664, 16250871, 16250871, 16250871, 16185078, 16185078,
+        16119285, 16119285, 16053492, 16053492, 15987699, 15987699, 15921906, 15921906, 15856113, 15856113,
+        15790320, 15790320, 15724527, 15724527, 15658734, 15592941, 15592941, 15527148, 15461355, 15395562,
+        15395562, 15329769, 15263976, 15198183, 15198183, 15132390, 15066597, 15066597, 15000804, 14935011,
+        14869218, 14869218, 14803425, 14737632, 14737632, 14671839, 14606046, 14540253, 14540253, 14474460,
+        14408667, 14342874, 14342874, 14277081, 14211288, 14145495, 14145495, 14079702, 14013909, 13948116,
+        13882323, 13816530, 13750737, 13684944, 13619151, 13619151, 13553358, 13487565, 13421772, 13355979,
+        13290186, 13224393, 13158600, 13158600, 13092807, 13027014, 12961221, 12895428, 12829635, 12763842,
+        12698049, 12698049, 12632256, 12566463, 12500670, 12434877, 12369084, 12303291, 12237498, 12105912,
+        12040119, 11974326, 11908533, 11776947, 11711154, 11645361, 11579568, 11513775, 11382189, 11316396,
+        11250603, 11184810, 11053224, 10987431, 10921638, 10855845, 10790052, 10658466, 10592673, 10526880,
+        10461087, 10329501, 10263708, 10197915, 10132122, 10066329, 9934743, 9868950, 9803157, 9737364,
+        9671571, 9605778, 9539985, 9408399, 9342606, 9276813, 9211020, 9145227, 9079434, 9013641,
+        8947848, 8882055, 8816262, 8684676, 8618883, 8553090, 8487297, 8421504, 8355711, 8289918,
+        8224125, 8158332, 8092539, 8026746, 7895160, 7829367, 7763574, 7697781, 7631988, 7566195,
+        7500402, 7434609, 7368816, 7303023, 7237230, 7171437, 7105644, 7039851, 6974058, 6908265,
+        6842472, 6710886, 6645093, 6579300, 6513507, 6447714, 6381921, 6316128, 6250335, 6184542,
+        6118749, 6052956, 5987163, 5921370, 5855577, 5789784, 5723991, 5658198, 5592405, 5526612,
+        5460819, 5395026, 5263440, 5197647, 5131854, 5000268, 4934475, 4802889, 4737096, 4671303,
+        4539717, 4473924, 4342338, 4276545, 4210752, 4079166, 4013373, 3881787, 3815994, 3684408,
+        3618615, 3552822, 3421236, 3355443, 3223857, 3158064, 3092271, 2960685, 2894892, 2763306,
+        2697513, 2631720, 2500134, 2434341, 2302755, 2236962, 2171169, 2105376, 2039583, 1973790,
+        1907997, 1776411, 1710618, 1644825, 1579032, 1513239, 1447446, 1315860, 1250067, 1184274,
+        1118481, 1052688, 986895, 855309, 789516, 723723, 657930, 592137, 526344, 394758,
+        328965, 263172, 197379, 131586, 65793, 0
+    ]
+    return v
+}
+
+fn _lut_hot() -> Vec<i32> {
+    let v: Vec<i32> = [
+        655360, 851968, 983040, 1179648, 1376256, 1507328, 1703936, 1835008, 2031616, 2228224,
+        2359296, 2555904, 2752512, 2883584, 3080192, 3211264, 3407872, 3604480, 3735552, 3932160,
+        4128768, 4259840, 4456448, 4587520, 4784128, 4980736, 5111808, 5308416, 5505024, 5636096,
+        5832704, 5963776, 6160384, 6356992, 6488064, 6684672, 6881280, 7012352, 7208960, 7340032,
+        7536640, 7733248, 7864320, 8060928, 8257536, 8388608, 8585216, 8716288, 8912896, 9109504,
+        9240576, 9437184, 9633792, 9764864, 9961472, 10092544, 10289152, 10485760, 10616832, 10813440,
+        11010048, 11141120, 11337728, 11468800, 11665408, 11862016, 11993088, 12189696, 12386304, 12517376,
+        12713984, 12845056, 13041664, 13238272, 13369344, 13565952, 13762560, 13893632, 14090240, 14221312,
+        14417920, 14614528, 14745600, 14942208, 15138816, 15269888, 15466496, 15597568, 15794176, 15990784,
+        16121856, 16318464, 16515072, 16646144, 16712192, 16712960, 16713472, 16714240, 16714752, 16715520,
+        16716288, 16716800, 16717568, 16718336, 16718848, 16719616, 16720128, 16720896, 16721664, 16722176,
+        16722944, 16723712, 16724224, 16724992, 16725504, 16726272, 16727040, 16727552, 16728320, 16729088,
+        16729600, 16730368, 16730880, 16731648, 16732416, 16732928, 16733696, 16734464, 16734976, 16735744,
+        16736256, 16737024, 16737792, 16738304, 16739072, 16739840, 16740352, 16741120, 16741632, 16742400,
+        16743168, 16743680, 16744448, 16745216, 16745728, 16746496, 16747008, 16747776, 16748544, 16749056,
+        16749824, 16750336, 16751104, 16751872, 16752384, 16753152, 16753920, 16754432, 16755200, 16755712,
+        16756480, 16757248, 16757760, 16758528, 16759296, 16759808, 16760576, 16761088, 16761856, 16762624,
+        16763136, 16763904, 16764672, 16765184, 16765952, 16766464, 16767232, 16768000, 16768512, 16769280,
+        16770048, 16770560, 16771328, 16771840, 16772608, 16773376, 16773888, 16774656, 16775424, 16775936,
+        16776704, 16776962, 16776966, 16776970, 16776974, 16776978, 16776982, 16776986, 16776990, 16776994,
+        16776998, 16777002, 16777006, 16777010, 16777014, 16777018, 16777022, 16777025, 16777029, 16777033,
+        16777037, 16777041, 16777045, 16777049, 16777053, 16777057, 16777061, 16777065, 16777069, 16777073,
+        16777077, 16777081, 16777085, 16777088, 16777092, 16777096, 16777100, 16777104, 16777108, 16777112,
+        16777116, 16777120, 16777124, 16777128, 16777132, 16777136, 16777140, 16777144, 16777148, 16777151,
+        16777155, 16777159, 16777163, 16777167, 16777171, 16777175, 16777179, 16777183, 16777187, 16777191,
+        16777195, 16777199, 16777203, 16777207, 16777211, 16777215
+    ]
+    return v
+}
+
+fn _lut(nombre: str) -> Vec<i32> {
+    if nombre == "viridis" {
+        return _lut_viridis()
+    }
+    if nombre == "magma" {
+        return _lut_magma()
+    }
+    if nombre == "inferno" {
+        return _lut_inferno()
+    }
+    if nombre == "plasma" {
+        return _lut_plasma()
+    }
+    if nombre == "cividis" {
+        return _lut_cividis()
+    }
+    if nombre == "turbo" {
+        return _lut_turbo()
+    }
+    if nombre == "coolwarm" {
+        return _lut_coolwarm()
+    }
+    if nombre == "rdbu" {
+        return _lut_rdbu()
+    }
+    if nombre == "spectral" {
+        return _lut_spectral()
+    }
+    if nombre == "ylgnbu" {
+        return _lut_ylgnbu()
+    }
+    if nombre == "greys" {
+        return _lut_greys()
+    }
+    if nombre == "hot" {
+        return _lut_hot()
+    }
+    let vacio: Vec<i32> = vec_new()
+    return vacio
+}
+
+fn _lut_nombre(i: i32) -> str {
+    if i == 0 {
+        return "viridis"
+    }
+    if i == 1 {
+        return "magma"
+    }
+    if i == 2 {
+        return "inferno"
+    }
+    if i == 3 {
+        return "plasma"
+    }
+    if i == 4 {
+        return "cividis"
+    }
+    if i == 5 {
+        return "turbo"
+    }
+    if i == 6 {
+        return "coolwarm"
+    }
+    if i == 7 {
+        return "rdbu"
+    }
+    if i == 8 {
+        return "spectral"
+    }
+    if i == 9 {
+        return "ylgnbu"
+    }
+    if i == 10 {
+        return "greys"
+    }
+    if i == 11 {
+        return "hot"
+    }
+    return ""
+}
+
+# ---- FIN DE LAS TABLAS ----

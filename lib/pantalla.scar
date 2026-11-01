@@ -1,0 +1,43 @@
+# lib/pantalla.scar: mostrar en la ventana de lib/gui un lienzo de lib/lienzo
+# (use "pantalla").
+#
+#   use "gui"
+#   use "lienzo"
+#   use "pantalla"
+#
+#   let ui = gui.ventana("Dibujo", 400, 300)
+#   let l = lienzo.nuevo(160, 120, lienzo.color(0, 0, 0))
+#   while gui.abierta(ui) {
+#       lienzo.circulo_lleno(l, 80, 60, 30, lienzo.color(255, 200, 0))
+#       pantalla.mostrar(ui, l, 2)          # cada píxel, un cuadrado de 2 x 2
+#   }
+#
+# Un lienzo es un buffer de píxeles en memoria (lo que dibujan lienzo, imagen
+# o motor3d); mostrar le pasa a C los píxeles de una vez (un Vec<i32> en la
+# firma de una extern fn: puntero + largo) y
+# C los copia a una textura de SDL que se dibuja con su alfa.
+#
+# Es un módulo aparte para que gui no dependa de lienzo, ni lienzo de SDL (y
+# porque gui ya tiene una pieza que se llama gui.lienzo: el rectángulo para
+# dibujar a mano).
+
+use "gui"
+use "lienzo"
+
+extern "C" fn scar_sdl_pixeles(datos: Vec<i32>, ancho: i32, alto: i32, x: i32, y: i32, escala: i32) -> i32 from "scarsdl"
+
+# Muestra el lienzo como una pieza de la ventana (debajo de la anterior, o en
+# la fila), centrado en el ancho libre, cada píxel como un cuadrado de
+# escala x escala. Si no entra, se recorta.
+fn mostrar(ui: gui.Ui, l: lienzo.Lienzo, escala: i32) {
+    let e = max(1, escala)
+    let zona = gui.lienzo(ui, l.alto * e)
+    let x = zona.x + max(0, (zona.ancho - l.ancho * e) / 2)
+    scar_sdl_pixeles(l.pixeles, l.ancho, l.alto, x, zona.y, e)
+}
+
+# Lo mismo en un lugar fijo de la ventana, sin acomodarlo con las piezas: la
+# esquina de arriba a la izquierda en (x, y).
+fn mostrar_en(l: lienzo.Lienzo, x: i32, y: i32, escala: i32) {
+    scar_sdl_pixeles(l.pixeles, l.ancho, l.alto, x, y, max(1, escala))
+}

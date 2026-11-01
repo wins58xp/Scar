@@ -1,0 +1,115 @@
+# lib/json completo, probado con
+# lib/prueba.
+#
+# Lee un JSON a un árbol, busca por ruta ("sismos.0.lugar"), arma documentos
+# nuevos y los escribe (en una línea, con sangría, en ASCII). La comparación con
+# el módulo json de Python, con cientos de documentos al azar, documentos
+# estropeados y rutas que no existen, está en pruebas/test_json_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "json"
+
+fn error_de(texto: str) -> str {
+    let r = json.analizar_texto(texto)
+    if r.is_err() {
+        return r.err()
+    }
+    return "(sin error)"
+}
+
+fn correr(t: prueba.Prueba) -> Result<i32> {
+    prueba.seccion(t, "leer y buscar por ruta")
+    let d = json.analizar_texto("{\"sismos\": [{\"lugar\": \"Calama\", \"mag\": 2.9, \"prof\": 110, \"revisado\": true, \"nota\": null}, {\"lugar\": \"Ovalle\", \"mag\": 4.1}], \"fuente\": \"GEOFON\", \"vacio\": {}, \"lista\": []}")?
+    prueba.afirmar_igual_str(t, json.texto(d, "sismos.0.lugar"), "Calama", "texto con ruta")
+    prueba.afirmar_igual_str(t, json.texto(d, "sismos.1.lugar"), "Ovalle", "segundo elemento")
+    prueba.afirmar_cerca(t, json.numero(d, "sismos.0.mag"), 2.9, 1e-12, "numero")
+    prueba.afirmar_igual_i64(t, json.entero(d, "sismos.0.prof"), 110, "entero")
+    prueba.afirmar_igual_i64(t, json.entero(d, "sismos.1.mag"), 4, "entero de un decimal se trunca")
+    prueba.afirmar(t, json.booleano(d, "sismos.0.revisado"), "booleano true")
+    prueba.afirmar(t, json.booleano(d, "sismos.1.revisado") == false, "booleano que falta es false")
+    prueba.afirmar_igual_str(t, json.tipo(d, "sismos"), "arreglo", "tipo arreglo")
+    prueba.afirmar_igual_str(t, json.tipo(d, ""), "objeto", "tipo de la raíz")
+    prueba.afirmar_igual_str(t, json.tipo(d, "sismos.0.nota"), "nulo", "tipo nulo")
+    prueba.afirmar_igual_str(t, json.tipo(d, "sismos.0.mag"), "numero", "tipo numero")
+    prueba.afirmar_igual_str(t, json.tipo(d, "fuente"), "texto", "tipo texto")
+    prueba.afirmar_igual_str(t, json.tipo(d, "sismos.0.revisado"), "booleano", "tipo booleano")
+    prueba.afirmar_igual_str(t, json.tipo(d, "no.esta"), "", "tipo de lo que no existe")
+    prueba.afirmar_igual_i32(t, json.largo(d, "sismos"), 2, "largo de un arreglo")
+    prueba.afirmar_igual_i32(t, json.largo(d, "sismos.0"), 5, "largo de un objeto")
+    prueba.afirmar_igual_i32(t, json.largo(d, "vacio"), 0, "objeto vacío")
+    prueba.afirmar_igual_i32(t, json.largo(d, "lista"), 0, "arreglo vacío")
+    prueba.afirmar_igual_i32(t, json.largo(d, "fuente"), 0, "un texto no tiene largo")
+    prueba.afirmar_igual_str(t, json.clave(d, "sismos.0", 1), "mag", "clave número 1")
+    prueba.afirmar_igual_str(t, json.clave(d, "", 0), "sismos", "primera clave de la raíz")
+    prueba.afirmar(t, json.existe(d, "sismos.1.mag"), "existe")
+    prueba.afirmar(t, json.existe(d, "sismos.2") == false, "no existe más allá del arreglo")
+    prueba.afirmar(t, json.existe(d, "sismos.01") == false, "'01' no es una posición")
+    prueba.afirmar(t, json.existe(d, "sismos.-1") == false, "'-1' no es una posición")
+    prueba.afirmar(t, json.existe(d, "fuente.x") == false, "no se entra a un texto")
+    prueba.afirmar_igual_str(t, json.texto_o(d, "sismos.1.nota", "sin nota"), "sin nota", "texto_o con valor por defecto")
+    prueba.afirmar_cerca(t, json.numero_o(d, "sismos.1.prof", 0.0 - 1.0), 0.0 - 1.0, 1e-12, "numero_o con valor por defecto")
+    prueba.afirmar_igual_str(t, json.escribir_nodo(d, "sismos.1"), "{\"lugar\":\"Ovalle\",\"mag\":4.1}", "escribir_nodo")
+
+    prueba.seccion(t, "escribir lo leído")
+    prueba.afirmar_igual_str(t, json.escribir(d), "{\"sismos\":[{\"lugar\":\"Calama\",\"mag\":2.9,\"prof\":110,\"revisado\":true,\"nota\":null},{\"lugar\":\"Ovalle\",\"mag\":4.1}],\"fuente\":\"GEOFON\",\"vacio\":{},\"lista\":[]}", "en una línea")
+    let p = json.analizar_texto("{\"a\":[1,{\"b\":[]}],\"c\":{}}")?
+    prueba.afirmar_igual_str(t, json.escribir_bonito(p, 2), "{\n  \"a\": [\n    1,\n    {\n      \"b\": []\n    }\n  ],\n  \"c\": {}\n}", "con sangría de 2")
+    let u = json.analizar_texto("[\"año 😀 \\u00e9\\n\"]")?
+    prueba.afirmar_igual_str(t, json.escribir(u), "[\"año 😀 é\\n\"]", "UTF-8 y escapes")
+    prueba.afirmar_igual_str(t, json.escribir_ascii(u), "[\"a\\u00f1o \\ud83d\\ude00 \\u00e9\\n\"]", "ASCII con par sustituto")
+    let nums = json.analizar_texto("[1.50, 1E5, -0, 0.1e-2]")?
+    prueba.afirmar_igual_str(t, json.escribir(nums), "[1.50,1E5,-0,0.1e-2]", "los números salen como entraron")
+
+    prueba.seccion(t, "armar un documento")
+    let n = json.nuevo_objeto()
+    json.poner_texto(n, 0, "lugar", "Calama \"norte\"")
+    json.poner_numero(n, 0, "mag", 2.5)
+    json.poner_entero(n, 0, "prof", 110)
+    json.poner_bool(n, 0, "revisado", true)
+    json.poner_nulo(n, 0, "nota")
+    let arr = json.poner_arreglo(n, 0, "estaciones")
+    json.agregar_texto(n, arr, "A")
+    json.agregar_entero(n, arr, 7)
+    json.agregar_bool(n, arr, false)
+    json.agregar_nulo(n, arr)
+    let sub = json.agregar_objeto(n, arr)
+    json.poner_numero_texto(n, sub, "x", "1.0")
+    json.poner_numero_texto(n, sub, "y", "no es numero")
+    prueba.afirmar_igual_str(t, json.escribir(n), "{\"lugar\":\"Calama \\\"norte\\\"\",\"mag\":2.5,\"prof\":110,\"revisado\":true,\"nota\":null,\"estaciones\":[\"A\",7,false,null,{\"x\":1.0,\"y\":null}]}", "documento armado")
+    prueba.afirmar_igual_str(t, json.texto(n, "estaciones.0"), "A", "se puede buscar lo armado")
+    json.poner_texto(n, 0, "lugar", "Ovalle")
+    prueba.afirmar_igual_str(t, json.texto(n, "lugar"), "Ovalle", "poner una clave repetida la reemplaza")
+    prueba.afirmar_igual_str(t, json.clave(n, "", 0), "lugar", "y la deja en su lugar")
+    prueba.afirmar_igual_i32(t, json.largo(n, ""), 6, "sin claves de más")
+    let vuelta = json.analizar_texto(json.escribir(n))?
+    prueba.afirmar_igual_str(t, json.escribir(vuelta), json.escribir(n), "escribir y leer da lo mismo")
+    prueba.afirmar_igual_i32(t, json.poner_texto(n, json.nodo(n, "prof"), "x", "y"), 0 - 1, "no se pone dentro de un número o texto")
+
+    prueba.seccion(t, "errores")
+    prueba.afirmar_igual_str(t, error_de("{\"a\": 1,}"), "JSON: se esperaba el nombre de un campo en el byte 8", "coma de más")
+    prueba.afirmar(t, error_de("[1, 2").len() > 0, "arreglo sin cerrar")
+    prueba.afirmar(t, error_de("{\"a\" 1}").len() > 0, "falta ':'")
+    prueba.afirmar(t, error_de("[01]").len() > 0, "cero a la izquierda")
+    prueba.afirmar(t, error_de("\"sin cerrar").len() > 0, "texto sin cerrar")
+    prueba.afirmar(t, error_de("\"a\nb\"").len() > 0, "salto de línea sin escapar")
+    prueba.afirmar(t, error_de("[NaN]").len() > 0, "NaN no es JSON")
+    prueba.afirmar(t, error_de("[1] 2").len() > 0, "sobra texto")
+    prueba.afirmar(t, error_de("").len() > 0, "vacío")
+    prueba.afirmar_igual_str(t, error_de("[1] x"), "JSON: sobra texto en el byte 4", "sobra texto: dónde")
+    prueba.afirmar_igual_str(t, error_de("  [ ]  "), "(sin error)", "espacios alrededor valen")
+    let hondo = json.analizar_texto("[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]")
+    prueba.afirmar(t, hondo.is_err(), "más de 64 niveles de profundidad se rechaza")
+
+    return Ok(prueba.terminar(t))
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("lib/json")
+    let r = correr(t)
+    if r.is_err() {
+        print("ERROR:", r.err())
+        return 1
+    }
+    return 0
+}

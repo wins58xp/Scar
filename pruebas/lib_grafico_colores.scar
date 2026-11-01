@@ -1,0 +1,85 @@
+# grafico con las paletas y mapas de lib/colores, probado con
+# lib/prueba: los colores salen de lib/colores con la misma codificación que lienzo, así que
+# se pasan tal cual a grafico.linea, barras, etc. Dibuja un gráfico con ellos y mira un
+# píxel de cada serie.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "grafico"
+use "lienzo"
+use "colores"
+
+fn get(v: Vec<i32>, i: i32) -> i32 {
+    return v.get(i).unwrap_or(0)
+}
+
+fn correr(p: prueba.Prueba) -> Result<i32> {
+    prueba.seccion(p, "paletas")
+    let t10 = grafico.colores_paleta("tab10", 12)?
+    prueba.afirmar_igual_i32(p, t10.len(), 12, "12 colores pedidos")
+    prueba.afirmar_igual_i32(p, t10.get(0).unwrap_or(0), grafico.paleta(0), "tab10 es la paleta de siempre (0)")
+    prueba.afirmar_igual_i32(p, t10.get(7).unwrap_or(0), grafico.paleta(7), "tab10 es la paleta de siempre (7)")
+    prueba.afirmar_igual_i32(p, t10.get(10).unwrap_or(0), grafico.paleta(0), "da la vuelta")
+    let oi = grafico.colores_paleta("okabe_ito", 3)?
+    prueba.afirmar_igual_str(p, colores.a_hex(oi.get(1).unwrap_or(0)), "#56b4e9", "Okabe-Ito: el celeste")
+    prueba.afirmar(p, grafico.colores_paleta("nada", 3).is_err(), "paleta que no existe")
+    prueba.afirmar_igual_i32(p, get(grafico.colores_paleta("set2", 1)?, 0), colores.paleta_color(colores.paleta("set2")?, 0), "el primero de set2")
+
+    prueba.seccion(p, "mapas")
+    let m = grafico.colores_mapa("viridis", 5)?
+    prueba.afirmar_igual_str(p, colores.a_hex(m.get(0).unwrap_or(0)), "#440154", "viridis: el primero")
+    prueba.afirmar_igual_str(p, colores.a_hex(m.get(4).unwrap_or(0)), "#fde724", "viridis: el último")
+    prueba.afirmar_igual_str(p, colores.a_hex(m.get(2).unwrap_or(0)), "#20908c", "viridis: el del medio")
+    prueba.afirmar_igual_str(p, colores.a_hex(get(grafico.colores_mapa("viridis", 1)?, 0)), "#20908c", "con uno solo, el del medio")
+    prueba.afirmar(p, grafico.colores_mapa("jet", 3).is_err(), "mapa que no existe")
+
+    prueba.seccion(p, "color suelto")
+    prueba.afirmar_igual_i32(p, grafico.color_hex("#1f77b4")?, grafico.paleta(0), "color_hex")
+    prueba.afirmar_igual_i32(p, grafico.color_nombre("Tomato")?, lienzo.color(255, 99, 71), "color_nombre")
+    prueba.afirmar(p, grafico.color_hex("rojo").is_err(), "hex mal escrito")
+
+    prueba.seccion(p, "dibujo")
+    let g = grafico.nuevo(320, 200, "colores")
+    let cs = grafico.colores_mapa("magma", 3)?
+    let mut serie = 0
+    for s in 0..3 {
+        let xs: Vec<f64> = [1.0, 2.0, 3.0, 4.0]
+        let ys: Vec<f64> = [to_f64(s), to_f64(s) + 1.0, to_f64(s) + 2.0, to_f64(s) + 3.0]
+        grafico.linea(g, "s" + a_texto(s), xs, ys, cs.get(s).unwrap_or(0))
+        serie = serie + 1
+    }
+    let lz = grafico.dibujar(g)
+    prueba.afirmar_igual_i32(p, serie, 3, "tres series")
+    let mut hallados = 0
+    for s in 0..3 {
+        let mut visto = false
+        for y in 0..200 {
+            for x in 0..320 {
+                if lienzo.leer(lz, x, y) == cs.get(s).unwrap_or(0) {
+                    visto = true
+                }
+            }
+        }
+        if visto {
+            hallados = hallados + 1
+        }
+    }
+    prueba.afirmar_igual_i32(p, hallados, 3, "el color de cada serie aparece en el dibujo")
+
+    return Ok(prueba.terminar(p))
+}
+
+fn main() -> i32 {
+    let p = prueba.nueva("grafico + colores")
+    let r = correr(p)
+    match r {
+        Ok(codigo) => {
+            return codigo
+        }
+        Err(e) => {
+            print("ERROR:", e)
+            return 1
+        }
+    }
+    return 1
+}

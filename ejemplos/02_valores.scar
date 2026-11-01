@@ -1,0 +1,33 @@
+# Capítulo 2: valores, variables y tipos.
+#
+#   scar run ejemplos/02_valores.scar
+
+fn main() {
+    # let es inmutable; let mut se puede cambiar
+    let precio = 1200
+    let mut total = 0
+    total = total + precio * 3
+    print("total:", total)
+
+    # los cinco tipos básicos
+    let entero = 42
+    let grande: i64 = 9000000000
+    let real = 3.5
+    let listo = true
+    let nombre = "SCAR"
+    print(entero, grande, real, listo, nombre)
+
+    # entre enteros / trunca; con f64 es división real
+    print("7 / 2 =", 7 / 2, "y 7.0 / 2.0 =", 7.0 / 2.0)
+
+    # lo que puede perder algo se convierte a mano
+    let promedio = to_f64(total) / to_f64(3)
+    print("promedio:", promedio, "redondeado hacia cero:", to_i32(promedio))
+
+    # bits: separar los tres bytes de un color 0xFF8800
+    let color = 16746496
+    print("rojo", (color >> 16) & 255, "verde", (color >> 8) & 255, "azul", color & 255)
+
+    # funciones matemáticas
+    print("hipotenusa de 3 y 4:", sqrt(3.0 * 3.0 + 4.0 * 4.0))
+}

@@ -1,0 +1,102 @@
+# lib/ansi, probada con lib/prueba.
+#
+# Secuencias de 24 bits, de 256 y de 16 colores, estilos, quitar las secuencias, medir el
+# texto visible, degradados y barras, con resultados que se saben a mano. La comparación
+# con una referencia en Python sobre 288 casos está en pruebas/test_ansi_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "colores"
+use "ansi"
+
+fn e(s: str) -> str {
+    return ansi.esc() + s
+}
+
+fn correr(p: prueba.Prueba) -> Result<i32> {
+    prueba.seccion(p, "24 bits")
+    let naranja = colores.rgb(255, 128, 0)
+    prueba.afirmar_igual_str(p, ansi.fg(naranja), e("[38;2;255;128;0m"), "color del texto")
+    prueba.afirmar_igual_str(p, ansi.bg(naranja), e("[48;2;255;128;0m"), "color del fondo")
+    prueba.afirmar_igual_str(p, ansi.pintar("hola", naranja), e("[38;2;255;128;0mhola") + e("[39m"), "pintar cierra el color")
+    prueba.afirmar_igual_str(p, ansi.pintar_fondo("hola", naranja), e("[48;2;255;128;0mhola") + e("[49m"), "pintar_fondo cierra el fondo")
+    prueba.afirmar_igual_str(p, ansi.reiniciar(), e("[0m"), "reiniciar")
+    prueba.afirmar_igual_i32(p, ord(ansi.esc()), 27, "el carácter de escape")
+
+    prueba.seccion(p, "estilos")
+    prueba.afirmar_igual_str(p, ansi.negrita("x"), e("[1mx") + e("[22m"), "negrita")
+    prueba.afirmar_igual_str(p, ansi.tenue("x"), e("[2mx") + e("[22m"), "tenue")
+    prueba.afirmar_igual_str(p, ansi.cursiva("x"), e("[3mx") + e("[23m"), "cursiva")
+    prueba.afirmar_igual_str(p, ansi.subrayado("x"), e("[4mx") + e("[24m"), "subrayado")
+    prueba.afirmar_igual_str(p, ansi.invertido("x"), e("[7mx") + e("[27m"), "invertido")
+    prueba.afirmar_igual_str(p, ansi.tachado("x"), e("[9mx") + e("[29m"), "tachado")
+
+    prueba.seccion(p, "paletas de 256 y de 16")
+    prueba.afirmar_igual_str(p, colores.a_hex(ansi.rgb_de_256(16)), "#000000", "16 es el primero del cubo")
+    prueba.afirmar_igual_str(p, colores.a_hex(ansi.rgb_de_256(196)), "#ff0000", "196 es rojo puro")
+    prueba.afirmar_igual_str(p, colores.a_hex(ansi.rgb_de_256(231)), "#ffffff", "231 es blanco")
+    prueba.afirmar_igual_str(p, colores.a_hex(ansi.rgb_de_256(232)), "#080808", "232 es el primer gris")
+    prueba.afirmar_igual_str(p, colores.a_hex(ansi.rgb_de_256(255)), "#eeeeee", "255 es el último gris")
+    prueba.afirmar_igual_i32(p, ansi.a_256(colores.rgb(255, 0, 0)), 196, "el rojo cae en 196")
+    prueba.afirmar_igual_i32(p, ansi.a_256(colores.rgb(95, 135, 175)), 67, "un color del cubo")
+    prueba.afirmar_igual_i32(p, ansi.a_256(colores.rgb(128, 128, 128)), 244, "el gris medio cae en la rampa")
+    prueba.afirmar_igual_i32(p, ansi.a_256(colores.rgb(255, 255, 255)), 231, "el blanco")
+    prueba.afirmar_igual_i32(p, ansi.a_16(colores.rgb(255, 0, 0)), 9, "rojo brillante en 16 colores")
+    prueba.afirmar_igual_i32(p, ansi.a_16(colores.rgb(0, 0, 0)), 0, "negro")
+    prueba.afirmar_igual_i32(p, ansi.a_16(colores.rgb(250, 250, 250)), 15, "blanco")
+    prueba.afirmar_igual_str(p, ansi.pintar_256("x", colores.rgb(255, 0, 0)), e("[38;5;196mx") + e("[39m"), "pintar_256")
+    prueba.afirmar_igual_str(p, ansi.pintar_16("x", colores.rgb(255, 0, 0)), e("[91mx") + e("[39m"), "pintar_16 usa 90 a 97 para los brillantes")
+    prueba.afirmar_igual_str(p, ansi.fg_16(4), e("[34m"), "azul normal")
+    prueba.afirmar_igual_str(p, ansi.bg_16(12), e("[104m"), "fondo azul brillante")
+    prueba.afirmar_igual_str(p, ansi.fg_256(999), e("[38;5;255m"), "se recorta a 255")
+
+    prueba.seccion(p, "quitar y medir")
+    let t = ansi.negrita(ansi.pintar("año ñandú", naranja))
+    prueba.afirmar_igual_str(p, ansi.quitar(t), "año ñandú", "quitar deja solo el texto")
+    prueba.afirmar_igual_i32(p, ansi.largo_visible(t), 9, "largo visible")
+    prueba.afirmar_igual_str(p, ansi.quitar("sin color"), "sin color", "sin secuencias, igual")
+    prueba.afirmar_igual_str(p, ansi.quitar(e("[12")), e("[12"), "una secuencia que no termina se deja")
+    prueba.afirmar_igual_str(p, ansi.quitar("a" + e("[2K") + "b"), "ab", "también otras secuencias CSI")
+    prueba.afirmar_igual_str(p, ansi.rellenar_der(ansi.pintar("ab", naranja), 5), ansi.pintar("ab", naranja) + "   ", "rellenar mide solo lo visible")
+    prueba.afirmar_igual_str(p, ansi.rellenar_der("abcdef", 3), "abcdef", "no recorta")
+
+    prueba.seccion(p, "degradado y barra")
+    let g = ansi.degradado_texto("ab", colores.rgb(255, 0, 0), colores.rgb(0, 0, 255))
+    prueba.afirmar_igual_str(p, ansi.quitar(g), "ab", "el degradado conserva el texto")
+    prueba.afirmar(p, g.len() > 30, "lleva una secuencia por letra")
+    prueba.afirmar_igual_str(p, ansi.degradado_texto("", naranja, naranja), e("[39m"), "texto vacío: solo el cierre")
+    let b = ansi.barra(0.5, 10, colores.rgb(0, 200, 100), colores.rgb(255, 60, 60))
+    prueba.afirmar_igual_i32(p, ansi.largo_visible(b), 10, "la barra mide su ancho")
+    let mut llenas = 0
+    let mut vacias = 0
+    let limpio = ansi.quitar(b)
+    for i in 0..limpio.len() {
+        if ord(limpio[i]) == 9608 {
+            llenas = llenas + 1
+        }
+        if ord(limpio[i]) == 9617 {
+            vacias = vacias + 1
+        }
+    }
+    prueba.afirmar_igual_i32(p, llenas, 5, "la mitad llena")
+    prueba.afirmar_igual_i32(p, vacias, 5, "la mitad vacía")
+    prueba.afirmar_igual_i32(p, ansi.largo_visible(ansi.barra(2.0, 8, naranja, naranja)), 8, "una fracción de más se recorta")
+    prueba.afirmar_igual_i32(p, ansi.quitar(ansi.barra(0.0, 4, naranja, naranja)).len(), 4, "barra vacía")
+
+    return Ok(prueba.terminar(p))
+}
+
+fn main() -> i32 {
+    let p = prueba.nueva("lib/ansi")
+    let r = correr(p)
+    match r {
+        Ok(codigo) => {
+            return codigo
+        }
+        Err(e) => {
+            print("ERROR:", e)
+            return 1
+        }
+    }
+    return 1
+}

@@ -1,0 +1,208 @@
+# lib/colores contra colorsys, scikit-image y matplotlib: lo corre pruebas/test_colores_python.py.
+# Lee "casos.json" (en la carpeta donde corre) y escribe cada resultado en una línea
+# "ETIQUETA k valores..." con los f64 en su forma más corta que vuelve idéntica (como repr
+# de Python) y los colores como #rrggbbaa.
+
+use "json"
+use "texto"
+use "colores"
+
+fn num(d: json.Doc, ruta: str) -> f64 {
+    match texto.a_f64(json.texto(d, ruta)) {
+        Ok(x) => {
+            return x
+        }
+        Err(e) => {
+            return 0.0 / 0.0
+        }
+    }
+    return 0.0
+}
+
+fn ent(d: json.Doc, ruta: str) -> i32 {
+    return to_i32(num(d, ruta))
+}
+
+fn col(d: json.Doc, ruta: str) -> i32 {
+    return colores.rgba(ent(d, ruta + ".0"), ent(d, ruta + ".1"), ent(d, ruta + ".2"), ent(d, ruta + ".3"))
+}
+
+fn sal(etiqueta: str, k: i32, valor: str) {
+    print(etiqueta + " " + a_texto(k) + " " + valor)
+}
+
+fn h(c: i32) -> str {
+    return colores.a_hex_a(c)
+}
+
+fn rc(r: Result<i32>) -> str {
+    match r {
+        Ok(c) => {
+            return h(c)
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn caso_color(d: json.Doc, k: i32) {
+    let c = col(d, "colores." + a_texto(k))
+    sal("HEX", k, h(c))
+    let v = colores.a_hsv(c)
+    sal("HSV", k, a_texto(v.h) + " " + a_texto(v.s) + " " + a_texto(v.v))
+    let l = colores.a_hsl(c)
+    sal("HSL", k, a_texto(l.h) + " " + a_texto(l.s) + " " + a_texto(l.l))
+    let b = colores.a_lab(c)
+    sal("LAB", k, a_texto(b.l) + " " + a_texto(b.a) + " " + a_texto(b.b))
+    let o = colores.a_oklab(c)
+    sal("OKLAB", k, a_texto(o.l) + " " + a_texto(o.a) + " " + a_texto(o.b))
+    sal("VUELTAHSV", k, h(colores.de_hsv_a(v.h, v.s, v.v, colores.canal_a(c))))
+    sal("VUELTAHSL", k, h(colores.de_hsl_a(l.h, l.s, l.l, colores.canal_a(c))))
+    sal("VUELTALAB", k, h(colores.de_lab_a(b.l, b.a, b.b, colores.canal_a(c))))
+    sal("VUELTAOK", k, h(colores.de_oklab_a(o.l, o.a, o.b, colores.canal_a(c))))
+    sal("LUM", k, a_texto(colores.luminancia(c)))
+    sal("GRIS", k, h(colores.gris(c)))
+    sal("INV", k, h(colores.invertir(c)))
+    sal("COMP", k, h(colores.complementario(c)))
+    sal("SAT", k, h(colores.saturar(c, 0.5)) + " " + h(colores.saturar(c, 1.7)))
+    sal("GIRO", k, h(colores.girar_tono(c, 37.0)) + " " + h(colores.girar_tono(c, 0.0 - 200.0)))
+    sal("TEXTO", k, h(colores.texto_sobre(c)))
+    sal("CERCANO", k, colores.nombre_mas_cercano(c))
+    sal("GUI", k, a_texto(colores.a_gui(c)))
+    for i in 0..3 {
+        let tipo = if i == 0 { "protanopia" } else { if i == 1 { "deuteranopia" } else { "tritanopia" } }
+        sal("DALT" + a_texto(i), k, rc(colores.simular(c, tipo, 1.0)) + " " + rc(colores.simular(c, tipo, 0.4)) + " " + rc(colores.simular(c, tipo, 0.0)))
+    }
+    sal("DALTA", k, rc(colores.simular(c, "acromatopsia", 1.0)))
+    sal("DALTX", k, rc(colores.simular(c, "otra", 1.0)))
+}
+
+fn caso_par(d: json.Doc, k: i32) {
+    let r = "pares." + a_texto(k)
+    let a = col(d, r + ".a")
+    let b = col(d, r + ".b")
+    let t = num(d, r + ".t")
+    sal("MEZ", k, h(colores.mezclar(a, b, t)))
+    sal("MEZOK", k, h(colores.mezclar_oklab(a, b, t)))
+    sal("ACL", k, h(colores.aclarar(a, t)) + " " + h(colores.oscurecer(a, t)))
+    sal("CONTR", k, a_texto(colores.contraste(a, b)))
+    sal("DE", k, a_texto(colores.delta_e(a, b)))
+}
+
+fn tres(d: json.Doc, ruta: str, i: i32) -> f64 {
+    return num(d, ruta + "." + a_texto(i))
+}
+
+fn caso_inverso(d: json.Doc, k: i32) {
+    let r = "inversos." + a_texto(k)
+    sal("IHSV", k, h(colores.de_hsv(tres(d, r + ".hsv", 0), tres(d, r + ".hsv", 1), tres(d, r + ".hsv", 2))))
+    sal("IHSL", k, h(colores.de_hsl(tres(d, r + ".hsl", 0), tres(d, r + ".hsl", 1), tres(d, r + ".hsl", 2))))
+    sal("ILAB", k, h(colores.de_lab(tres(d, r + ".lab", 0), tres(d, r + ".lab", 1), tres(d, r + ".lab", 2))))
+    sal("IOK", k, h(colores.de_oklab(tres(d, r + ".ok", 0), tres(d, r + ".ok", 1), tres(d, r + ".ok", 2))))
+}
+
+fn caso_hex(d: json.Doc, k: i32) {
+    sal("DHEX", k, rc(colores.de_hex(json.texto(d, "hex." + a_texto(k)))))
+}
+
+fn caso_nombre(d: json.Doc, k: i32) {
+    sal("NOM", k, rc(colores.con_nombre(json.texto(d, "nombres." + a_texto(k)))))
+}
+
+fn caso_mapa(d: json.Doc, k: i32) {
+    let r = "mapas." + a_texto(k)
+    match colores.mapa(json.texto(d, r + ".nombre")) {
+        Ok(m) => {
+            let mut s = ""
+            for i in 0..json.largo(d, r + ".t") {
+                s = s + " " + h(colores.mapa_en(m, num(d, r + ".t." + a_texto(i))))
+            }
+            sal("MAPA", k, "OK" + s)
+        }
+        Err(e) => {
+            sal("MAPA", k, "ERR")
+        }
+    }
+}
+
+fn caso_paleta(d: json.Doc, k: i32) {
+    let r = "paletas." + a_texto(k)
+    match colores.paleta(json.texto(d, r + ".nombre")) {
+        Ok(p) => {
+            let mut s = " " + a_texto(colores.paleta_largo(p))
+            for i in 0..json.largo(d, r + ".i") {
+                s = s + " " + h(colores.paleta_color(p, ent(d, r + ".i." + a_texto(i))))
+            }
+            sal("PAL", k, "OK" + s)
+        }
+        Err(e) => {
+            sal("PAL", k, "ERR")
+        }
+    }
+}
+
+fn caso_degradado(d: json.Doc, k: i32) {
+    let r = "degradados." + a_texto(k)
+    let l = colores.lista()
+    for i in 0..json.largo(d, r + ".c") {
+        colores.lista_agregar(l, col(d, r + ".c." + a_texto(i)))
+    }
+    let mut s = ""
+    for i in 0..json.largo(d, r + ".t") {
+        let t = num(d, r + ".t." + a_texto(i))
+        s = s + " " + h(colores.degradado(l, t, false)) + " " + h(colores.degradado(l, t, true))
+    }
+    sal("DEG", k, s)
+}
+
+fn main() {
+    match json.leer_archivo("casos.json") {
+        Err(e) => {
+            print("ERROR no se pudo leer casos.json")
+        }
+        Ok(d) => {
+            for k in 0..json.largo(d, "colores") {
+                caso_color(d, k)
+            }
+            for k in 0..json.largo(d, "pares") {
+                caso_par(d, k)
+            }
+            for k in 0..json.largo(d, "inversos") {
+                caso_inverso(d, k)
+            }
+            for k in 0..json.largo(d, "hex") {
+                caso_hex(d, k)
+            }
+            for k in 0..json.largo(d, "nombres") {
+                caso_nombre(d, k)
+            }
+            for k in 0..json.largo(d, "mapas") {
+                caso_mapa(d, k)
+            }
+            for k in 0..json.largo(d, "paletas") {
+                caso_paleta(d, k)
+            }
+            for k in 0..json.largo(d, "degradados") {
+                caso_degradado(d, k)
+            }
+            for i in 0..colores.cantidad_nombres() {
+                sal("TODOS", i, colores.nombre_en(i) + " " + h(colores.color_en(i)))
+            }
+            for n in 1..13 {
+                let mut s = ""
+                for i in 0..n {
+                    s = s + " " + h(colores.paleta_n(n, i))
+                }
+                sal("PALN", n, s)
+            }
+            for i in 0..colores.cantidad_mapas() {
+                sal("NMAPA", i, colores.nombre_mapa(i))
+            }
+            for i in 0..colores.cantidad_paletas() {
+                sal("NPAL", i, colores.nombre_paleta(i))
+            }
+        }
+    }
+}

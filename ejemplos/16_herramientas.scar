@@ -1,0 +1,53 @@
+# Capítulo 16: un programa que se prueba a sí mismo con la librería prueba.
+#
+#   scar run ejemplos/16_herramientas.scar ; echo "código de salida: $?"
+#   scar fmt ejemplos/16_herramientas.scar --check
+
+use "prueba"
+use "texto"
+
+fn es_primo(n: i32) -> bool {
+    if n < 2 {
+        return false
+    }
+    let mut d = 2
+    while d * d <= n {
+        if n % d == 0 {
+            return false
+        }
+        d = d + 1
+    }
+    return true
+}
+
+fn invertir(s: str) -> str {
+    let mut r = ""
+    let mut i = len(s) - 1
+    while i >= 0 {
+        r = r + s[i]
+        i = i - 1
+    }
+    return r
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("capítulo 16")
+
+    prueba.seccion(t, "primos")
+    prueba.afirmar(t, es_primo(2), "2 es primo")
+    prueba.afirmar(t, es_primo(97), "97 es primo")
+    prueba.afirmar(t, not es_primo(1), "1 no es primo")
+    prueba.afirmar(t, not es_primo(91), "91 = 7 * 13")
+
+    prueba.seccion(t, "textos")
+    prueba.afirmar_igual_str(t, invertir("ñandú"), "údnañ", "invertir con tildes")
+    prueba.afirmar_igual_str(t, invertir(""), "", "invertir el texto vacío")
+    prueba.afirmar_igual_str(t, texto.mayusculas("año"), "AÑO", "mayúsculas")
+    prueba.afirmar_igual_i32(t, len("murciélago"), 10, "largo en caracteres")
+
+    prueba.seccion(t, "números")
+    prueba.afirmar_cerca(t, sqrt(2.0) * sqrt(2.0), 2.0, 1e-12, "raíz al cuadrado")
+    prueba.afirmar_igual_i64(t, to_i64(2147483647) + 1, 2147483648, "pasar a i64 no desborda")
+
+    return prueba.terminar(t)
+}

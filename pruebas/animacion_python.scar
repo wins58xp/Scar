@@ -1,0 +1,58 @@
+# lib/animacion para pruebas/test_animacion_python.py: imprime los valores (por un millón, redondeados).
+use "animacion"
+
+fn m(v: f64) -> i64 {
+    return to_i64(floor(v * 1000000.0 + 0.5))
+}
+
+fn main() -> i32 {
+    for c in 0..17 {
+        let mut s = "curva " + a_texto(c) + ":"
+        for k in 0..41 {
+            let t = to_f64(k - 5) / 30.0
+            s = s + " " + a_texto(m(animacion.suave_en(t, c)))
+        }
+        print(s)
+    }
+    print("entre " + a_texto(m(animacion.entre(10.0, 20.0, 0.25, animacion.salida_cuad()))) + " " + a_texto(m(animacion.entre(5.0, 0.0 - 5.0, 0.5, animacion.suave()))))
+    for modo in 0..3 {
+        let tw = animacion.tween(100.0, 300.0, 400, animacion.entrada_salida_cubica())
+        if modo == 1 {
+            animacion.repetir(tw, true)
+        }
+        if modo == 2 {
+            animacion.ida_vuelta(tw, true)
+        }
+        let mut s = "tween " + a_texto(modo) + ":"
+        for i in 0..60 {
+            animacion.avanzar(tw, (i * 37 + 11) % 50)
+            s = s + " " + a_texto(m(animacion.valor(tw)))
+            if animacion.terminado(tw) {
+                s = s + "T"
+            }
+        }
+        print(s)
+    }
+    let tw = animacion.tween(0.0, 1.0, 100, animacion.lineal())
+    animacion.avanzar(tw, 250)
+    animacion.avanzar(tw, 0 - 5)
+    print("fin " + a_texto(m(animacion.valor(tw))) + " " + a_texto(animacion.terminado(tw)))
+    animacion.reiniciar(tw)
+    print("progreso " + a_texto(m(animacion.progreso(tw))))
+    animacion.reiniciar(tw)
+    animacion.avanzar(tw, 300)
+    print("progreso " + a_texto(m(animacion.progreso(tw))))
+    let cero = animacion.tween(7.0, 9.0, 0, animacion.lineal())
+    print("cero " + a_texto(m(animacion.valor(cero))) + " " + a_texto(animacion.terminado(cero)))
+    animacion.avanzar(cero, 3)
+    print("cero " + a_texto(m(animacion.valor(cero))) + " " + a_texto(animacion.terminado(cero)))
+    let salto = animacion.tween(0.0, 100.0, 100, animacion.lineal())
+    animacion.ida_vuelta(salto, true)
+    animacion.avanzar(salto, 270)
+    print("salto " + a_texto(m(animacion.valor(salto))))
+    animacion.avanzar(salto, 100)
+    print("salto " + a_texto(m(animacion.valor(salto))))
+    animacion.reiniciar(tw)
+    print("reinicio " + a_texto(m(animacion.valor(tw))) + " " + a_texto(animacion.terminado(tw)))
+    return 0
+}

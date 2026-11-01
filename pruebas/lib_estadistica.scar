@@ -1,0 +1,106 @@
+# lib/estadistica, probada con lib/prueba.
+#
+# Media, mediana, moda, desviación, percentiles como numpy, correlación de
+# Pearson y de Spearman, regresión lineal y polinómica, histograma y ventanas
+# móviles, con datos chicos cuyos resultados se saben a mano. La comparación con
+# statistics y numpy, sobre 88 conjuntos de datos al azar, está en
+# pruebas/test_estadistica_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "estadistica"
+
+fn s_de(a: Vec<f64>) -> estadistica.Serie {
+    return estadistica.serie(a)
+}
+
+fn lista(s: estadistica.Serie) -> str {
+    let mut t = ""
+    for i in 0..estadistica.cantidad(s) {
+        if i > 0 {
+            t = t + " "
+        }
+        t = t + a_texto(estadistica.dato(s, i))
+    }
+    return t
+}
+
+fn correr(t: prueba.Prueba) -> Result<i32> {
+    prueba.seccion(t, "centro y dispersión")
+    let d = s_de([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(d), 8, "cantidad")
+    prueba.afirmar_igual_f64(t, estadistica.suma(d), 40.0, "suma")
+    prueba.afirmar_igual_f64(t, estadistica.media(d), 5.0, "media")
+    prueba.afirmar_igual_f64(t, estadistica.mediana(d), 4.5, "mediana de un largo par")
+    prueba.afirmar_igual_f64(t, estadistica.moda(d), 4.0, "moda")
+    prueba.afirmar_igual_f64(t, estadistica.minimo(d), 2.0, "mínimo")
+    prueba.afirmar_igual_f64(t, estadistica.maximo(d), 9.0, "máximo")
+    prueba.afirmar_igual_f64(t, estadistica.rango(d), 7.0, "rango")
+    prueba.afirmar_igual_f64(t, estadistica.varianza_poblacion(d), 4.0, "varianza de población")
+    prueba.afirmar_igual_f64(t, estadistica.desviacion_poblacion(d), 2.0, "desviación de población")
+    prueba.afirmar_cerca(t, estadistica.varianza(d), 32.0 / 7.0, 1e-14, "varianza de muestra (n - 1)")
+    prueba.afirmar_cerca(t, estadistica.desviacion(d), sqrt(32.0 / 7.0), 1e-14, "desviación de muestra")
+    prueba.afirmar_igual_f64(t, estadistica.mediana(s_de([3.0, 1.0, 2.0])), 2.0, "mediana de un largo impar")
+    prueba.afirmar_igual_f64(t, estadistica.moda(s_de([5.0, 1.0, 1.0, 5.0, 2.0])), 5.0, "moda con empate: la que apareció primero")
+    prueba.afirmar(t, estadistica.media(estadistica.nueva()) != estadistica.media(estadistica.nueva()), "serie vacía: NaN")
+    prueba.afirmar_cerca(t, estadistica.media(s_de([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])), 0.55, 1e-16, "suma compensada")
+    prueba.afirmar_igual_f64(t, estadistica.mad(s_de([1.0, 1.0, 2.0, 2.0, 4.0, 6.0, 9.0])), 1.0, "desviación mediana absoluta")
+
+    prueba.seccion(t, "percentiles como numpy")
+    let p = s_de([15.0, 20.0, 35.0, 40.0, 50.0])
+    prueba.afirmar_igual_f64(t, estadistica.percentil(p, 0.0), 15.0, "percentil 0")
+    prueba.afirmar_igual_f64(t, estadistica.percentil(p, 100.0), 50.0, "percentil 100")
+    prueba.afirmar_igual_f64(t, estadistica.percentil(p, 50.0), 35.0, "percentil 50")
+    prueba.afirmar_igual_f64(t, estadistica.percentil(p, 40.0), 29.0, "percentil 40 interpola")
+    prueba.afirmar_cerca(t, estadistica.cuantil(p, 0.9), 46.0, 1e-12, "cuantil 0.9")
+    prueba.afirmar_igual_f64(t, estadistica.iqr(p), 20.0, "rango intercuartil")
+    prueba.afirmar(t, estadistica.percentil(p, 101.0) != estadistica.percentil(p, 101.0), "fuera de rango: NaN")
+
+    prueba.seccion(t, "correlación")
+    let x = s_de([1.0, 2.0, 3.0, 4.0, 5.0])
+    let y = s_de([2.0, 4.0, 5.0, 4.0, 5.0])
+    prueba.afirmar_cerca(t, estadistica.covarianza(x, y), 1.5, 1e-14, "covarianza")
+    prueba.afirmar_cerca(t, estadistica.correlacion(x, y), 0.7745966692414834, 1e-14, "correlación de Pearson")
+    prueba.afirmar_cerca(t, estadistica.correlacion(x, s_de([10.0, 8.0, 6.0, 4.0, 2.0])), 0.0 - 1.0, 1e-14, "correlación -1")
+    prueba.afirmar_igual_str(t, lista(estadistica.rangos(s_de([10.0, 20.0, 20.0, 5.0]))), "2.0 3.5 3.5 1.0", "rangos con empate")
+    prueba.afirmar_cerca(t, estadistica.correlacion_spearman(x, s_de([1.0, 8.0, 27.0, 64.0, 125.0])), 1.0, 1e-14, "Spearman con una relación creciente")
+
+    prueba.seccion(t, "regresión")
+    let r = estadistica.regresion_lineal(s_de([1.0, 2.0, 3.0, 4.0]), s_de([3.0, 5.0, 7.0, 9.0]))
+    prueba.afirmar_cerca(t, r.pendiente, 2.0, 1e-13, "pendiente")
+    prueba.afirmar_cerca(t, r.intercepto, 1.0, 1e-13, "intercepto")
+    prueba.afirmar_cerca(t, r.r2, 1.0, 1e-13, "r² de una recta exacta")
+    prueba.afirmar_cerca(t, estadistica.predecir(r, 10.0), 21.0, 1e-12, "predecir")
+    let r2 = estadistica.regresion_lineal(x, y)
+    prueba.afirmar_cerca(t, r2.pendiente, 0.6, 1e-14, "pendiente con ruido")
+    prueba.afirmar_cerca(t, r2.r2, 0.6, 1e-14, "r² = correlación²")
+    let c = estadistica.ajustar_polinomio(s_de([0.0, 1.0, 2.0, 3.0, 4.0]), s_de([1.0, 2.0, 5.0, 10.0, 17.0]), 2)
+    prueba.afirmar_cerca(t, estadistica.dato(c, 0), 1.0, 1e-10, "c0 de 1 + x²")
+    prueba.afirmar_cerca(t, estadistica.dato(c, 1), 0.0, 1e-10, "c1")
+    prueba.afirmar_cerca(t, estadistica.dato(c, 2), 1.0, 1e-10, "c2")
+    prueba.afirmar_cerca(t, estadistica.evaluar_polinomio(c, 5.0), 26.0, 1e-9, "evaluar")
+
+    prueba.seccion(t, "histograma y ventanas móviles")
+    let h = estadistica.histograma(s_de([1.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0, 4.0, 5.0]), 4)
+    prueba.afirmar_igual_i32(t, h.get(0).unwrap_or(0) * 1000 + h.get(1).unwrap_or(0) * 100 + h.get(2).unwrap_or(0) * 10 + h.get(3).unwrap_or(0), 1235, "cuentas 1 2 3 5, como numpy")
+    let v = s_de([1.0, 5.0, 2.0, 8.0, 3.0, 9.0])
+    prueba.afirmar_igual_str(t, lista(estadistica.movil_media(v, 3)), "2.6666666666666665 5.0 4.333333333333333 6.666666666666667", "media móvil")
+    prueba.afirmar_igual_str(t, lista(estadistica.movil_mediana(v, 3)), "2.0 5.0 3.0 8.0", "mediana móvil")
+    prueba.afirmar_igual_i32(t, estadistica.cantidad(estadistica.movil_mediana(v, 7)), 0, "ventana más larga que los datos")
+    prueba.afirmar_igual_str(t, lista(estadistica.acumulada(s_de([1.0, 2.0, 3.0]))), "1.0 3.0 6.0", "suma acumulada")
+    prueba.afirmar_igual_str(t, lista(estadistica.normalizar(s_de([2.0, 4.0, 6.0]))), "0.0 0.5 1.0", "normalizar")
+    prueba.afirmar_cerca(t, estadistica.media(estadistica.zscore(d)), 0.0, 1e-15, "el zscore tiene media 0")
+    prueba.afirmar_cerca(t, estadistica.desviacion(estadistica.zscore(d)), 1.0, 1e-14, "y desviación 1")
+
+    return Ok(prueba.terminar(t))
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("lib/estadistica")
+    let r = correr(t)
+    if r.is_err() {
+        print("ERROR:", r.err())
+        return 1
+    }
+    return 0
+}

@@ -1,0 +1,56 @@
+# Capítulo 4: funciones y structs.
+#
+#   scar run ejemplos/04_funciones_y_structs.scar
+
+struct Producto {
+    nombre: str
+    precio: i64
+    stock: i32
+}
+
+# las operaciones sobre un tipo son funciones que lo reciben prestado
+fn vender(p: Producto, cantidad: i32) -> bool {
+    if cantidad > p.stock {
+        return false
+    }
+    p.stock = p.stock - cantidad
+    return true
+}
+
+fn valor_en_bodega(p: Producto) -> i64 {
+    return p.precio * p.stock
+}
+
+fn es_primo(n: i32) -> bool {
+    if n < 2 {
+        return false
+    }
+    let mut d = 2
+    while d * d <= n {
+        if n % d == 0 {
+            return false
+        }
+        d = d + 1
+    }
+    return true
+}
+
+fn main() {
+    let cafe = Producto { nombre: "café", precio: 4500, stock: 10 }
+    print(cafe.nombre, "vale", valor_en_bodega(cafe), "en bodega")
+
+    if vender(cafe, 3) {
+        print("vendí 3; quedan", cafe.stock)
+    }
+    if not vender(cafe, 20) {
+        print("no hay 20; siguen", cafe.stock)
+    }
+
+    let mut primos = ""
+    for n in 1..30 {
+        if es_primo(n) {
+            primos = primos + a_texto(n) + " "
+        }
+    }
+    print("primos menores que 30:", primos)
+}

@@ -1,0 +1,77 @@
+# lib/audio contra Python: lo corre pruebas/test_audio_python.py. Genera ondas
+# al azar (seno, cuadrada, sierra, triángulo y ruido, con envolvente ADSR,
+# mezcladas, en mono y en estéreo) y las guarda como WAV en la carpeta arg(0),
+# escribiendo los parámetros de cada una; y lee los WAV que dejó Python ahí
+# (indice.txt), escribiendo sus muestras como enteros de 16 bits.
+
+use "mate"
+use "texto"
+use "audio"
+
+fn main() -> i32 {
+    let mut dir = ""
+    match arg(0) {
+        Some(a) => { dir = a + "" }
+        None => {
+            print("falta la carpeta")
+            return 2
+        }
+    }
+    let g = mate.azar(440)
+    let tasas = [8000, 11025, 22050, 44100]
+    for k in 0..30 {
+        let tipo = k % 5
+        let tasa = tasas.get(mate.azar_entero(g, 0, 3)).unwrap_or(8000)
+        let f = mate.azar_entre(g, 50.0, 2000.0)
+        let a = mate.azar_entre(g, 0.1, 1.2)          # más de 1: se recorta al guardar
+        let dur = mate.azar_entre(g, 0.005, 0.03)
+        let at = mate.azar_entre(g, 0.0, 0.01)
+        let de = mate.azar_entre(g, 0.0, 0.01)
+        let so = mate.azar_entre(g, 0.2, 1.0)
+        let li = mate.azar_entre(g, 0.0, 0.01)
+        let semilla = mate.azar_entero(g, 1, 100000)
+        let s = if tipo == 0 { audio.seno(f, a, dur, tasa) } else if tipo == 1 { audio.cuadrada(f, a, dur, tasa) }
+                else if tipo == 2 { audio.sierra(f, a, dur, tasa) } else if tipo == 3 { audio.triangulo(f, a, dur, tasa) }
+                else { audio.ruido(a, dur, tasa, semilla) }
+        if at > 0.001 and de > 0.001 {
+            audio.adsr(s, at, de, so, li)
+        }
+        let modo = k % 3                               # 0 solo, 1 mezclado con un seno, 2 estéreo
+        let fin = if modo == 0 { s } else if modo == 1 { audio.mezclar(s, audio.seno(f * 1.5, 0.3, dur, tasa)) }
+                  else { audio.estereo(s, audio.sierra(f / 2.0, 0.4, dur * 0.5, tasa)) }
+        match audio.guardar_wav(fin, dir + "/scar_" + a_texto(k) + ".wav") {
+            Ok(n) => { print("GEN", k, tipo, modo, tasa, f, a, dur, at, de, so, li, semilla, n) }
+            Err(e) => { print("ERR gen", k, e) }
+        }
+    }
+    let mut indice = ""
+    match file_open(dir + "/indice.txt", "r") {
+        Ok(fl) => {
+            match fl.read_all() {
+                Ok(t) => { indice = t + "" }
+                Err(e) => {}
+            }
+            fl.close()
+        }
+        Err(e) => {}
+    }
+    let nombres = texto.lineas(indice)
+    for i in 0..nombres.len() {
+        let mut nombre = ""
+        match nombres.get(i) {
+            Some(x) => { nombre = x + "" }
+            None => {}
+        }
+        match audio.leer_wav(dir + "/" + nombre) {
+            Ok(s) => {
+                let mut v: Vec<str> = vec_new()
+                for j in 0..s.datos.len() {
+                    v.push(a_texto(audio.a_16(s.datos.get(j).unwrap_or(0.0))))
+                }
+                print("LEE", nombre, s.canales, s.tasa, audio.largo(s), texto.unir(v, ","))
+            }
+            Err(e) => { print("ERR", nombre, e) }
+        }
+    }
+    return 0
+}

@@ -1,0 +1,39 @@
+# Capítulo 3: if, while, for, break y continue.
+#
+#   scar run ejemplos/03_decidir_y_repetir.scar
+
+fn main() {
+    # fizzbuzz con un if que da un valor
+    for i in 1..16 {
+        let texto = if i % 15 == 0 {
+            "fizzbuzz"
+        } else if i % 3 == 0 {
+            "fizz"
+        } else if i % 5 == 0 {
+            "buzz"
+        } else {
+            a_texto(i)
+        }
+        print(texto)
+    }
+
+    # while con break: el primer cubo que pasa de 10.000
+    let mut n = 1
+    while true {
+        if n * n * n > 10000 {
+            break
+        }
+        n = n + 1
+    }
+    print("primer cubo mayor que 10000:", n, "->", n * n * n)
+
+    # continue: los impares del 1 al 9
+    let mut impares = ""
+    for i in 1..10 {
+        if i % 2 == 0 {
+            continue
+        }
+        impares = impares + a_texto(i) + " "
+    }
+    print("impares:", impares)
+}

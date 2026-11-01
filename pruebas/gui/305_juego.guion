@@ -1,0 +1,12 @@
+# Camina a la derecha, salta (apreta y suelta espacio) mientras camina, sigue, se da vuelta y vuelve.
+# abajo/arriba mantienen apretada una tecla (79 flecha der, 80 izq, 44 espacio).
+# Cada cuadro son 12 pasos de lógica (ver el programa).
+1 abajo 79
+3 abajo 44
+4 arriba 44
+7 abajo 44
+8 arriba 44
+9 arriba 79
+10 abajo 80
+12 abajo 44
+13 arriba 44

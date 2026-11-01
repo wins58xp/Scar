@@ -1,0 +1,294 @@
+# lib/patron, probada con lib/prueba.
+#
+# Expresiones regulares: calces con grupos, anclas, clases, Unicode, cuantificadores codiciosos
+# y perezosos, banderas, reemplazar, dividir, todos los calces, escapar, errores y los patrones
+# que a un motor con retroceso lo dejan colgado ((x+x+)+y, (a|aa)+$). Los resultados esperados
+# salen del módulo `re` de Python; la comparación con `re` sobre miles de casos al azar está en
+# pruebas/test_patron_python.py. Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "patron"
+use "texto"
+
+# Busca el primer calce y lo describe: NO, o inicio-fin:grupo0|grupo1... (- = grupo que no participó).
+fn ver(pat: str, s: str) -> str {
+    match patron.compilar(pat) {
+        Ok(p) => {
+            let m = patron.buscar(p, s)
+            if not patron.hay(m) {
+                return "NO"
+            }
+            let mut r = a_texto(patron.inicio(m)) + "-" + a_texto(patron.fin(m)) + ":"
+            for j in 0..(patron.num_grupos(p) + 1) {
+                if j > 0 {
+                    r = r + "|"
+                }
+                if patron.hay_grupo(m, j) {
+                    r = r + patron.grupo(m, j)
+                } else {
+                    r = r + "-"
+                }
+            }
+            return r
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn compila(pat: str) -> bool {
+    match patron.compilar(pat) {
+        Ok(p) => {
+            return true
+        }
+        Err(e) => {
+            return false
+        }
+    }
+    return false
+}
+
+fn lista(v: Vec<str>) -> str {
+    let mut r = ""
+    for i in 0..v.len() {
+        match v.get(i) {
+            Some(x) => {
+                r = r + "[" + x + "]"
+            }
+            None => {
+                r = r + "?"
+            }
+        }
+    }
+    return r
+}
+
+fn sustituir(pat: str, s: str, tpl: str) -> str {
+    match patron.compilar(pat) {
+        Ok(p) => {
+            match patron.reemplazar(p, s, tpl) {
+                Ok(r) => {
+                    return r
+                }
+                Err(e) => {
+                    return "ERR"
+                }
+            }
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn partir(pat: str, s: str, n: i32) -> str {
+    match patron.compilar(pat) {
+        Ok(p) => {
+            return lista(patron.dividir_n(p, s, n))
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn todos(pat: str, s: str) -> str {
+    match patron.compilar(pat) {
+        Ok(p) => {
+            return lista(patron.encontrar(p, s))
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn correr(p: prueba.Prueba) -> Result<i32> {
+    prueba.seccion(p, "primer calce, grupos y Unicode (contra re)")
+    prueba.afirmar_igual_str(p, ver("a+b", "xxaaabyy"), "2-6:aaab", "ver a+b")
+    prueba.afirmar_igual_str(p, ver("a|ab", "ab"), "0-1:a", "ver a|ab")
+    prueba.afirmar_igual_str(p, ver("(a|ab)(c|bcd)(d*)", "abcd"), "0-4:abcd|a|bcd|", "ver (a|ab)(c|bcd)(d*)")
+    prueba.afirmar_igual_str(p, ver("(\\d+)-(\\d+)", "rango 10-25 y 3-4"), "6-11:10-25|10|25", "ver (\\d+)-(\\d+)")
+    prueba.afirmar_igual_str(p, ver("(a)|(b)", "b"), "0-1:b|-|b", "ver (a)|(b)")
+    prueba.afirmar_igual_str(p, ver("(a)?b", "b"), "0-1:b|-", "ver (a)?b")
+    prueba.afirmar_igual_str(p, ver("x*", "abc"), "0-0:", "ver x*")
+    prueba.afirmar_igual_str(p, ver("(a*)*", "b"), "0-0:|", "ver (a*)*")
+    prueba.afirmar_igual_str(p, ver("(a*)+", "b"), "0-0:|", "ver (a*)+")
+    prueba.afirmar_igual_str(p, ver("(|a)+", "a"), "0-0:|", "ver (|a)+")
+    prueba.afirmar_igual_str(p, ver("a*?b", "aaab"), "0-4:aaab", "ver a*?b")
+    prueba.afirmar_igual_str(p, ver("a{2,3}", "aaaa"), "0-3:aaa", "ver a{2,3}")
+    prueba.afirmar_igual_str(p, ver("a{2,3}?", "aaaa"), "0-2:aa", "ver a{2,3}?")
+    prueba.afirmar_igual_str(p, ver("^\\s*$", "   "), "0-3:   ", "ver ^\\s*$")
+    prueba.afirmar_igual_str(p, ver("^\\s*$", "  x"), "NO", "ver ^\\s*$")
+    prueba.afirmar_igual_str(p, ver("\\bfoo\\b", "a foo b"), "2-5:foo", "ver \\bfoo\\b")
+    prueba.afirmar_igual_str(p, ver("\\bfoo\\b", "afoob"), "NO", "ver \\bfoo\\b")
+    prueba.afirmar_igual_str(p, ver("[^abc]+", "abxyzc"), "2-5:xyz", "ver [^abc]+")
+    prueba.afirmar_igual_str(p, ver("[a-c]+", "xxcabxx"), "2-5:cab", "ver [a-c]+")
+    prueba.afirmar_igual_str(p, ver("\\w+", "  añb_9 "), "2-7:añb_9", "ver \\w+")
+    prueba.afirmar_igual_str(p, ver("\\W+", "ab, cd"), "2-4:, ", "ver \\W+")
+    prueba.afirmar_igual_str(p, ver("\\d+", "día 2026"), "4-8:2026", "ver \\d+")
+    prueba.afirmar_igual_str(p, ver("(?P<anio>\\d{4})-(?P<mes>\\d\\d)", "fecha 2026-10-27"), "6-13:2026-10|2026|10", "ver (?P<anio>\\d{4})-(?P<mes>\\d\\d)")
+    prueba.afirmar_igual_str(p, ver("(?:ab)+", "ababab"), "0-6:ababab", "ver (?:ab)+")
+    prueba.afirmar_igual_str(p, ver("(ab)+", "ababab"), "0-6:ababab|ab", "ver (ab)+")
+    prueba.afirmar_igual_str(p, ver("a.c", "a\nc"), "NO", "ver a.c")
+    prueba.afirmar_igual_str(p, ver("(?s)a.c", "a\nc"), "0-3:a\nc", "ver (?s)a.c")
+    prueba.afirmar_igual_str(p, ver("^b", "a\nb"), "NO", "ver ^b")
+    prueba.afirmar_igual_str(p, ver("(?m)^b", "a\nb"), "2-3:b", "ver (?m)^b")
+    prueba.afirmar_igual_str(p, ver("a$", "a\n"), "0-1:a", "ver a$")
+    prueba.afirmar_igual_str(p, ver("\\Aa", "ba"), "NO", "ver \\Aa")
+    prueba.afirmar_igual_str(p, ver("a\\Z", "a\n"), "NO", "ver a\\Z")
+    prueba.afirmar_igual_str(p, ver("ÑANDÚ", "ñandú"), "NO", "ver ÑANDÚ")
+    prueba.afirmar_igual_str(p, ver("(?i)ÑANDÚ", "ñandú"), "0-5:ñandú", "ver (?i)ÑANDÚ")
+    prueba.afirmar_igual_str(p, ver("é+", "ééé"), "0-3:ééé", "ver é+")
+    prueba.afirmar_igual_str(p, ver("[а-я]+", "привет мир"), "0-6:привет", "ver [а-я]+")
+    prueba.afirmar_igual_str(p, ver("(?i)[а-я]+", "ПРИВЕТ"), "0-6:ПРИВЕТ", "ver (?i)[а-я]+")
+    prueba.afirmar_igual_str(p, ver("\\d+", "٣٤٥"), "0-3:٣٤٥", "ver \\d+")
+    prueba.afirmar_igual_str(p, ver("\\w+", "中文 abc"), "0-2:中文", "ver \\w+")
+    prueba.afirmar_igual_str(p, ver("\\s+", "a" + chr(160) + chr(8195) + "b"), "1-3:" + chr(160) + chr(8195), "ver \\s+")
+    prueba.afirmar_igual_str(p, ver("(x+x+)+y", "xxxxxxxxxxxxxxxxxxxx"), "NO", "ver (x+x+)+y")
+    prueba.afirmar_igual_str(p, ver("(a|aa)+$", "aaaaaaaaaaaaaaaaaaaaaaaaab"), "NO", "ver (a|aa)+$")
+    prueba.afirmar_igual_str(p, ver("a{0}b", "ab"), "1-2:b", "ver a{0}b")
+    prueba.afirmar_igual_str(p, ver("(a){0}b", "ab"), "1-2:b|-", "ver (a){0}b")
+    prueba.afirmar_igual_str(p, ver("()", "abc"), "0-0:|", "ver ()")
+    prueba.afirmar_igual_str(p, ver("|a", "a"), "0-0:", "ver |a")
+    prueba.afirmar_igual_str(p, ver("a||b", "b"), "0-0:", "ver a||b")
+    prueba.afirmar_igual_str(p, ver("[]a]+", "]a]"), "0-3:]a]", "ver []a]+")
+    prueba.afirmar_igual_str(p, ver("[^]a]+", "xy]"), "0-2:xy", "ver [^]a]+")
+    prueba.afirmar_igual_str(p, ver("[a-]+", "a-a"), "0-3:a-a", "ver [a-]+")
+    prueba.afirmar_igual_str(p, ver("[\\d_]+", "a1_2b"), "1-4:1_2", "ver [\\d_]+")
+    prueba.afirmar_igual_str(p, ver("a\\.b", "a.b"), "0-3:a.b", "ver a\\.b")
+    prueba.afirmar_igual_str(p, ver("a\\.b", "axb"), "NO", "ver a\\.b")
+    prueba.afirmar_igual_str(p, ver("\\x41\\u00f1", "Añ"), "0-2:Añ", "ver \\x41\\u00f1")
+    prueba.afirmar_igual_str(p, ver("(?i:a)b", "Ab"), "0-2:Ab", "ver (?i:a)b")
+    prueba.afirmar_igual_str(p, ver("(?i:a)b", "AB"), "NO", "ver (?i:a)b")
+    prueba.afirmar_igual_str(p, ver("a(?-i:b)", "AB"), "NO", "ver a(?-i:b)")
+
+    prueba.seccion(p, "todos los calces")
+    prueba.afirmar_igual_str(p, todos("\\d+", "a1b22c333"), "[1][22][333]", "todos \\d+")
+    prueba.afirmar_igual_str(p, todos("x*", "axxb"), "[][xx][][]", "todos x*")
+    prueba.afirmar_igual_str(p, todos("(?m)^", "a\nb\nc"), "[][][]", "todos (?m)^")
+    prueba.afirmar_igual_str(p, todos("\\b", "hola mundo"), "[][][][]", "todos \\b")
+    prueba.afirmar_igual_str(p, todos("a|", "aab"), "[a][a][][]", "todos a|")
+    prueba.afirmar_igual_str(p, todos("[a-z]+", "Hola Mundo ñandú"), "[ola][undo][and]", "todos [a-z]+")
+
+    prueba.seccion(p, "reemplazar")
+    prueba.afirmar_igual_str(p, sustituir("(\\d+)-(\\d+)", "10-25 3-4", "\\2:\\1"), "25:10 4:3", "reemplazar (\\d+)-(\\d+)")
+    prueba.afirmar_igual_str(p, sustituir("(?P<a>\\w)(?P<b>\\w)", "abcd", "\\g<b>\\g<a>"), "badc", "reemplazar (?P<a>\\w)(?P<b>\\w)")
+    prueba.afirmar_igual_str(p, sustituir("x*", "abxd", "-"), "-a-b--d-", "reemplazar x*")
+    prueba.afirmar_igual_str(p, sustituir("a", "aaa", "[\\g<0>]"), "[a][a][a]", "reemplazar a")
+    prueba.afirmar_igual_str(p, sustituir("(a)|b", "ab", "<\\1>"), "<a><>", "reemplazar (a)|b")
+    prueba.afirmar_igual_str(p, sustituir("\\s+", "a  b   c", " "), "a b c", "reemplazar \\s+")
+    prueba.afirmar_igual_str(p, sustituir("a", "aaa", "\\q"), "ERR", "reemplazar a")
+    prueba.afirmar_igual_str(p, sustituir("(a)", "a", "\\2"), "ERR", "reemplazar (a)")
+    prueba.afirmar_igual_str(p, sustituir("a", "aaa", "\\\\"), "\\\\\\", "reemplazar a")
+    prueba.afirmar_igual_str(p, sustituir("a", "a", "\\n"), "\n", "reemplazar a")
+
+    prueba.seccion(p, "dividir")
+    prueba.afirmar_igual_str(p, partir(",\\s*", "a, b,c,   d", -1), "[a][b][c][d]", "dividir ,\\s*")
+    prueba.afirmar_igual_str(p, partir("(-)", "1-2-3", -1), "[1][-][2][-][3]", "dividir (-)")
+    prueba.afirmar_igual_str(p, partir("x*", "axb", -1), "[][a][][b][]", "dividir x*")
+    prueba.afirmar_igual_str(p, partir("\\d", "a1b2c3", 2), "[a][b][c3]", "dividir \\d")
+    prueba.afirmar_igual_str(p, partir("(a)|b", "xaybz", -1), "[x][a][y][][z]", "dividir (a)|b")
+
+    prueba.seccion(p, "errores y lo que no se soporta")
+    prueba.afirmar(p, not compila("("), "rechaza (")
+    prueba.afirmar(p, not compila(")"), "rechaza )")
+    prueba.afirmar(p, not compila("[a"), "rechaza [a")
+    prueba.afirmar(p, not compila("a**"), "rechaza a**")
+    prueba.afirmar(p, not compila("*a"), "rechaza *a")
+    prueba.afirmar(p, not compila("a{2,1}"), "rechaza a{2,1}")
+    prueba.afirmar(p, not compila("\\"), "rechaza \\")
+    prueba.afirmar(p, not compila("[z-a]"), "rechaza [z-a]")
+    prueba.afirmar(p, not compila("(?P<n>a)(?P<n>b)"), "rechaza (?P<n>a)(?P<n>b)")
+    prueba.afirmar(p, not compila("(?z)"), "rechaza (?z)")
+    prueba.afirmar(p, not compila("a(?i)b"), "rechaza a(?i)b")
+    prueba.afirmar(p, not compila("(?)"), "rechaza (?)")
+    prueba.afirmar(p, not compila("\\q"), "rechaza \\q")
+    prueba.afirmar(p, not compila("(a)\\1"), "no soportado: (a)\\1")
+    prueba.afirmar(p, not compila("(?=a)"), "no soportado: (?=a)")
+    prueba.afirmar(p, not compila("(?<!a)"), "no soportado: (?<!a)")
+    prueba.afirmar(p, not compila("(?>a)"), "no soportado: (?>a)")
+    prueba.afirmar(p, not compila("a*+"), "no soportado: a*+")
+    prueba.afirmar(p, not compila("(?x)a"), "no soportado: (?x)a")
+    prueba.afirmar(p, compila("a{"), "acepta a{")
+    prueba.afirmar(p, compila("{"), "acepta {")
+    prueba.afirmar(p, compila("}"), "acepta }")
+    prueba.afirmar(p, compila("]"), "acepta ]")
+    prueba.afirmar(p, compila("a{x}"), "acepta a{x}")
+    prueba.afirmar(p, compila("x{,}"), "acepta x{,}")
+
+    prueba.seccion(p, "sin retroceso exponencial")
+    match patron.compilar("(a+)+b") {
+        Ok(q) => {
+            let largo = patron.buscar(q, texto.repetir("a", 3000))
+            prueba.afirmar(p, not patron.hay(largo), "(a+)+b contra 3000 a sin b: termina y no calza")
+            let bien = patron.buscar(q, texto.repetir("a", 3000) + "b")
+            prueba.afirmar_igual_i32(p, patron.fin(bien), 3001, "(a+)+b contra a...ab calza hasta el final")
+        }
+        Err(e) => {
+            prueba.afirmar(p, false, "compila (a+)+b")
+        }
+    }
+    match patron.compilar("(x+x+)+y") {
+        Ok(q) => {
+            prueba.afirmar(p, not patron.coincide(q, texto.repetir("x", 2000)), "(x+x+)+y contra 2000 x: termina")
+        }
+        Err(e) => {
+            prueba.afirmar(p, false, "compila (x+x+)+y")
+        }
+    }
+    match patron.compilar("(a*)*b") {
+        Ok(q) => {
+            prueba.afirmar(p, not patron.coincide(q, texto.repetir("a", 2000)), "(a*)*b contra 2000 a: termina")
+        }
+        Err(e) => {
+            prueba.afirmar(p, false, "compila (a*)*b")
+        }
+    }
+
+    prueba.seccion(p, "nombres, escapar, banderas")
+    match patron.compilar("(?P<anio>\\d{4})-(?P<mes>\\d\\d)") {
+        Ok(q) => {
+            let m = patron.buscar(q, "hoy 2026-10-27")
+            prueba.afirmar_igual_str(p, patron.grupo_nombre(q, m, "anio"), "2026", "grupo por nombre: año")
+            prueba.afirmar_igual_str(p, patron.grupo_nombre(q, m, "mes"), "10", "grupo por nombre: mes")
+            prueba.afirmar_igual_str(p, patron.grupo_nombre(q, m, "dia"), "", "nombre que no existe")
+            prueba.afirmar_igual_i32(p, patron.indice_grupo(q, "mes"), 2, "índice del grupo mes")
+            prueba.afirmar_igual_str(p, patron.nombre_grupo(q, 1), "anio", "nombre del grupo 1")
+        }
+        Err(e) => {
+            prueba.afirmar(p, false, "compila el patrón con nombres")
+        }
+    }
+    prueba.afirmar_igual_str(p, patron.escapar("a.b*c(d)[e]{f}|g^h$i\\j-k&l~m#n o"), "a\\.b\\*c\\(d\\)\\[e\\]\\{f\\}\\|g\\^h\\$i\\\\j\\-k\\&l\\~m\\#n\\ o", "escapar signos")
+    match patron.compilar_con("^a.*z$", "ims") {
+        Ok(q) => {
+            prueba.afirmar(p, patron.coincide(q, "x\nA\nb\nZ\ny"), "banderas i, m y s juntas")
+        }
+        Err(e) => {
+            prueba.afirmar(p, false, "compilar_con ims")
+        }
+    }
+
+    return Ok(prueba.terminar(p))
+}
+
+fn main() -> i32 {
+    let p = prueba.nueva("lib/patron")
+    let r = correr(p)
+    match r {
+        Ok(codigo) => {
+            return codigo
+        }
+        Err(e) => {
+            print("ERROR:", e)
+            return 1
+        }
+    }
+    return 1
+}

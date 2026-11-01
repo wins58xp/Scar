@@ -1,0 +1,609 @@
+# lib/motor3d.scar: dibujar en 3D sobre un lienzo (use "motor3d").
+#
+#   use "mate"
+#   use "lienzo"
+#   use "motor3d"
+#
+#   let r = motor3d.nuevo(320, 240, lienzo.negro())
+#   let cam = motor3d.camara(mate.v3(3.0, 2.0, 4.0), mate.v3(0.0, 0.0, 0.0), mate.v3(0.0, 1.0, 0.0),
+#                            mate.radianes(60.0), 0.1, 100.0)
+#   let luz = motor3d.luz(mate.v3(0.0 - 1.0, 0.0 - 2.0, 0.0 - 1.5), 0.2, 0.8)
+#   let cubo = motor3d.cubo(2.0)
+#   motor3d.dibujar(r, cubo, mate.m4_rotacion_y(0.5), cam, luz, lienzo.color(200, 80, 40), motor3d.plano())
+#   # r.lienzo es el dibujo: imagen.guardar_png(r.lienzo, "cubo.png")
+#
+# Todo en SCAR, sin GPU: cada triángulo se transforma con las matrices de mate
+# (modelo, vista con m4_mirar_a, proyección con m4_perspectiva), se recorta
+# contra el plano cercano, se proyecta y se rasteriza con un z-buffer (un
+# Vec<f64> del tamaño del lienzo).
+#
+# - Un píxel va si su centro cae adentro del triángulo (borde incluido); entre
+#   dos triángulos gana el más cercano, y con la misma profundidad, el primero.
+# - Las caras que miran para atrás (el triángulo se ve en el sentido de las
+#   agujas del reloj) no se dibujan: las mallas tienen los triángulos en sentido
+#   contrario, mirados desde afuera.
+# - Luz: una luz direccional (la dirección hacia donde va) con una parte
+#   ambiente y una difusa (Lambert): intensidad = ambiente + difusa · max(0, n·(-l)).
+#   plano() usa la normal de cada cara; gouraud() calcula la luz en cada
+#   vértice con su normal y la interpola; alambre() dibuja los bordes.
+# - La matriz de modelo puede rotar, trasladar y escalar parejo; una escala
+#   distinta en cada eje deforma las normales.
+
+use "mate"
+use "lienzo"
+use "texto"
+
+# ---- mallas ------------------------------------------------------------------------
+
+# Una malla de triángulos: posiciones y normales por vértice (en Vec<f64>
+# separados, x, y, z) y 3 índices de vértice por triángulo.
+struct Malla {
+    px: Vec<f64>
+    py: Vec<f64>
+    pz: Vec<f64>
+    nx: Vec<f64>
+    ny: Vec<f64>
+    nz: Vec<f64>
+    caras: Vec<i32>
+}
+
+fn malla() -> Malla {
+    return Malla { px: vec_new(), py: vec_new(), pz: vec_new(), nx: vec_new(), ny: vec_new(), nz: vec_new(),
+                   caras: vec_new() }
+}
+
+# Agrega un vértice con su normal; devuelve su índice.
+fn vertice(m: Malla, x: f64, y: f64, z: f64, nx: f64, ny: f64, nz: f64) -> i32 {
+    m.px.push(x)
+    m.py.push(y)
+    m.pz.push(z)
+    m.nx.push(nx)
+    m.ny.push(ny)
+    m.nz.push(nz)
+    return m.px.len() - 1
+}
+
+# Agrega el triángulo a, b, c (en sentido contrario a las agujas del reloj,
+# mirado desde afuera).
+fn triangulo(m: Malla, a: i32, b: i32, c: i32) {
+    m.caras.push(a)
+    m.caras.push(b)
+    m.caras.push(c)
+}
+
+fn vertices(m: Malla) -> i32 {
+    return m.px.len()
+}
+
+fn triangulos(m: Malla) -> i32 {
+    return m.caras.len() / 3
+}
+
+fn _pos(m: Malla, i: i32) -> mate.Vec3 {
+    return mate.v3(m.px.get(i).unwrap_or(0.0), m.py.get(i).unwrap_or(0.0), m.pz.get(i).unwrap_or(0.0))
+}
+
+fn _normal(m: Malla, i: i32) -> mate.Vec3 {
+    return mate.v3(m.nx.get(i).unwrap_or(0.0), m.ny.get(i).unwrap_or(0.0), m.nz.get(i).unwrap_or(0.0))
+}
+
+# Un cubo de lado `lado` centrado en el origen: 24 vértices (4 por cara, con la
+# normal de la cara) y 12 triángulos.
+fn cubo(lado: f64) -> Malla {
+    let m = malla()
+    let h = lado / 2.0
+    # cada cara: la normal y dos ejes (u, v) con u x v = normal
+    let caras = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0, 0.0, 1.0, 0.0,
+                 0.0 - 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0,
+                 0.0, 0.0 - 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                 0.0, 0.0, 0.0 - 1.0, 0.0 - 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    for f in 0..6 {
+        let n = mate.v3(caras.get(f * 9).unwrap_or(0.0), caras.get(f * 9 + 1).unwrap_or(0.0), caras.get(f * 9 + 2).unwrap_or(0.0))
+        let u = mate.v3(caras.get(f * 9 + 3).unwrap_or(0.0), caras.get(f * 9 + 4).unwrap_or(0.0), caras.get(f * 9 + 5).unwrap_or(0.0))
+        let v = mate.v3(caras.get(f * 9 + 6).unwrap_or(0.0), caras.get(f * 9 + 7).unwrap_or(0.0), caras.get(f * 9 + 8).unwrap_or(0.0))
+        let base = vertices(m)
+        let signos = [0.0 - 1.0, 0.0 - 1.0, 1.0, 0.0 - 1.0, 1.0, 1.0, 0.0 - 1.0, 1.0]
+        for k in 0..4 {
+            let su = signos.get(k * 2).unwrap_or(0.0)
+            let sv = signos.get(k * 2 + 1).unwrap_or(0.0)
+            let p = mate.v3_suma(mate.v3_escala(n, h), mate.v3_suma(mate.v3_escala(u, su * h), mate.v3_escala(v, sv * h)))
+            vertice(m, p.x, p.y, p.z, n.x, n.y, n.z)
+        }
+        triangulo(m, base, base + 1, base + 2)
+        triangulo(m, base, base + 2, base + 3)
+    }
+    return m
+}
+
+# Una esfera de radio `radio` centrada en el origen, con `segmentos` cortes
+# alrededor y `anillos` de polo a polo; la normal de cada vértice apunta hacia
+# afuera.
+fn esfera(radio: f64, segmentos: i32, anillos: i32) -> Malla {
+    let m = malla()
+    let seg = max(segmentos, 3)
+    let ani = max(anillos, 2)
+    for a in 0..ani + 1 {
+        let theta = mate.pi() * to_f64(a) / to_f64(ani)
+        for s in 0..seg + 1 {
+            let phi = 2.0 * mate.pi() * to_f64(s) / to_f64(seg)
+            let nx = sin(theta) * cos(phi)
+            let ny = cos(theta)
+            let nz = 0.0 - sin(theta) * sin(phi)
+            vertice(m, radio * nx, radio * ny, radio * nz, nx, ny, nz)
+        }
+    }
+    for a in 0..ani {
+        for s in 0..seg {
+            let i0 = a * (seg + 1) + s
+            let i1 = i0 + seg + 1
+            if a > 0 {
+                triangulo(m, i0, i1, i0 + 1)
+            }
+            if a < ani - 1 {
+                triangulo(m, i0 + 1, i1, i1 + 1)
+            }
+        }
+    }
+    return m
+}
+
+# Recalcula la normal de cada vértice como el promedio de las normales de las
+# caras que lo usan (pesadas por su área).
+fn calcular_normales(m: Malla) {
+    let n = vertices(m)
+    for i in 0..n {
+        m.nx.set(i, 0.0)
+        m.ny.set(i, 0.0)
+        m.nz.set(i, 0.0)
+    }
+    for t in 0..triangulos(m) {
+        let a = m.caras.get(t * 3).unwrap_or(0)
+        let b = m.caras.get(t * 3 + 1).unwrap_or(0)
+        let c = m.caras.get(t * 3 + 2).unwrap_or(0)
+        let cara = mate.v3_cruz(mate.v3_resta(_pos(m, b), _pos(m, a)), mate.v3_resta(_pos(m, c), _pos(m, a)))
+        let lista = [a, b, c]
+        for k in 0..3 {
+            let i = lista.get(k).unwrap_or(0)
+            m.nx.set(i, m.nx.get(i).unwrap_or(0.0) + cara.x)
+            m.ny.set(i, m.ny.get(i).unwrap_or(0.0) + cara.y)
+            m.nz.set(i, m.nz.get(i).unwrap_or(0.0) + cara.z)
+        }
+    }
+    for i in 0..n {
+        let v = mate.v3_normalizar(_normal(m, i))
+        m.nx.set(i, v.x)
+        m.ny.set(i, v.y)
+        m.nz.set(i, v.z)
+    }
+}
+
+# ---- .obj -------------------------------------------------------------------------
+
+# El índice de un .obj (desde 1; negativo cuenta desde el final) a uno desde 0.
+fn _indice_obj(t: str, cuantos: i32) -> i32 {
+    let mut r = 0 - 1
+    match int(t) {
+        Ok(k) => {
+            if k > 0 and k <= cuantos {
+                r = k - 1
+            } else if k < 0 and 0 - k <= cuantos {
+                r = cuantos + k
+            }
+        }
+        Err(e) => {}
+    }
+    return r
+}
+
+# Una malla de un archivo .obj (el texto): vértices (v), normales (vn) y caras
+# (f) de tres o más vértices, con índices como 3, 3/1, 3//2 o 3/1/2 (las
+# texturas se ignoran). Si alguna cara no trae normales, se calculan
+# (calcular_normales). Lo demás (o, g, s, usemtl...) se ignora.
+fn de_obj(fuente: str) -> Result<Malla> {
+    let pos = malla()
+    let nor = malla()
+    let m = malla()
+    let mut sin_normales = false
+    let lineas = texto.lineas(fuente)
+    for li in 0..lineas.len() {
+        let mut linea = ""
+        match lineas.get(li) {
+            Some(x) => { linea = x + "" }
+            None => {}
+        }
+        let p = texto.dividir_espacios(linea)
+        if p.len() > 0 {
+            let mut cab = ""
+            match p.get(0) {
+                Some(x) => { cab = x + "" }
+                None => {}
+            }
+            if cab == "v" or cab == "vn" {
+                if p.len() < 4 {
+                    return Err("motor3d: línea " + a_texto(li + 1) + " del .obj: faltan coordenadas")
+                }
+                let mut c: Vec<f64> = vec_new()
+                for k in 1..4 {
+                    let mut tok = ""
+                    match p.get(k) {
+                        Some(x) => { tok = x + "" }
+                        None => {}
+                    }
+                    match texto.a_f64(tok) {
+                        Ok(v) => { c.push(v) }
+                        Err(e) => { return Err("motor3d: línea " + a_texto(li + 1) + " del .obj: " + e) }
+                    }
+                }
+                let x = c.get(0).unwrap_or(0.0)
+                let y = c.get(1).unwrap_or(0.0)
+                let z = c.get(2).unwrap_or(0.0)
+                if cab == "v" {
+                    vertice(pos, x, y, z, 0.0, 0.0, 0.0)
+                } else {
+                    vertice(nor, x, y, z, 0.0, 0.0, 0.0)
+                }
+            } else if cab == "f" {
+                if p.len() < 4 {
+                    return Err("motor3d: línea " + a_texto(li + 1) + " del .obj: una cara necesita 3 vértices")
+                }
+                let mut idx: Vec<i32> = vec_new()
+                for k in 1..p.len() {
+                    let mut tok = ""
+                    match p.get(k) {
+                        Some(x) => { tok = x + "" }
+                        None => {}
+                    }
+                    let partes = texto.dividir(tok, "/")
+                    let mut sp = ""
+                    let mut sn = ""
+                    match partes.get(0) {
+                        Some(x) => { sp = x + "" }
+                        None => {}
+                    }
+                    match partes.get(2) {
+                        Some(x) => { sn = x + "" }
+                        None => {}
+                    }
+                    let ip = _indice_obj(sp, vertices(pos))
+                    if ip < 0 {
+                        return Err("motor3d: línea " + a_texto(li + 1) + " del .obj: vértice '" + tok + "' inválido")
+                    }
+                    let q = _pos(pos, ip)
+                    if len(sn) > 0 {
+                        let inn = _indice_obj(sn, vertices(nor))
+                        if inn < 0 {
+                            return Err("motor3d: línea " + a_texto(li + 1) + " del .obj: normal '" + tok + "' inválida")
+                        }
+                        let nn = mate.v3_normalizar(_pos(nor, inn))
+                        idx.push(vertice(m, q.x, q.y, q.z, nn.x, nn.y, nn.z))
+                    } else {
+                        sin_normales = true
+                        idx.push(vertice(m, q.x, q.y, q.z, 0.0, 0.0, 0.0))
+                    }
+                }
+                # un polígono se reparte en triángulos desde el primer vértice
+                for k in 1..idx.len() - 1 {
+                    triangulo(m, idx.get(0).unwrap_or(0), idx.get(k).unwrap_or(0), idx.get(k + 1).unwrap_or(0))
+                }
+            }
+        }
+    }
+    if triangulos(m) == 0 {
+        return Err("motor3d: el .obj no tiene caras")
+    }
+    if sin_normales {
+        _normales_suaves(m, pos)
+    }
+    return Ok(m)
+}
+
+# Normales para los vértices de un .obj sin vn: el promedio de las caras que
+# usan cada posición (la malla repite la posición en cada cara que la usa).
+fn _normales_suaves(m: Malla, pos: Malla) {
+    calcular_normales(m)
+    # sumar las normales de los vértices que comparten posición (búsqueda
+    # lineal: los .obj de prueba son chicos)
+    let n = vertices(m)
+    let sx: Vec<f64> = vec_new()
+    let sy: Vec<f64> = vec_new()
+    let sz: Vec<f64> = vec_new()
+    for i in 0..n {
+        let mut ax = 0.0
+        let mut ay = 0.0
+        let mut az = 0.0
+        let pi = _pos(m, i)
+        for j in 0..n {
+            let pj = _pos(m, j)
+            if pi.x == pj.x and pi.y == pj.y and pi.z == pj.z {
+                ax = ax + m.nx.get(j).unwrap_or(0.0)
+                ay = ay + m.ny.get(j).unwrap_or(0.0)
+                az = az + m.nz.get(j).unwrap_or(0.0)
+            }
+        }
+        let v = mate.v3_normalizar(mate.v3(ax, ay, az))
+        sx.push(v.x)
+        sy.push(v.y)
+        sz.push(v.z)
+    }
+    for i in 0..n {
+        m.nx.set(i, sx.get(i).unwrap_or(0.0))
+        m.ny.set(i, sy.get(i).unwrap_or(0.0))
+        m.nz.set(i, sz.get(i).unwrap_or(0.0))
+    }
+}
+
+# ---- cámara, luz y destino ------------------------------------------------------
+
+struct Camara {
+    ojo: mate.Vec3
+    centro: mate.Vec3
+    arriba: mate.Vec3
+    fovy: f64
+    cerca: f64
+    lejos: f64
+}
+
+# Una cámara en `ojo` que mira a `centro` (como gluLookAt), con un campo de
+# visión vertical `fovy` (radianes) y los planos de recorte `cerca` y `lejos`.
+fn camara(ojo: mate.Vec3, centro: mate.Vec3, arriba: mate.Vec3, fovy: f64, cerca: f64, lejos: f64) -> Camara {
+    return Camara { ojo: ojo, centro: centro, arriba: arriba, fovy: fovy, cerca: cerca, lejos: lejos }
+}
+
+struct Luz {
+    dir: mate.Vec3
+    ambiente: f64
+    difusa: f64
+}
+
+# Una luz direccional: `dir` es hacia donde va la luz (no hace falta que sea
+# unitaria).
+fn luz(dir: mate.Vec3, ambiente: f64, difusa: f64) -> Luz {
+    return Luz { dir: mate.v3_normalizar(dir), ambiente: ambiente, difusa: difusa }
+}
+
+# Cómo se pinta: plano (una luz por cara), gouraud (luz por vértice,
+# interpolada) o alambre (solo los bordes, con el color tal cual).
+fn plano() -> i32 {
+    return 0
+}
+
+fn gouraud() -> i32 {
+    return 1
+}
+
+fn alambre() -> i32 {
+    return 2
+}
+
+# Un lienzo y su z-buffer.
+struct Destino {
+    lienzo: lienzo.Lienzo
+    z: Vec<f64>
+}
+
+fn nuevo(ancho: i32, alto: i32, fondo: i32) -> Destino {
+    let d = Destino { lienzo: lienzo.nuevo(ancho, alto, fondo), z: vec_new(ancho * alto) }
+    for i in 0..ancho * alto {
+        d.z.push(2.0)
+    }
+    return d
+}
+
+# Todo de un color, y el z-buffer vacío.
+fn limpiar(d: Destino, fondo: i32) {
+    lienzo.limpiar(d.lienzo, fondo)
+    for i in 0..d.z.len() {
+        d.z.set(i, 2.0)
+    }
+}
+
+# ---- dibujar --------------------------------------------------------------------
+
+fn _intensidad(l: Luz, n: mate.Vec3) -> f64 {
+    let d = mate.v3_punto(n, l.dir)
+    return l.ambiente + l.difusa * max(0.0, 0.0 - d)
+}
+
+fn _color(c: i32, i: f64) -> i32 {
+    let k = mate.recortar(i, 0.0, 1.0)
+    return lienzo.color(to_i32(lienzo.canal_r(c) * k + 0.5), to_i32(lienzo.canal_g(c) * k + 0.5),
+                        to_i32(lienzo.canal_b(c) * k + 0.5))
+}
+
+# Vértices de un polígono recortado: x, y, z, w (de recorte) e intensidad.
+struct Poligono {
+    x: Vec<f64>
+    y: Vec<f64>
+    z: Vec<f64>
+    w: Vec<f64>
+    i: Vec<f64>
+}
+
+fn _poligono() -> Poligono {
+    return Poligono { x: vec_new(), y: vec_new(), z: vec_new(), w: vec_new(), i: vec_new() }
+}
+
+fn _agregar(p: Poligono, x: f64, y: f64, z: f64, w: f64, i: f64) {
+    p.x.push(x)
+    p.y.push(y)
+    p.z.push(z)
+    p.w.push(w)
+    p.i.push(i)
+}
+
+fn _vaciar(p: Poligono) {
+    while p.x.len() > 0 {
+        p.x.pop()
+        p.y.pop()
+        p.z.pop()
+        p.w.pop()
+        p.i.pop()
+    }
+}
+
+# Recorta el polígono de entrada contra el plano cercano (z >= -w) y deja el
+# resultado en salida (Sutherland-Hodgman).
+fn _recortar_cerca(e: Poligono, s: Poligono) {
+    _vaciar(s)
+    let n = e.x.len()
+    for k in 0..n {
+        let j = (k + 1) % n
+        let za = e.z.get(k).unwrap_or(0.0)
+        let wa = e.w.get(k).unwrap_or(0.0)
+        let zb = e.z.get(j).unwrap_or(0.0)
+        let wb = e.w.get(j).unwrap_or(0.0)
+        let da = za + wa
+        let db = zb + wb
+        if da >= 0.0 {
+            _agregar(s, e.x.get(k).unwrap_or(0.0), e.y.get(k).unwrap_or(0.0), za, wa, e.i.get(k).unwrap_or(0.0))
+        }
+        if (da >= 0.0) != (db >= 0.0) {
+            let t = da / (da - db)
+            let xa = e.x.get(k).unwrap_or(0.0)
+            let ya = e.y.get(k).unwrap_or(0.0)
+            let ia = e.i.get(k).unwrap_or(0.0)
+            _agregar(s, xa + (e.x.get(j).unwrap_or(0.0) - xa) * t, ya + (e.y.get(j).unwrap_or(0.0) - ya) * t,
+                     za + (zb - za) * t, wa + (wb - wa) * t, ia + (e.i.get(j).unwrap_or(0.0) - ia) * t)
+        }
+    }
+}
+
+fn _borde(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) -> f64 {
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+}
+
+# Rasteriza un triángulo ya en pantalla (x, y en píxeles, z en [-1, 1]).
+fn _triangulo_pantalla(d: Destino, x0: f64, y0: f64, z0: f64, i0: f64, x1: f64, y1: f64, z1: f64, i1: f64,
+                       x2: f64, y2: f64, z2: f64, i2: f64, c: i32, con_luz: bool) {
+    # en pantalla la y crece hacia abajo: un triángulo de frente (antihorario
+    # en el mundo) queda horario, con área negativa; uno de espaldas o sin
+    # área no se dibuja
+    let area = 0.0 - _borde(x0, y0, x1, y1, x2, y2)
+    if area <= 0.0 {
+        return
+    }
+    let w = lienzo.ancho(d.lienzo)
+    let h = lienzo.alto(d.lienzo)
+    let xmin = max(0, to_i32(floor(min(x0, min(x1, x2)))))
+    let xmax = min(w - 1, to_i32(floor(max(x0, max(x1, x2)))))
+    let ymin = max(0, to_i32(floor(min(y0, min(y1, y2)))))
+    let ymax = min(h - 1, to_i32(floor(max(y0, max(y1, y2)))))
+    let mut y = ymin
+    while y <= ymax {
+        let py = to_f64(y) + 0.5
+        let mut x = xmin
+        while x <= xmax {
+            let px = to_f64(x) + 0.5
+            let b0 = 0.0 - _borde(x1, y1, x2, y2, px, py)
+            let b1 = 0.0 - _borde(x2, y2, x0, y0, px, py)
+            let b2 = 0.0 - _borde(x0, y0, x1, y1, px, py)
+            if b0 >= 0.0 and b1 >= 0.0 and b2 >= 0.0 {
+                let z = (b0 * z0 + b1 * z1 + b2 * z2) / area
+                let k = y * w + x
+                if z >= 0.0 - 1.0 and z <= 1.0 and z < d.z.get(k).unwrap_or(2.0) {
+                    d.z.set(k, z)
+                    let color = if con_luz { _color(c, (b0 * i0 + b1 * i1 + b2 * i2) / area) } else { c }
+                    lienzo.poner(d.lienzo, x, y, color)
+                }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+# Dibuja la malla `m`, transformada por la matriz de modelo `modelo`, vista
+# por la cámara `cam` y con la luz `l`, del color `c`, en el modo dado
+# (plano(), gouraud() o alambre()).
+fn dibujar(d: Destino, m: Malla, modelo: mate.Mat4, cam: Camara, l: Luz, c: i32, modo: i32) {
+    let w = lienzo.ancho(d.lienzo)
+    let h = lienzo.alto(d.lienzo)
+    let proy = mate.m4_perspectiva(cam.fovy, to_f64(w) / to_f64(h), cam.cerca, cam.lejos)
+    let vista = mate.m4_mirar_a(cam.ojo, cam.centro, cam.arriba)
+    let mvp = mate.m4_producto(proy, mate.m4_producto(vista, modelo))
+    let n = vertices(m)
+    # cada vértice: en recorte (x, y, z, w), en el mundo (para la luz de una
+    # cara) y su intensidad (Gouraud)
+    let cx: Vec<f64> = vec_new(n)
+    let cy: Vec<f64> = vec_new(n)
+    let cz: Vec<f64> = vec_new(n)
+    let cw: Vec<f64> = vec_new(n)
+    let mx: Vec<f64> = vec_new(n)
+    let my: Vec<f64> = vec_new(n)
+    let mz: Vec<f64> = vec_new(n)
+    let vi: Vec<f64> = vec_new(n)
+    for i in 0..n {
+        let p = _pos(m, i)
+        let r = mate.m4_por_v4(mvp, mate.v4_punto(p))
+        cx.push(r.x)
+        cy.push(r.y)
+        cz.push(r.z)
+        cw.push(r.w)
+        let q = mate.m4_punto(modelo, p)
+        mx.push(q.x)
+        my.push(q.y)
+        mz.push(q.z)
+        if modo == gouraud() {
+            vi.push(_intensidad(l, mate.v3_normalizar(mate.m4_direccion(modelo, _normal(m, i)))))
+        } else {
+            vi.push(0.0)
+        }
+    }
+    let ent = _poligono()
+    let sal = _poligono()
+    for t in 0..triangulos(m) {
+        let a = m.caras.get(t * 3).unwrap_or(0)
+        let b = m.caras.get(t * 3 + 1).unwrap_or(0)
+        let cc = m.caras.get(t * 3 + 2).unwrap_or(0)
+        let mut ic = 0.0
+        if modo == plano() {
+            let pa = mate.v3(mx.get(a).unwrap_or(0.0), my.get(a).unwrap_or(0.0), mz.get(a).unwrap_or(0.0))
+            let pb = mate.v3(mx.get(b).unwrap_or(0.0), my.get(b).unwrap_or(0.0), mz.get(b).unwrap_or(0.0))
+            let pc = mate.v3(mx.get(cc).unwrap_or(0.0), my.get(cc).unwrap_or(0.0), mz.get(cc).unwrap_or(0.0))
+            ic = _intensidad(l, mate.v3_normalizar(mate.v3_cruz(mate.v3_resta(pb, pa), mate.v3_resta(pc, pa))))
+        }
+        _vaciar(ent)
+        let lista = [a, b, cc]
+        for k in 0..3 {
+            let v = lista.get(k).unwrap_or(0)
+            let iv = if modo == plano() { ic } else { vi.get(v).unwrap_or(0.0) }
+            _agregar(ent, cx.get(v).unwrap_or(0.0), cy.get(v).unwrap_or(0.0), cz.get(v).unwrap_or(0.0),
+                     cw.get(v).unwrap_or(0.0), iv)
+        }
+        _recortar_cerca(ent, sal)
+        let nv = sal.x.len()
+        if nv >= 3 {
+            # a pantalla: x de 0 a ancho, y de 0 (arriba) a alto
+            let sx: Vec<f64> = vec_new(nv)
+            let sy: Vec<f64> = vec_new(nv)
+            let sz: Vec<f64> = vec_new(nv)
+            for k in 0..nv {
+                let ww = sal.w.get(k).unwrap_or(1.0)
+                sx.push((sal.x.get(k).unwrap_or(0.0) / ww + 1.0) * 0.5 * to_f64(w))
+                sy.push((1.0 - sal.y.get(k).unwrap_or(0.0) / ww) * 0.5 * to_f64(h))
+                sz.push(sal.z.get(k).unwrap_or(0.0) / ww)
+            }
+            if modo == alambre() {
+                if _borde(sx.get(0).unwrap_or(0.0), sy.get(0).unwrap_or(0.0), sx.get(1).unwrap_or(0.0), sy.get(1).unwrap_or(0.0),
+                          sx.get(2).unwrap_or(0.0), sy.get(2).unwrap_or(0.0)) < 0.0 {
+                    for k in 0..nv {
+                        let j = (k + 1) % nv
+                        lienzo.linea(d.lienzo, to_i32(floor(sx.get(k).unwrap_or(0.0))), to_i32(floor(sy.get(k).unwrap_or(0.0))),
+                                     to_i32(floor(sx.get(j).unwrap_or(0.0))), to_i32(floor(sy.get(j).unwrap_or(0.0))), c)
+                    }
+                }
+            } else {
+                for k in 1..nv - 1 {
+                    _triangulo_pantalla(d, sx.get(0).unwrap_or(0.0), sy.get(0).unwrap_or(0.0), sz.get(0).unwrap_or(0.0),
+                                        sal.i.get(0).unwrap_or(0.0),
+                                        sx.get(k).unwrap_or(0.0), sy.get(k).unwrap_or(0.0), sz.get(k).unwrap_or(0.0),
+                                        sal.i.get(k).unwrap_or(0.0),
+                                        sx.get(k + 1).unwrap_or(0.0), sy.get(k + 1).unwrap_or(0.0), sz.get(k + 1).unwrap_or(0.0),
+                                        sal.i.get(k + 1).unwrap_or(0.0), c, true)
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,2122 @@
+# lib/patron.scar: expresiones regulares (use "patron").
+#
+#   use "patron"
+#
+#   match patron.compilar("(\\d+)-(\\d+)") {
+#       Ok(p) => {
+#           let m = patron.buscar(p, "rango 10-25 y 3-4")
+#           if patron.hay(m) {
+#               print(patron.grupo(m, 1), patron.grupo(m, 2))      # 10 25
+#           }
+#           print(patron.reemplazar_texto(p, "10-25", "x"))        # x
+#           match patron.reemplazar(p, "10-25 3-4", "\\2:\\1") {
+#               Ok(s) => print(s)                                  # 25:10 4:3
+#               Err(e) => print(e)
+#           }
+#       }
+#       Err(e) => print(e)
+#   }
+#
+# Escrita entera en SCAR. Es un motor al
+# estilo Thompson / Pike: el patrón se compila a un programa de instrucciones y se corre
+# con una "máquina virtual de hilos" que avanza todos los caminos posibles a la vez, un
+# carácter por vez. Por eso el tiempo es siempre proporcional a (largo del texto) x (largo
+# del patrón): nunca hay el retroceso exponencial de `(a+)+b` contra "aaaa...a". Los hilos
+# van en orden de prioridad, así que da lo mismo que el módulo `re` de Python: el que
+# empieza más a la izquierda, y entre los que empiezan igual el primero que hubiera
+# probado un motor con retroceso (el `*` es codicioso, el `*?` perezoso, en `a|ab` gana `a`).
+#
+# Sintaxis aceptada (la de `re`):
+#   .  ^  $  \A  \Z  \b  \B   clases  [abc] [a-z] [^0-9] con \d \w \s adentro
+#   \d \D \w \W \s \S         (Unicode, como `re`: \w son las letras y cifras de cualquier alfabeto)
+#   * + ? {n} {n,} {,m} {n,m} y sus versiones perezosas (*? +? ?? {n,m}?)
+#   | (alternativa)   ( ) grupo que captura   (?: ) grupo que no captura   (?P<nombre> )
+#   (?i) (?m) (?s) al principio del patrón, o (?i: ) (?-i: ) en un trozo
+#   escapes \n \t \r \f \v \a \xhh \uhhhh \Uhhhhhhhh \0 \012 y cualquier signo escapado
+# No acepta (y avisa con un Err claro, no se queda callada): referencias hacia atrás (\1,
+# (?P=n)), mirar adelante / atrás ((?=) (?!) (?<=) (?<!)), grupos atómicos y cuantificadores
+# posesivos, condicionales (?(1)..), \N{nombre}, ni las banderas a, u, L, x. Esas cosas no
+# se pueden hacer en tiempo lineal (o no son regulares); si las necesitas, se dividen en dos
+# búsquedas.
+#
+# Diferencias a propósito con `re`:
+#   - \B también calza en el texto vacío (en Python < 3.14 no; desde la 3.14 sí).
+#   - Las mayúsculas/minúsculas con (?i) se igualan en ASCII, Latin-1, Latin extendido A,
+#     griego y cirílico (no en el resto del Unicode, ni las rarezas como la ß o la K del kelvin).
+#   - Las posiciones son de caracteres (puntos de código), igual que en Python.
+#   - Un grupo que no participó da "" en `grupo` (en Python da None); `hay_grupo` lo distingue.
+#
+# Probada contra `re` de Python.
+
+use "texto"
+
+struct Patron {
+    fuente: str
+    ngrupos: i32
+    nregs: i32
+    nombres: Vec<str>
+    op: Vec<i32>
+    ax: Vec<i32>
+    ay: Vec<i32>
+    cl_ini: Vec<i32>
+    cl_fin: Vec<i32>
+    cl_neg: Vec<i32>
+    it_tipo: Vec<i32>
+    it_a: Vec<i32>
+    it_b: Vec<i32>
+    tw: Vec<i32>
+    td: Vec<i32>
+}
+
+# Una búsqueda que calzó (o no): hay() lo dice. pos tiene [inicio0, fin0, inicio1, fin1...]
+# en caracteres, con -1 en los grupos que no participaron.
+struct Coincidencia {
+    ok: bool
+    pos: Vec<i32>
+    s: str
+}
+
+struct Texto {
+    c: Vec<i32>
+    s: str
+}
+
+# ---------------------------------------------------------------------------
+# Mayúsculas y minúsculas (las letras que cubre la lib, ver arriba)
+# ---------------------------------------------------------------------------
+
+fn _baja(c: i32) -> i32 {
+    if c < 65 {
+        return c
+    }
+    if c <= 90 {
+        return c + 32
+    }
+    if c < 192 {
+        return c
+    }
+    if c <= 222 {
+        if c == 215 {
+            return c
+        }
+        return c + 32
+    }
+    if c < 256 {
+        return c
+    }
+    if c <= 383 {
+        if c == 304 or c == 305 or c == 312 or c == 329 or c == 383 {
+            return c
+        }
+        if c == 376 {
+            return 255
+        }
+        if (c <= 311 or (c >= 330 and c <= 375)) and c % 2 == 0 {
+            return c + 1
+        }
+        if ((c >= 313 and c <= 328) or (c >= 377 and c <= 382)) and c % 2 == 1 {
+            return c + 1
+        }
+        return c
+    }
+    if c >= 913 and c <= 937 {
+        if c == 930 {
+            return c
+        }
+        return c + 32
+    }
+    if c >= 1024 and c <= 1039 {
+        return c + 80
+    }
+    if c >= 1040 and c <= 1071 {
+        return c + 32
+    }
+    return c
+}
+
+fn _sube(c: i32) -> i32 {
+    if c < 97 {
+        return c
+    }
+    if c <= 122 {
+        return c - 32
+    }
+    if c < 224 {
+        return c
+    }
+    if c <= 254 {
+        if c == 247 {
+            return c
+        }
+        return c - 32
+    }
+    if c == 255 {
+        return 376
+    }
+    if c < 257 {
+        return c
+    }
+    if c <= 383 {
+        if c == 305 or c == 312 or c == 329 or c == 383 {
+            return c
+        }
+        if (c <= 311 or (c >= 330 and c <= 375)) and c % 2 == 1 {
+            return c - 1
+        }
+        if ((c >= 313 and c <= 328) or (c >= 377 and c <= 382)) and c % 2 == 0 {
+            return c - 1
+        }
+        return c
+    }
+    if c >= 945 and c <= 969 {
+        if c == 962 {
+            return c
+        }
+        return c - 32
+    }
+    if c >= 1104 and c <= 1119 {
+        return c - 80
+    }
+    if c >= 1072 and c <= 1103 {
+        return c - 32
+    }
+    return c
+}
+
+# ---------------------------------------------------------------------------
+# Tablas de Unicode: \w (str.isalnum), \d (str.isdecimal). Se decodifican al compilar
+# un patrón que las usa. Los números van como diferencias en hexadecimal.
+# ---------------------------------------------------------------------------
+
+fn _decodificar(t: str) -> Vec<i32> {
+    let r: Vec<i32> = vec_new()
+    let n = t.len()
+    let mut acum = 0
+    let mut v = 0
+    let mut en_numero = false
+    let mut i = 0
+    while i < n {
+        let c = ord(t[i])
+        if c == 32 {
+            if en_numero {
+                acum = acum + v
+                r.push(acum)
+                v = 0
+                en_numero = false
+            }
+        } else {
+            let d = if c >= 97 { c - 87 } else { c - 48 }
+            v = v * 16 + d
+            en_numero = true
+        }
+        i = i + 1
+    }
+    if en_numero {
+        acum = acum + v
+        r.push(acum)
+    }
+    return r
+}
+
+# ---- TABLAS (generadas por pruebas/gen_patron_tablas.py: no se editan a mano) ----
+# Unicode 15.1.0 (748 rangos de \w, 64 de \d)
+
+fn _txt_alnum() -> str {
+    let mut s = ""
+    s = s + "30 9 8 19 7 19 30 0 8 1 2 0 4 1 2 2 2 16 2 1e 2 1c9 5 b f 4 8 0 2 0 82 4 2 1 3 3 2 0 7 0 2 2 2 0 2 1"
+    s = s + "3 2 52 2 8a 9 a5 2 25 3 0 7 28 48 1a 5 3 2e 2a 16 9 5 1 2 62 2 0 10 1 8 e 3 0 11 0 2 1d 1e 58 c 0 f "
+    s = s + "2a a 1 5 0 6 15 5 0 a 0 4 0 18 18 8 a 6 17 2 5 12 29 3b 35 4 0 13 0 8 9 5 9 2 f 5 7 3 1 3 15 2 6 2 0"
+    s = s + " 4 3 4 0 11 0 e 1 2 2 5 b 3 5 3 0 9 5 5 1 3 15 2 6 2 1 2 1 2 1 20 3 2 0 8 9 3 2 11 8 2 2 2 15 2 6 2 "
+    s = s + "1 2 4 4 0 13 0 10 1 5 9 a 0 c 7 3 1 3 15 2 6 2 1 2 4 4 0 1f 1 2 2 5 9 2 6 c 0 2 5 4 2 2 3 4 1 2 0 2 "
+    s = s + "1 4 1 4 2 4 b 17 0 16 c 13 7 2 2 2 16 2 f 4 0 1b 2 3 0 3 1 5 9 9 6 2 0 5 7 2 2 2 16 2 9 2 4 4 0 20 1"
+    s = s + " 2 1 5 9 2 1 12 8 2 2 2 28 3 0 11 0 6 2 2 9 5 12 2 5 6 11 4 17 2 8 2 0 3 6 20 9 12 2f 2 1 d 6 a 9 28"
+    s = s + " 1 2 0 2 4 2 17 2 0 2 9 2 1 a 0 3 4 2 0 a 9 3 3 21 0 20 13 d 7 2 23 1c 4 74 2a 15 a 7 5 5 3 4 0 4 1 "
+    s = s + "8 2 5 c d 0 2 9 7 25 2 0 6 0 3 2a 2 14c 2 3 3 6 2 0 2 3 3 28 2 3 3 20 2 3 3 6 2 0 2 3 3 e 2 38 2 3 3"
+    s = s + " 42 f 13 4 f 11 55 3 5 4 26b 3 10 2 19 6 4a 4 a 8 11 e 12 f 11 f c 2 2 10 33 24 0 5 0 4 9 7 9 17 9 7"
+    s = s + " 58 8 4 3 21 2 0 6 45 b 1e 28 27 3 4 c 2b 5 19 7 a 26 16 a 34 2c 9 7 9 e 0 5e 2e 12 7 4 9 2a 1d e 37"
+    s = s + " 1b 23 1d 9 4 30 3 8 8 2a 3 2 2a 3 2 5 2 1 4 0 6 bf 41 115 3 5 3 25 3 5 3 7 2 0 2 0 2 0 2 1e 3 34 2 "
+    s = s + "6 2 0 4 2 2 6 4 3 3 5 5 c 6 2 2 6 74 1 3 5 6 a 7 c 66 0 5 0 3 9 2 0 4 4 7 0 2 0 2 0 2 3 2 a 3 3 6 4 "
+    s = s + "5 0 2 39 2d7 3b 4f 15 277 1d 46d e4 7 3 4 1 a 0 3 25 2 0 6 0 3 37 8 0 11 16 a 6 2 6 2 6 2 6 2 6 2 6 "
+    s = s + "2 6 2 6 51 0 1d6 2 1a 8 8 4 3 4 5 55 7 2 2 59 2 3 6 2a 2 5d 4 3 b 1f 31 f 21 9 1f 7 2 e 21 9 28 e 14"
+    s = s + "1 19bf 41 568c 44 2d 3 10c 4 1b 15 2e 11 1e 3 4f 28 8 3 66 3 3f 6 1 2 0 2 4 19 f 2 2 2 3 2 16 e 5 b "
+    s = s + "33 f 31 1d 9 19 5 4 0 2 1 2 25 b 16 1a 1c 8 2e 1d a 7 4 2 18 2 28 18 2 2 7 5 9 7 16 4 0 4 31 2 0 4 1"
+    s = s + " 3 4 3 0 2 0 19 2 3 a 8 2 d 5 3 5 3 5 a 6 2 6 2 2a 2 d 7 72 e 9 7 2ba3 d 16 5 30 2105 16d 3 69 27 6 "
+    s = s + "d 4 6 0 2 9 2 c 2 4 2 0 2 1 2 1 2 6b 22 16a 13 3f 3 35 29 b 75 4 2 86 14 9 8 19 7 19 c 58 4 5 3 5 3 "
+    s = s + "5 3 2 24 b 2 19 2 12 2 1 2 e 3 d 23 7a d 2c d 38 12 1 f5 1c 4 30 11 1a 5 23 a 1d 6 25 b 1d 3 23 5 7 "
+    s = s + "2 4 2b 9d 3 9 7 23 5 23 5 27 9 33 d a 2 e 2 6 2 1 2 a 2 e 2 6 2 1 44 136 a 15 b 7 19 5 2 29 2 8 46 5"
+    s = s + " 3 0 2 2b 2 1 4 0 3 16 3 1e 3 25 9 8 31 12 2 1 6 20 5 19 47 37 5 13 3 2e 10 3 2 2 2 1c b 8 18 1e 2 1"
+    s = s + "f 21 7 2 1b 7 4 11 35 b 15 3 1a 6 19 18 6 51 48 38 32 e 32 8 29 d 9 127 1e 2 29 7 1 4f 27 9 15 c 3 1"
+    s = s + "c 11 2f 1b 15 16 d 34 1b 1d 2 1 3 0 e 2c 21 18 8 9 a 23 10 9 5 0 3 0 9 22 4 0 d 2f f 3 c a 2 0 5 13 "
+    s = s + "c 11 2 18 14 1 40 6 2 0 2 3 2 e 2 9 8 2e 12 9 c 7 3 1 3 15 2 6 2 1 2 4 4 0 13 0 d 4 9f 34 13 3 6 9 6"
+    s = s + " 2 1f 2f 15 1 2 0 9 9 a7 2e 2a 3 25 2f 15 0 c 9 27 2a e 0 8 9 37 1a 16 b 5 6 ba 2b 75 52 d 7 3 0 3 7"
+    s = s + " 2 1 2 17 10 0 2 0 f 9 47 7 3 26 11 0 2 0 1d 0 b 27 8 0 16 0 c 2d 14 0 13 48 108 8 2 24 12 0 10 1c 6"
+    s = s + " 1d 71 6 2 1 2 25 16 0 a 9 7 5 2 1 2 1f f 0 8 9 137 12 10 0 2 c 2 21 1d 9 57 0 10 14 2c 399 67 6e 12"
+    s = s + " c3 a4d 60 10 42f 12 5 fba 246 21ba 238 8 1e 2 9 7 4e 2 9 7 1d 13 2f 11 3 d 9 2 6 2 14 6 12 2b1 56 6"
+    s = s + "a 4a 6 0 43 c 41 1 2 0 1d 17f7 9 4d5 2b 8 22e8 3 2 6 2 1 2 122 10 0 1e 2 3 0 f 3 9 18b 905 6a 6 c 4 "
+    s = s + "8 8 9 1627 13 d 13 6d 18 88 54 2 46 2 1 3 0 3 1 3 3 2 b 2 0 2 6 2 40 2 3 3 7 2 6 2 1b 2 3 2 4 2 0 4 "
+    s = s + "6 2 153 3 18 2 18 2 1e 2 18 2 1e 2 18 2 1e 2 18 2 1e 2 18 2 7 3 31 701 1e 7 5 106 3d 93 2c b 6 3 9 5"
+    s = s + " 0 142 1d 13 2b 5 9 1d7 1b 5 9 2e7 6 2 3 2 1 2 e 2 c4 3 8 31 43 8 0 5 9 318 3a 2 2 2 3 4d 2c 2 e c3 "
+    s = s + "3 2 1a 2 1 2 0 3 0 2 9 2 3 2 0 2 0 7 0 5 0 2 0 2 0 2 2 2 1 2 0 3 0 2 0 2 0 2 0 2 0 2 1 2 0 3 3 2 6 2"
+    s = s + " 3 2 3 2 0 2 9 2 10 6 2 2 4 2 10 245 c ae4 9 407 a6df 21 1039 7 dd 3 1681 f 1d30 10 26d 9a3 21d 5e3 "
+    s = s + "134a 6 105f"
+    return s
+}
+
+fn _txt_decimal() -> str {
+    let mut s = ""
+    s = s + "30 9 627 9 87 9 c7 9 19d 9 77 9 77 9 77 9 77 9 77 9 77 9 77 9 77 9 77 9 61 9 77 9 47 9 117 9 47 9 74"
+    s = s + "7 9 27 9 12d 9 81 9 a7 9 7 9 b7 9 57 9 87 9 7 9 89c7 9 2a7 9 27 9 c7 9 17 9 57 9 197 9 5317 9 587 9 "
+    s = s + "887 9 32d 9 81 9 3d 9 91 9 117 9 157 9 77 9 177 9 67 9 67 9 1a7 9 67 9 2f7 9 f7 9 47 9 1a7 9 4b07 9 "
+    s = s + "57 9 87 9 6c75 31 941 9 1a7 9 1f7 9 457 9 1297 9"
+    return s
+}
+# ---- FIN DE LAS TABLAS ----
+
+# Búsqueda binaria en los rangos de \w (palabra = true) o de \d.
+fn _en_tabla(p: Patron, palabra: bool, c: i32) -> bool {
+    let n = if palabra { p.tw.len() } else { p.td.len() }
+    let mut lo = 0
+    let mut hi = n / 2 - 1
+    while lo <= hi {
+        let mid = (lo + hi) / 2
+        let desde = if palabra { p.tw.get(2 * mid).unwrap_or(0) } else { p.td.get(2 * mid).unwrap_or(0) }
+        let hasta = if palabra { p.tw.get(2 * mid + 1).unwrap_or(0) } else { p.td.get(2 * mid + 1).unwrap_or(0) }
+        if c < desde {
+            hi = mid - 1
+        } else if c > hasta {
+            lo = mid + 1
+        } else {
+            return true
+        }
+    }
+    return false
+}
+
+fn _es_w(p: Patron, c: i32) -> bool {
+    if c < 128 {
+        return (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
+    }
+    return _en_tabla(p, true, c)
+}
+
+fn _es_dig(p: Patron, c: i32) -> bool {
+    if c < 128 {
+        return c >= 48 and c <= 57
+    }
+    return _en_tabla(p, false, c)
+}
+
+fn _es_esp(c: i32) -> bool {
+    if c >= 9 and c <= 13 {
+        return true
+    }
+    if c >= 28 and c <= 32 {
+        return true
+    }
+    if c < 133 {
+        return false
+    }
+    return c == 133 or c == 160 or c == 5760 or (c >= 8192 and c <= 8202) or c == 8232 or c == 8233 or c == 8239 or c == 8287 or c == 12288
+}
+
+# ---------------------------------------------------------------------------
+# Analizador: del texto del patrón a un árbol
+# ---------------------------------------------------------------------------
+#
+# Nodos (tipo; a, b, c, d):
+#   0 vacío   1 carácter (a, b=ignora mayúsculas)   2 cualquiera (a=punto toma \n)
+#   3 clase (a=número, b=ignora mayúsculas)   4 secuencia (a, b)   5 alternativa (a, b)
+#   6 repetición (a=hijo, b=mín, c=máx o -1, d=perezosa)   7 grupo (a=hijo, b=número)
+#   8 aserción (a=tipo: 1 ^, 2 ^ multilínea, 3 $, 4 $ multilínea, 5 \A, 6 \Z, 7 \b, 8 \B)
+
+struct Parser {
+    c: Vec<i32>
+    i: i32
+    flags: i32
+    err: str
+    nk: Vec<i32>
+    na: Vec<i32>
+    nb: Vec<i32>
+    nc: Vec<i32>
+    nd: Vec<i32>
+    p: Patron
+    usa_w: bool
+    usa_d: bool
+    ult_as: bool
+    qmin: i32
+    qmax: i32
+    et: i32
+    ea: i32
+}
+
+fn _fallo(ps: Parser, msg: str) {
+    if ps.err == "" {
+        ps.err = "patron: " + msg + " (posición " + a_texto(ps.i) + ")"
+    }
+}
+
+fn _ver(ps: Parser) -> i32 {
+    return ps.c.get(ps.i).unwrap_or(-1)
+}
+
+fn _ver_en(ps: Parser, k: i32) -> i32 {
+    return ps.c.get(ps.i + k).unwrap_or(-1)
+}
+
+fn _nodo(ps: Parser, k: i32, a: i32, b: i32, c: i32, d: i32) -> i32 {
+    ps.nk.push(k)
+    ps.na.push(a)
+    ps.nb.push(b)
+    ps.nc.push(c)
+    ps.nd.push(d)
+    return ps.nk.len() - 1
+}
+
+fn _hexv(c: i32) -> i32 {
+    if c >= 48 and c <= 57 {
+        return c - 48
+    }
+    if c >= 97 and c <= 102 {
+        return c - 87
+    }
+    if c >= 65 and c <= 70 {
+        return c - 55
+    }
+    return -1
+}
+
+fn _es_letra_ascii(c: i32) -> bool {
+    return (c >= 65 and c <= 90) or (c >= 97 and c <= 122)
+}
+
+# Lee n cifras hexadecimales (exactas).
+fn _leer_hex(ps: Parser, n: i32) -> i32 {
+    let mut v = 0
+    for k in 0..n {
+        let d = _hexv(_ver(ps))
+        if d < 0 {
+            _fallo(ps, "escape \\x, \\u o \\U incompleto")
+            return 0
+        }
+        v = v * 16 + d
+        ps.i = ps.i + 1
+        if v > 1114111 {
+            _fallo(ps, "código de carácter fuera de rango")
+            return 0
+        }
+    }
+    return v
+}
+
+# Después de la barra y de la letra c (ya leídas). Deja en ps.et el tipo (0 carácter,
+# 1 \d 2 \D 3 \w 4 \W 5 \s 6 \S 7 aserción) y en ps.ea el valor.
+fn _escape(ps: Parser, en_clase: bool) {
+    ps.i = ps.i + 1
+    let c = _ver(ps)
+    if c < 0 {
+        _fallo(ps, "barra al final del patrón")
+        return
+    }
+    ps.i = ps.i + 1
+    ps.et = 0
+    ps.ea = c
+    if c == 100 {
+        ps.et = 1
+        ps.usa_d = true
+        return
+    }
+    if c == 68 {
+        ps.et = 2
+        ps.usa_d = true
+        return
+    }
+    if c == 119 {
+        ps.et = 3
+        ps.usa_w = true
+        return
+    }
+    if c == 87 {
+        ps.et = 4
+        ps.usa_w = true
+        return
+    }
+    if c == 115 {
+        ps.et = 5
+        return
+    }
+    if c == 83 {
+        ps.et = 6
+        return
+    }
+    if c == 65 or c == 90 or c == 66 {
+        if en_clase {
+            _fallo(ps, "escape inválido en una clase: \\" + chr(c))
+            return
+        }
+        ps.et = 7
+        ps.ea = if c == 65 { 5 } else if c == 90 { 6 } else { 8 }
+        ps.usa_w = ps.usa_w or c == 66
+        return
+    }
+    if c == 98 {
+        if en_clase {
+            ps.ea = 8
+            return
+        }
+        ps.et = 7
+        ps.ea = 7
+        ps.usa_w = true
+        return
+    }
+    if c == 97 {
+        ps.ea = 7
+        return
+    }
+    if c == 102 {
+        ps.ea = 12
+        return
+    }
+    if c == 110 {
+        ps.ea = 10
+        return
+    }
+    if c == 114 {
+        ps.ea = 13
+        return
+    }
+    if c == 116 {
+        ps.ea = 9
+        return
+    }
+    if c == 118 {
+        ps.ea = 11
+        return
+    }
+    if c == 120 {
+        ps.ea = _leer_hex(ps, 2)
+        return
+    }
+    if c == 117 {
+        ps.ea = _leer_hex(ps, 4)
+        return
+    }
+    if c == 85 {
+        ps.ea = _leer_hex(ps, 8)
+        return
+    }
+    if c == 78 {
+        _fallo(ps, "\\N{nombre} no está soportado")
+        return
+    }
+    if c == 48 {
+        let mut v = 0
+        let mut k = 0
+        while k < 2 and _ver(ps) >= 48 and _ver(ps) <= 55 {
+            v = v * 8 + (_ver(ps) - 48)
+            ps.i = ps.i + 1
+            k = k + 1
+        }
+        ps.ea = v
+        return
+    }
+    if c >= 49 and c <= 57 {
+        # octal de tres cifras (\123); si no, es una referencia a un grupo
+        let d1 = _ver(ps)
+        let d2 = _ver_en(ps, 1)
+        if c <= 55 and d1 >= 48 and d1 <= 55 and d2 >= 48 and d2 <= 55 {
+            let v = (c - 48) * 64 + (d1 - 48) * 8 + (d2 - 48)
+            if v > 255 {
+                _fallo(ps, "escape octal fuera de rango")
+                return
+            }
+            ps.i = ps.i + 2
+            ps.ea = v
+            return
+        }
+        if en_clase {
+            _fallo(ps, "escape inválido: \\" + chr(c))
+            return
+        }
+        _fallo(ps, "las referencias hacia atrás (\\" + chr(c) + ") no están soportadas")
+        return
+    }
+    if _es_letra_ascii(c) {
+        _fallo(ps, "escape inválido: \\" + chr(c))
+        return
+    }
+    return
+}
+
+fn _agregar_item(ps: Parser, tipo: i32, a: i32, b: i32) {
+    ps.p.it_tipo.push(tipo)
+    ps.p.it_a.push(a)
+    ps.p.it_b.push(b)
+}
+
+fn _clase(ps: Parser) -> i32 {
+    ps.i = ps.i + 1
+    let mut neg = 0
+    if _ver(ps) == 94 {
+        neg = 1
+        ps.i = ps.i + 1
+    }
+    let ini = ps.p.it_tipo.len()
+    let mut primero = true
+    while true {
+        let c = _ver(ps)
+        if c < 0 {
+            _fallo(ps, "falta cerrar el corchete [")
+            return 0
+        }
+        if c == 93 and not primero {
+            ps.i = ps.i + 1
+            break
+        }
+        primero = false
+        let mut t1 = 0
+        let mut a1 = c
+        if c == 92 {
+            _escape(ps, true)
+            if ps.err != "" {
+                return 0
+            }
+            t1 = ps.et
+            a1 = ps.ea
+        } else {
+            ps.i = ps.i + 1
+        }
+        if _ver(ps) == 45 {
+            ps.i = ps.i + 1
+            let d = _ver(ps)
+            if d < 0 {
+                _fallo(ps, "falta cerrar el corchete [")
+                return 0
+            }
+            if d == 93 {
+                if t1 == 0 {
+                    _agregar_item(ps, 0, a1, a1)
+                } else {
+                    _agregar_item(ps, t1, 0, 0)
+                }
+                _agregar_item(ps, 0, 45, 45)
+                ps.i = ps.i + 1
+                break
+            }
+            let mut t2 = 0
+            let mut a2 = d
+            if d == 92 {
+                _escape(ps, true)
+                if ps.err != "" {
+                    return 0
+                }
+                t2 = ps.et
+                a2 = ps.ea
+            } else {
+                ps.i = ps.i + 1
+            }
+            if t1 != 0 or t2 != 0 {
+                _fallo(ps, "rango de caracteres inválido")
+                return 0
+            }
+            if a2 < a1 {
+                _fallo(ps, "rango de caracteres al revés")
+                return 0
+            }
+            _agregar_item(ps, 0, a1, a2)
+        } else {
+            if t1 == 0 {
+                _agregar_item(ps, 0, a1, a1)
+            } else {
+                _agregar_item(ps, t1, 0, 0)
+            }
+        }
+    }
+    ps.p.cl_ini.push(ini)
+    ps.p.cl_fin.push(ps.p.it_tipo.len())
+    ps.p.cl_neg.push(neg)
+    let idx = ps.p.cl_ini.len() - 1
+    return _nodo(ps, 3, idx, ps.flags & 1, 0, 0)
+}
+
+# Un cuantificador en la posición actual: * + ? {n} {n,} {,m} {n,m}. Si lo es, lo consume
+# y deja ps.qmin / ps.qmax (-1 = sin tope); si no, no mueve nada (un { suelto es un carácter).
+fn _cuantificador(ps: Parser) -> bool {
+    let c = _ver(ps)
+    if c == 42 {
+        ps.i = ps.i + 1
+        ps.qmin = 0
+        ps.qmax = -1
+        return true
+    }
+    if c == 43 {
+        ps.i = ps.i + 1
+        ps.qmin = 1
+        ps.qmax = -1
+        return true
+    }
+    if c == 63 {
+        ps.i = ps.i + 1
+        ps.qmin = 0
+        ps.qmax = 1
+        return true
+    }
+    if c != 123 {
+        return false
+    }
+    let i0 = ps.i
+    ps.i = ps.i + 1
+    if _ver(ps) == 125 {
+        ps.i = i0
+        return false
+    }
+    let mut lo = 0
+    let mut hay_lo = false
+    let mut nl = 0
+    while _ver(ps) >= 48 and _ver(ps) <= 57 {
+        lo = lo * 10 + (_ver(ps) - 48)
+        hay_lo = true
+        nl = nl + 1
+        if nl > 8 {
+            ps.i = i0
+            _fallo(ps, "repetición demasiado grande")
+            return false
+        }
+        ps.i = ps.i + 1
+    }
+    let mut hi = lo
+    let mut hay_hi = hay_lo
+    if _ver(ps) == 44 {
+        ps.i = ps.i + 1
+        hi = 0
+        hay_hi = false
+        let mut nh = 0
+        while _ver(ps) >= 48 and _ver(ps) <= 57 {
+            hi = hi * 10 + (_ver(ps) - 48)
+            hay_hi = true
+            nh = nh + 1
+            if nh > 8 {
+                ps.i = i0
+                _fallo(ps, "repetición demasiado grande")
+                return false
+            }
+            ps.i = ps.i + 1
+        }
+    }
+    if _ver(ps) != 125 {
+        ps.i = i0
+        return false
+    }
+    ps.i = ps.i + 1
+    ps.qmin = if hay_lo { lo } else { 0 }
+    ps.qmax = if hay_hi { hi } else { -1 }
+    if ps.qmax >= 0 and ps.qmax < ps.qmin {
+        _fallo(ps, "el mínimo de la repetición es mayor que el máximo")
+        return false
+    }
+    return true
+}
+
+fn _es_ident(c: i32, primero: bool) -> bool {
+    if _es_letra_ascii(c) or c == 95 or c > 127 {
+        return true
+    }
+    return (not primero) and c >= 48 and c <= 57
+}
+
+fn _grupo(ps: Parser, prof: i32) -> i32 {
+    let ini = ps.i
+    ps.i = ps.i + 1
+    if _ver(ps) != 63 {
+        ps.p.ngrupos = ps.p.ngrupos + 1
+        let k = ps.p.ngrupos
+        ps.p.nombres.push("")
+        let hijo = _alt(ps, prof + 1)
+        if ps.err != "" {
+            return 0
+        }
+        if _ver(ps) != 41 {
+            _fallo(ps, "falta cerrar el paréntesis (")
+            return 0
+        }
+        ps.i = ps.i + 1
+        ps.ult_as = false
+        return _nodo(ps, 7, hijo, k, 0, 0)
+    }
+    ps.i = ps.i + 1
+    let d = _ver(ps)
+    if d < 0 {
+        _fallo(ps, "falta algo después de (?")
+        return 0
+    }
+    if d == 58 {
+        ps.i = ps.i + 1
+        let hijo = _alt(ps, prof + 1)
+        if ps.err != "" {
+            return 0
+        }
+        if _ver(ps) != 41 {
+            _fallo(ps, "falta cerrar el paréntesis (")
+            return 0
+        }
+        ps.i = ps.i + 1
+        ps.ult_as = false
+        return hijo
+    }
+    if d == 80 {
+        ps.i = ps.i + 1
+        let e = _ver(ps)
+        if e == 61 {
+            _fallo(ps, "las referencias hacia atrás (?P=nombre) no están soportadas")
+            return 0
+        }
+        if e != 60 {
+            _fallo(ps, "construcción (?P desconocida")
+            return 0
+        }
+        ps.i = ps.i + 1
+        let mut nombre = ""
+        let mut n = 0
+        while true {
+            let c = _ver(ps)
+            if c < 0 {
+                _fallo(ps, "falta el > del nombre del grupo")
+                return 0
+            }
+            if c == 62 {
+                ps.i = ps.i + 1
+                break
+            }
+            if not _es_ident(c, n == 0) {
+                _fallo(ps, "nombre de grupo inválido")
+                return 0
+            }
+            nombre = nombre + chr(c)
+            n = n + 1
+            ps.i = ps.i + 1
+        }
+        if n == 0 {
+            _fallo(ps, "nombre de grupo vacío")
+            return 0
+        }
+        if indice_grupo(ps.p, nombre) >= 0 {
+            _fallo(ps, "el nombre de grupo " + nombre + " está repetido")
+            return 0
+        }
+        ps.p.ngrupos = ps.p.ngrupos + 1
+        let k = ps.p.ngrupos
+        ps.p.nombres.push(nombre)
+        let hijo = _alt(ps, prof + 1)
+        if ps.err != "" {
+            return 0
+        }
+        if _ver(ps) != 41 {
+            _fallo(ps, "falta cerrar el paréntesis (")
+            return 0
+        }
+        ps.i = ps.i + 1
+        ps.ult_as = false
+        return _nodo(ps, 7, hijo, k, 0, 0)
+    }
+    if d == 35 {
+        while _ver(ps) >= 0 and _ver(ps) != 41 {
+            ps.i = ps.i + 1
+        }
+        if _ver(ps) < 0 {
+            _fallo(ps, "falta cerrar el comentario (?#")
+            return 0
+        }
+        ps.i = ps.i + 1
+        ps.ult_as = true
+        return _nodo(ps, 0, 0, 0, 0, 0)
+    }
+    if d == 61 or d == 33 or d == 60 or d == 62 or d == 40 {
+        _fallo(ps, "mirar adelante/atrás, grupos atómicos y condicionales no están soportados")
+        return 0
+    }
+    # banderas: (?ims) al principio, (?i: ) (?-i: ) en un trozo
+    let mut add = 0
+    let mut quita = 0
+    let mut negativo = false
+    while true {
+        let c = _ver(ps)
+        if c < 0 {
+            _fallo(ps, "banderas sin terminar")
+            return 0
+        }
+        if c == 45 and not negativo {
+            negativo = true
+            ps.i = ps.i + 1
+        } else if c == 105 or c == 109 or c == 115 {
+            let b = if c == 105 { 1 } else if c == 109 { 2 } else { 4 }
+            if negativo {
+                quita = quita | b
+            } else {
+                add = add | b
+            }
+            ps.i = ps.i + 1
+        } else if c == 41 or c == 58 {
+            break
+        } else if c == 97 or c == 117 or c == 76 or c == 120 {
+            _fallo(ps, "la bandera " + chr(c) + " no está soportada")
+            return 0
+        } else {
+            _fallo(ps, "construcción (? desconocida")
+            return 0
+        }
+    }
+    if add | quita == 0 {
+        _fallo(ps, "faltan las banderas en (?...)")
+        return 0
+    }
+    if _ver(ps) == 41 {
+        if ini != 0 or negativo or prof != 0 {
+            _fallo(ps, "las banderas globales deben ir al principio del patrón")
+            return 0
+        }
+        ps.i = ps.i + 1
+        ps.flags = ps.flags | add
+        ps.ult_as = true
+        return _nodo(ps, 0, 0, 0, 0, 0)
+    }
+    if add & quita != 0 {
+        _fallo(ps, "bandera puesta y quitada a la vez")
+        return 0
+    }
+    ps.i = ps.i + 1
+    let viejas = ps.flags
+    ps.flags = (ps.flags | add) & (7 - quita)
+    let hijo = _alt(ps, prof + 1)
+    if ps.err != "" {
+        return 0
+    }
+    if _ver(ps) != 41 {
+        _fallo(ps, "falta cerrar el paréntesis (")
+        return 0
+    }
+    ps.i = ps.i + 1
+    ps.flags = viejas
+    ps.ult_as = false
+    return hijo
+}
+
+fn _atomo(ps: Parser, prof: i32) -> i32 {
+    let c = _ver(ps)
+    if c == 40 {
+        return _grupo(ps, prof)
+    }
+    if c == 91 {
+        return _clase(ps)
+    }
+    if c == 46 {
+        ps.i = ps.i + 1
+        return _nodo(ps, 2, if ps.flags & 4 != 0 { 1 } else { 0 }, 0, 0, 0)
+    }
+    if c == 94 {
+        ps.i = ps.i + 1
+        ps.ult_as = true
+        return _nodo(ps, 8, if ps.flags & 2 != 0 { 2 } else { 1 }, 0, 0, 0)
+    }
+    if c == 36 {
+        ps.i = ps.i + 1
+        ps.ult_as = true
+        return _nodo(ps, 8, if ps.flags & 2 != 0 { 4 } else { 3 }, 0, 0, 0)
+    }
+    if c == 92 {
+        _escape(ps, false)
+        if ps.err != "" {
+            return 0
+        }
+        if ps.et == 0 {
+            return _nodo(ps, 1, ps.ea, ps.flags & 1, 0, 0)
+        }
+        if ps.et == 7 {
+            ps.ult_as = true
+            return _nodo(ps, 8, ps.ea, 0, 0, 0)
+        }
+        ps.p.it_tipo.push(ps.et)
+        ps.p.it_a.push(0)
+        ps.p.it_b.push(0)
+        ps.p.cl_ini.push(ps.p.it_tipo.len() - 1)
+        ps.p.cl_fin.push(ps.p.it_tipo.len())
+        ps.p.cl_neg.push(0)
+        return _nodo(ps, 3, ps.p.cl_ini.len() - 1, 0, 0, 0)
+    }
+    if c == 42 or c == 43 or c == 63 {
+        _fallo(ps, "no hay nada que repetir")
+        return 0
+    }
+    if c == 123 {
+        let ant = ps.err
+        if _cuantificador(ps) {
+            _fallo(ps, "no hay nada que repetir")
+            return 0
+        }
+        if ps.err != ant {
+            return 0
+        }
+    }
+    ps.i = ps.i + 1
+    return _nodo(ps, 1, c, ps.flags & 1, 0, 0)
+}
+
+fn _item(ps: Parser, prof: i32) -> i32 {
+    ps.ult_as = false
+    let mut a = _atomo(ps, prof)
+    if ps.err != "" {
+        return 0
+    }
+    let es_as = ps.ult_as
+    let mut cuantificado = false
+    while true {
+        let ant = ps.err
+        if not _cuantificador(ps) {
+            if ps.err != ant {
+                return 0
+            }
+            break
+        }
+        if es_as {
+            _fallo(ps, "no hay nada que repetir")
+            return 0
+        }
+        if cuantificado {
+            _fallo(ps, "repetición múltiple")
+            return 0
+        }
+        let mut perezosa = 0
+        if _ver(ps) == 63 {
+            perezosa = 1
+            ps.i = ps.i + 1
+        } else if _ver(ps) == 43 {
+            _fallo(ps, "los cuantificadores posesivos no están soportados")
+            return 0
+        }
+        a = _nodo(ps, 6, a, ps.qmin, ps.qmax, perezosa)
+        cuantificado = true
+    }
+    return a
+}
+
+fn _cat(ps: Parser, prof: i32) -> i32 {
+    let mut r = _nodo(ps, 0, 0, 0, 0, 0)
+    let mut primero = true
+    while true {
+        let c = _ver(ps)
+        if c < 0 or c == 124 {
+            break
+        }
+        if c == 41 {
+            if prof == 0 {
+                _fallo(ps, "paréntesis ) sin abrir")
+                return 0
+            }
+            break
+        }
+        let it = _item(ps, prof)
+        if ps.err != "" {
+            return 0
+        }
+        if primero {
+            r = it
+            primero = false
+        } else {
+            r = _nodo(ps, 4, r, it, 0, 0)
+        }
+    }
+    return r
+}
+
+fn _alt(ps: Parser, prof: i32) -> i32 {
+    let mut izq = _cat(ps, prof)
+    if ps.err != "" {
+        return 0
+    }
+    while _ver(ps) == 124 {
+        ps.i = ps.i + 1
+        let der = _cat(ps, prof)
+        if ps.err != "" {
+            return 0
+        }
+        izq = _nodo(ps, 5, izq, der, 0, 0)
+    }
+    return izq
+}
+
+# ---------------------------------------------------------------------------
+# Compilador: del árbol al programa
+# ---------------------------------------------------------------------------
+#
+# Instrucciones (op; ax, ay):
+#   0 CHAR c   1 CHARI c (minúscula)   2 ANY (menos \n)   3 ANYNL   4 CLASS (clase, ignora)
+#   5 SPLIT (prefiere ax, después ay)   6 JMP ax   7 SAVE ax   8 ASSERT ax   9 MATCH
+
+fn _ins(ps: Parser, op: i32, a: i32, b: i32) -> i32 {
+    ps.p.op.push(op)
+    ps.p.ax.push(a)
+    ps.p.ay.push(b)
+    return ps.p.op.len() - 1
+}
+
+fn _k(ps: Parser, n: i32) -> i32 {
+    return ps.nk.get(n).unwrap_or(0)
+}
+
+fn _a(ps: Parser, n: i32) -> i32 {
+    return ps.na.get(n).unwrap_or(0)
+}
+
+fn _b(ps: Parser, n: i32) -> i32 {
+    return ps.nb.get(n).unwrap_or(0)
+}
+
+# ¿Puede el nodo calzar sin consumir nada?
+fn _vacio_posible(ps: Parser, n: i32) -> bool {
+    let k = _k(ps, n)
+    if k == 0 or k == 8 {
+        return true
+    }
+    if k == 4 {
+        return _vacio_posible(ps, _a(ps, n)) and _vacio_posible(ps, _b(ps, n))
+    }
+    if k == 5 {
+        return _vacio_posible(ps, _a(ps, n)) or _vacio_posible(ps, _b(ps, n))
+    }
+    if k == 6 {
+        return _b(ps, n) == 0 or _vacio_posible(ps, _a(ps, n))
+    }
+    if k == 7 {
+        return _vacio_posible(ps, _a(ps, n))
+    }
+    return false
+}
+
+fn _emitir(ps: Parser, n: i32) {
+    if ps.err != "" {
+        return
+    }
+    if ps.p.op.len() > 300000 {
+        _fallo(ps, "el patrón es demasiado grande")
+        return
+    }
+    let k = _k(ps, n)
+    if k == 0 {
+        return
+    }
+    if k == 1 {
+        let c = _a(ps, n)
+        if _b(ps, n) != 0 and _baja(c) != _sube(c) {
+            _ins(ps, 1, _baja(c), 0)
+        } else {
+            _ins(ps, 0, c, 0)
+        }
+        return
+    }
+    if k == 2 {
+        _ins(ps, if _a(ps, n) != 0 { 3 } else { 2 }, 0, 0)
+        return
+    }
+    if k == 3 {
+        _ins(ps, 4, _a(ps, n), _b(ps, n))
+        return
+    }
+    if k == 4 {
+        _emitir(ps, _a(ps, n))
+        _emitir(ps, _b(ps, n))
+        return
+    }
+    if k == 5 {
+        let s = _ins(ps, 5, 0, 0)
+        ps.p.ax.set(s, s + 1)
+        _emitir(ps, _a(ps, n))
+        let j = _ins(ps, 6, 0, 0)
+        ps.p.ay.set(s, j + 1)
+        _emitir(ps, _b(ps, n))
+        ps.p.ax.set(j, ps.p.op.len())
+        return
+    }
+    if k == 7 {
+        _ins(ps, 7, 2 * _b(ps, n), 0)
+        _emitir(ps, _a(ps, n))
+        _ins(ps, 7, 2 * _b(ps, n) + 1, 0)
+        return
+    }
+    if k == 8 {
+        _ins(ps, 8, _a(ps, n), 0)
+        return
+    }
+    # repetición
+    let hijo = _a(ps, n)
+    let mn = _b(ps, n)
+    let mx = ps.nc.get(n).unwrap_or(-1)
+    let perez = ps.nd.get(n).unwrap_or(0) != 0
+    if mx < 0 and _vacio_posible(ps, hijo) {
+        # Como `re`: una vuelta que no avanzó ninguna posición corta el bucle (pero se queda
+        # con lo que esa vuelta capturó). La posición de entrada a cada vuelta va en un registro.
+        for q in 0..mn {
+            _emitir(ps, hijo)
+        }
+        let reg = 2 * (ps.p.ngrupos + 1) + ps.p.nregs
+        ps.p.nregs = ps.p.nregs + 1
+        let s = _ins(ps, 5, 0, 0)
+        _ins(ps, 7, reg, 0)
+        _emitir(ps, hijo)
+        _ins(ps, 10, reg, s)
+        let fin = ps.p.op.len()
+        if perez {
+            ps.p.ax.set(s, fin)
+            ps.p.ay.set(s, s + 1)
+        } else {
+            ps.p.ax.set(s, s + 1)
+            ps.p.ay.set(s, fin)
+        }
+        return
+    }
+    if mx < 0 {
+        if mn == 0 {
+            let s = _ins(ps, 5, 0, 0)
+            _emitir(ps, hijo)
+            _ins(ps, 6, s, 0)
+            let fin = ps.p.op.len()
+            if perez {
+                ps.p.ax.set(s, fin)
+                ps.p.ay.set(s, s + 1)
+            } else {
+                ps.p.ax.set(s, s + 1)
+                ps.p.ay.set(s, fin)
+            }
+        } else {
+            for q in 0..(mn - 1) {
+                _emitir(ps, hijo)
+            }
+            let ini = ps.p.op.len()
+            _emitir(ps, hijo)
+            let s = _ins(ps, 5, 0, 0)
+            let fin = ps.p.op.len()
+            if perez {
+                ps.p.ax.set(s, fin)
+                ps.p.ay.set(s, ini)
+            } else {
+                ps.p.ax.set(s, ini)
+                ps.p.ay.set(s, fin)
+            }
+        }
+        return
+    }
+    for q in 0..mn {
+        _emitir(ps, hijo)
+    }
+    let splits: Vec<i32> = vec_new()
+    let salidas: Vec<i32> = vec_new()
+    let vacio_ok = _vacio_posible(ps, hijo) and mx > mn
+    let mut reg = 0
+    if vacio_ok {
+        reg = 2 * (ps.p.ngrupos + 1) + ps.p.nregs
+        ps.p.nregs = ps.p.nregs + 1
+    }
+    for q in 0..(mx - mn) {
+        let s = _ins(ps, 5, 0, 0)
+        splits.push(s)
+        if vacio_ok {
+            _ins(ps, 7, reg, 0)
+        }
+        _emitir(ps, hijo)
+        if vacio_ok {
+            salidas.push(_ins(ps, 11, reg, 0))
+        }
+        if ps.err != "" {
+            return
+        }
+    }
+    let fin = ps.p.op.len()
+    for q in 0..salidas.len() {
+        ps.p.ay.set(salidas.get(q).unwrap_or(0), fin)
+    }
+    for q in 0..splits.len() {
+        let s = splits.get(q).unwrap_or(0)
+        if perez {
+            ps.p.ax.set(s, fin)
+            ps.p.ay.set(s, s + 1)
+        } else {
+            ps.p.ax.set(s, s + 1)
+            ps.p.ay.set(s, fin)
+        }
+    }
+    return
+}
+
+fn _vacio_patron(fuente: str) -> Patron {
+    let nombres: Vec<str> = vec_new()
+    let a: Vec<i32> = vec_new()
+    let b: Vec<i32> = vec_new()
+    let c: Vec<i32> = vec_new()
+    let d: Vec<i32> = vec_new()
+    let e: Vec<i32> = vec_new()
+    let f: Vec<i32> = vec_new()
+    let g: Vec<i32> = vec_new()
+    let h: Vec<i32> = vec_new()
+    let i: Vec<i32> = vec_new()
+    let j: Vec<i32> = vec_new()
+    let k: Vec<i32> = vec_new()
+    let l: Vec<i32> = vec_new()
+    return Patron { fuente: fuente, ngrupos: 0, nregs: 0, nombres: nombres, op: a, ax: b, ay: c, cl_ini: d, cl_fin: e, cl_neg: f, it_tipo: g, it_a: h, it_b: i, tw: j, td: k }
+}
+
+fn _puntos(s: str) -> Vec<i32> {
+    let r: Vec<i32> = vec_new()
+    let n = s.len()
+    for i in 0..n {
+        r.push(ord(s[i]))
+    }
+    return r
+}
+
+fn _nuevo_parser(fuente: str, flags: i32) -> Parser {
+    let k: Vec<i32> = vec_new()
+    let a: Vec<i32> = vec_new()
+    let b: Vec<i32> = vec_new()
+    let c: Vec<i32> = vec_new()
+    let d: Vec<i32> = vec_new()
+    return Parser { c: _puntos(fuente), i: 0, flags: flags, err: "", nk: k, na: a, nb: b, nc: c, nd: d, p: _vacio_patron(fuente), usa_w: false, usa_d: false, ult_as: false, qmin: 0, qmax: 0, et: 0, ea: 0 }
+}
+
+# Compila un patrón. Las banderas son letras sueltas: "i" (ignorar mayúsculas),
+# "m" (^ y $ en cada línea), "s" (el punto también toma \n), en cualquier combinación.
+fn compilar_con(fuente: str, banderas: str) -> Result<Patron> {
+    let mut f = 0
+    for i in 0..banderas.len() {
+        let c = ord(banderas[i])
+        if c == 105 {
+            f = f | 1
+        } else if c == 109 {
+            f = f | 2
+        } else if c == 115 {
+            f = f | 4
+        } else {
+            return Err("patron: bandera desconocida " + banderas[i])
+        }
+    }
+    let ps = _nuevo_parser(fuente, f)
+    let raiz = _alt(ps, 0)
+    if ps.err == "" and _ver(ps) >= 0 {
+        _fallo(ps, "paréntesis ) sin abrir")
+    }
+    if ps.err != "" {
+        return Err(ps.err)
+    }
+    _ins(ps, 7, 0, 0)
+    _emitir(ps, raiz)
+    _ins(ps, 7, 1, 0)
+    _ins(ps, 9, 0, 0)
+    if ps.err != "" {
+        return Err(ps.err)
+    }
+    if ps.usa_w {
+        ps.p.tw = _decodificar(_txt_alnum())
+    }
+    if ps.usa_d {
+        ps.p.td = _decodificar(_txt_decimal())
+    }
+    return Ok(ps.p)
+}
+
+fn compilar(fuente: str) -> Result<Patron> {
+    return compilar_con(fuente, "")
+}
+
+fn num_grupos(p: Patron) -> i32 {
+    return p.ngrupos
+}
+
+fn fuente(p: Patron) -> str {
+    return p.fuente
+}
+
+# Número del grupo con ese nombre, o -1.
+fn indice_grupo(p: Patron, nombre: str) -> i32 {
+    for j in 0..p.nombres.len() {
+        if nombre_grupo(p, j + 1) == nombre {
+            return j + 1
+        }
+    }
+    return -1
+}
+
+fn nombre_grupo(p: Patron, k: i32) -> str {
+    match p.nombres.get(k - 1) {
+        Some(x) => {
+            return x + ""
+        }
+        None => {
+            return ""
+        }
+    }
+    return ""
+}
+
+# ---------------------------------------------------------------------------
+# La máquina de hilos
+# ---------------------------------------------------------------------------
+
+struct Maq {
+    pcs0: Vec<i32>
+    pcs1: Vec<i32>
+    caps0: Vec<i32>
+    caps1: Vec<i32>
+    cnt: Vec<i32>
+    marca: Vec<i32>
+    tmp: Vec<i32>
+    mejor: Vec<i32>
+    gen: i32
+    cabeza: Vec<i32>
+    nmask: Vec<i32>
+    nsig: Vec<i32>
+    nn: i32
+}
+
+fn _relleno(n: i32, v: i32) -> Vec<i32> {
+    let r: Vec<i32> = vec_new()
+    for i in 0..n {
+        r.push(v)
+    }
+    return r
+}
+
+fn _texto(s: str) -> Texto {
+    return Texto { c: _puntos(s), s: s }
+}
+
+fn _item_ok(p: Patron, tipo: i32, a: i32, b: i32, c: i32) -> bool {
+    if tipo == 0 {
+        return c >= a and c <= b
+    }
+    if tipo == 1 {
+        return _es_dig(p, c)
+    }
+    if tipo == 2 {
+        return not _es_dig(p, c)
+    }
+    if tipo == 3 {
+        return _es_w(p, c)
+    }
+    if tipo == 4 {
+        return not _es_w(p, c)
+    }
+    if tipo == 5 {
+        return _es_esp(c)
+    }
+    return not _es_esp(c)
+}
+
+fn _clase_ok(p: Patron, idx: i32, c: i32, ignora: bool) -> bool {
+    let ini = p.cl_ini.get(idx).unwrap_or(0)
+    let fin = p.cl_fin.get(idx).unwrap_or(0)
+    let neg = p.cl_neg.get(idx).unwrap_or(0) != 0
+    let c2 = if ignora { _baja(c) } else { c }
+    let c3 = if ignora { _sube(c) } else { c }
+    let mut hit = false
+    let mut k = ini
+    while k < fin and not hit {
+        let t = p.it_tipo.get(k).unwrap_or(0)
+        let a = p.it_a.get(k).unwrap_or(0)
+        let b = p.it_b.get(k).unwrap_or(0)
+        if _item_ok(p, t, a, b, c) {
+            hit = true
+        } else if ignora and (_item_ok(p, t, a, b, c2) or _item_ok(p, t, a, b, c3)) {
+            hit = true
+        }
+        k = k + 1
+    }
+    return hit != neg
+}
+
+fn _es_w_en(p: Patron, t: Texto, i: i32) -> bool {
+    if i < 0 or i >= t.c.len() {
+        return false
+    }
+    return _es_w(p, t.c.get(i).unwrap_or(0))
+}
+
+fn _aserto(p: Patron, t: Texto, tipo: i32, pos: i32) -> bool {
+    let n = t.c.len()
+    if tipo == 1 or tipo == 5 {
+        return pos == 0
+    }
+    if tipo == 2 {
+        return pos == 0 or t.c.get(pos - 1).unwrap_or(0) == 10
+    }
+    if tipo == 3 {
+        return pos == n or (pos == n - 1 and t.c.get(pos).unwrap_or(0) == 10)
+    }
+    if tipo == 4 {
+        return pos == n or t.c.get(pos).unwrap_or(0) == 10
+    }
+    if tipo == 6 {
+        return pos == n
+    }
+    let borde = _es_w_en(p, t, pos - 1) != _es_w_en(p, t, pos)
+    if tipo == 7 {
+        return borde
+    }
+    return not borde
+}
+
+# Con bucles que pueden ser vacíos, un mismo pc se puede volver a visitar en la misma
+# posición si es otra vuelta (el estado es el pc y qué registros valen la posición actual).
+fn _primera_vez(p: Patron, m: Maq, pc: i32, pos: i32) -> bool {
+    let base = 2 * (p.ngrupos + 1)
+    let mut mask = 0
+    for k in 0..p.nregs {
+        if k < 30 and m.tmp.get(base + k).unwrap_or(-1) == pos {
+            mask = mask | (1 << k)
+        }
+    }
+    if m.marca.get(pc).unwrap_or(0) != m.gen {
+        m.marca.set(pc, m.gen)
+        m.cabeza.set(pc, -1)
+    }
+    let mut q = m.cabeza.get(pc).unwrap_or(-1)
+    while q >= 0 {
+        if m.nmask.get(q).unwrap_or(-1) == mask {
+            return false
+        }
+        q = m.nsig.get(q).unwrap_or(-1)
+    }
+    let idx = m.nn
+    if idx < m.nmask.len() {
+        m.nmask.set(idx, mask)
+        m.nsig.set(idx, m.cabeza.get(pc).unwrap_or(-1))
+    } else {
+        m.nmask.push(mask)
+        m.nsig.push(m.cabeza.get(pc).unwrap_or(-1))
+    }
+    m.nn = idx + 1
+    m.cabeza.set(pc, idx)
+    return true
+}
+
+fn _agregar(p: Patron, t: Texto, m: Maq, banco: i32, pc: i32, pos: i32) {
+    let op = p.op.get(pc).unwrap_or(9)
+    if op == 11 {
+        # fin de una vuelta de un {n,m} que puede ser vacío: si no avanzó, se corta
+        if m.tmp.get(p.ax.get(pc).unwrap_or(0)).unwrap_or(-1) == pos {
+            _agregar(p, t, m, banco, p.ay.get(pc).unwrap_or(0), pos)
+        } else {
+            _agregar(p, t, m, banco, pc + 1, pos)
+        }
+        return
+    }
+    if op == 10 {
+        # fin de una vuelta de un bucle que puede ser vacío: si no avanzó, se sale
+        if m.tmp.get(p.ax.get(pc).unwrap_or(0)).unwrap_or(-1) == pos {
+            _agregar(p, t, m, banco, pc + 1, pos)
+        } else {
+            _agregar(p, t, m, banco, p.ay.get(pc).unwrap_or(0), pos)
+        }
+        return
+    }
+    if p.nregs == 0 {
+        if m.marca.get(pc).unwrap_or(0) == m.gen {
+            return
+        }
+        m.marca.set(pc, m.gen)
+    } else if not _primera_vez(p, m, pc, pos) {
+        return
+    }
+    if op == 6 {
+        _agregar(p, t, m, banco, p.ax.get(pc).unwrap_or(0), pos)
+        return
+    }
+    if op == 5 {
+        _agregar(p, t, m, banco, p.ax.get(pc).unwrap_or(0), pos)
+        _agregar(p, t, m, banco, p.ay.get(pc).unwrap_or(0), pos)
+        return
+    }
+    if op == 7 {
+        let s = p.ax.get(pc).unwrap_or(0)
+        let viejo = m.tmp.get(s).unwrap_or(-1)
+        m.tmp.set(s, pos)
+        _agregar(p, t, m, banco, pc + 1, pos)
+        m.tmp.set(s, viejo)
+        return
+    }
+    if op == 8 {
+        if _aserto(p, t, p.ax.get(pc).unwrap_or(0), pos) {
+            _agregar(p, t, m, banco, pc + 1, pos)
+        }
+        return
+    }
+    let nc = 2 * (p.ngrupos + 1) + p.nregs
+    let k = m.cnt.get(banco).unwrap_or(0)
+    _guardar(m, banco, k, pc, nc)
+    m.cnt.set(banco, k + 1)
+}
+
+# Guarda un hilo (su pc y sus capturas) en la lista del banco; las listas crecen si hace falta
+# (con bucles que pueden ser vacíos puede haber más de un hilo por pc).
+fn _guardar(m: Maq, banco: i32, k: i32, pc: i32, nc: i32) {
+    if banco == 0 {
+        if k < m.pcs0.len() {
+            m.pcs0.set(k, pc)
+        } else {
+            m.pcs0.push(pc)
+        }
+        for j in 0..nc {
+            let v = m.tmp.get(j).unwrap_or(-1)
+            let i = k * nc + j
+            if i < m.caps0.len() {
+                m.caps0.set(i, v)
+            } else {
+                m.caps0.push(v)
+            }
+        }
+    } else {
+        if k < m.pcs1.len() {
+            m.pcs1.set(k, pc)
+        } else {
+            m.pcs1.push(pc)
+        }
+        for j in 0..nc {
+            let v = m.tmp.get(j).unwrap_or(-1)
+            let i = k * nc + j
+            if i < m.caps1.len() {
+                m.caps1.set(i, v)
+            } else {
+                m.caps1.push(v)
+            }
+        }
+    }
+}
+
+fn _pc_de(m: Maq, banco: i32, k: i32) -> i32 {
+    if banco == 0 {
+        return m.pcs0.get(k).unwrap_or(0)
+    }
+    return m.pcs1.get(k).unwrap_or(0)
+}
+
+fn _cap_de(m: Maq, banco: i32, i: i32) -> i32 {
+    if banco == 0 {
+        return m.caps0.get(i).unwrap_or(-1)
+    }
+    return m.caps1.get(i).unwrap_or(-1)
+}
+
+# Busca un calce a partir de `desde`. ancla: solo con inicio en `desde` (match);
+# completo: tiene que llegar hasta el final (fullmatch); avanzar: no vale un calce vacío
+# en `desde` (para seguir después de uno vacío). Devuelve las posiciones o un Vec vacío.
+fn _correr(p: Patron, t: Texto, desde0: i32, ancla: bool, completo: bool, avanzar: bool) -> Vec<i32> {
+    let n = t.c.len()
+    let np = p.op.len()
+    let nc = 2 * (p.ngrupos + 1) + p.nregs
+    let nr = 2 * (p.ngrupos + 1)
+    let desde = if desde0 < 0 { 0 } else if desde0 > n { n } else { desde0 }
+    let m = Maq { pcs0: _relleno(np, 0), pcs1: _relleno(np, 0), caps0: _relleno(np * nc, -1), caps1: _relleno(np * nc, -1), cnt: _relleno(2, 0), marca: _relleno(np, 0), tmp: _relleno(nc, -1), mejor: _relleno(nc, -1), gen: 1, cabeza: _relleno(np, -1), nmask: _relleno(1, 0), nsig: _relleno(1, 0), nn: 0 }
+    let mut hay = false
+    let mut banco = 0
+    let mut pos = desde
+    _agregar(p, t, m, 0, 0, pos)
+    while pos <= n {
+        let nb = 1 - banco
+        m.cnt.set(nb, 0)
+        m.gen = m.gen + 1
+        m.nn = 0
+        let cnt = m.cnt.get(banco).unwrap_or(0)
+        let mut k = 0
+        while k < cnt {
+            let fila = k
+            let pc = _pc_de(m, banco, k)
+            let op = p.op.get(pc).unwrap_or(9)
+            if op == 9 {
+                let ini = _cap_de(m, banco, fila * nc)
+                let rechazo = (completo and pos != n) or (avanzar and ini == desde and pos == desde)
+                if not rechazo {
+                    for j in 0..nc {
+                        m.mejor.set(j, _cap_de(m, banco, fila * nc + j))
+                    }
+                    hay = true
+                    break
+                }
+            } else if pos < n {
+                let c = t.c.get(pos).unwrap_or(0)
+                let a = p.ax.get(pc).unwrap_or(0)
+                let ok = if op == 0 {
+                    c == a
+                } else if op == 1 {
+                    _baja(c) == a
+                } else if op == 2 {
+                    c != 10
+                } else if op == 3 {
+                    true
+                } else {
+                    _clase_ok(p, a, c, p.ay.get(pc).unwrap_or(0) != 0)
+                }
+                if ok {
+                    for j in 0..nc {
+                        m.tmp.set(j, _cap_de(m, banco, fila * nc + j))
+                    }
+                    _agregar(p, t, m, nb, pc + 1, pos + 1)
+                }
+            }
+            k = k + 1
+        }
+        if pos == n {
+            break
+        }
+        banco = nb
+        pos = pos + 1
+        if (not hay) and (not ancla) {
+            for j in 0..nc {
+                m.tmp.set(j, -1)
+            }
+            _agregar(p, t, m, banco, 0, pos)
+        }
+        if m.cnt.get(banco).unwrap_or(0) == 0 and (hay or ancla) {
+            break
+        }
+    }
+    let r: Vec<i32> = vec_new()
+    if hay {
+        for j in 0..nr {
+            r.push(m.mejor.get(j).unwrap_or(-1))
+        }
+    }
+    return r
+}
+
+# ---------------------------------------------------------------------------
+# Resultados
+# ---------------------------------------------------------------------------
+
+fn _coincidencia(t: Texto, r: Vec<i32>) -> Coincidencia {
+    return Coincidencia { ok: r.len() > 0, pos: r, s: t.s }
+}
+
+fn hay(m: Coincidencia) -> bool {
+    return m.ok
+}
+
+fn inicio(m: Coincidencia) -> i32 {
+    return m.pos.get(0).unwrap_or(-1)
+}
+
+fn fin(m: Coincidencia) -> i32 {
+    return m.pos.get(1).unwrap_or(-1)
+}
+
+fn inicio_grupo(m: Coincidencia, k: i32) -> i32 {
+    return m.pos.get(2 * k).unwrap_or(-1)
+}
+
+fn fin_grupo(m: Coincidencia, k: i32) -> i32 {
+    return m.pos.get(2 * k + 1).unwrap_or(-1)
+}
+
+fn hay_grupo(m: Coincidencia, k: i32) -> bool {
+    return m.ok and inicio_grupo(m, k) >= 0
+}
+
+# El texto del grupo k (0 = todo lo que calzó). "" si no calzó o el grupo no participó.
+fn grupo(m: Coincidencia, k: i32) -> str {
+    if not hay_grupo(m, k) {
+        return ""
+    }
+    return texto.subtexto(m.s, inicio_grupo(m, k), fin_grupo(m, k))
+}
+
+# El grupo por su nombre ((?P<nombre>...)); "" si no existe ese nombre.
+fn grupo_nombre(p: Patron, m: Coincidencia, nombre: str) -> str {
+    let k = indice_grupo(p, nombre)
+    if k < 0 {
+        return ""
+    }
+    return grupo(m, k)
+}
+
+fn texto_de(m: Coincidencia) -> str {
+    return grupo(m, 0)
+}
+
+fn _sub(t: Texto, a: i32, b: i32) -> str {
+    if b <= a {
+        return ""
+    }
+    let v: Vec<str> = vec_new()
+    for i in a..b {
+        v.push(chr(t.c.get(i).unwrap_or(32)))
+    }
+    return texto.unir(v, "")
+}
+
+# ---------------------------------------------------------------------------
+# Búsquedas
+# ---------------------------------------------------------------------------
+
+# re.search: el primer calce en cualquier parte.
+fn buscar(p: Patron, s: str) -> Coincidencia {
+    let t = _texto(s)
+    return _coincidencia(t, _correr(p, t, 0, false, false, false))
+}
+
+# re.search(s, desde): empieza a mirar en el carácter `desde` (^ sigue siendo el principio real).
+fn buscar_desde(p: Patron, s: str, desde: i32) -> Coincidencia {
+    let t = _texto(s)
+    return _coincidencia(t, _correr(p, t, desde, false, false, false))
+}
+
+# re.match: tiene que calzar desde el primer carácter.
+fn al_inicio(p: Patron, s: str) -> Coincidencia {
+    let t = _texto(s)
+    return _coincidencia(t, _correr(p, t, 0, true, false, false))
+}
+
+# re.fullmatch: tiene que calzar todo el texto.
+fn completo(p: Patron, s: str) -> Coincidencia {
+    let t = _texto(s)
+    return _coincidencia(t, _correr(p, t, 0, true, true, false))
+}
+
+fn coincide(p: Patron, s: str) -> bool {
+    return hay(buscar(p, s))
+}
+
+# Todos los calces, de izquierda a derecha y sin solaparse (re.finditer), en un solo Vec
+# plano: `nc` números por calce. Un calce vacío pegado a uno anterior cuenta, como en
+# Python 3.7 o más nuevo. maximo < 0 = sin tope.
+struct Calces {
+    v: Vec<i32>
+    n: i32
+    nc: i32
+}
+
+fn _todos(p: Patron, t: Texto, maximo: i32) -> Calces {
+    let nc = 2 * (p.ngrupos + 1)
+    let plano: Vec<i32> = vec_new()
+    let mut cuenta = 0
+    let n = t.c.len()
+    let mut pos = 0
+    let mut avanzar = false
+    while pos <= n {
+        if maximo >= 0 and cuenta >= maximo {
+            break
+        }
+        let r = _correr(p, t, pos, false, false, avanzar)
+        if r.len() == 0 {
+            break
+        }
+        let s0 = r.get(0).unwrap_or(0)
+        let e0 = r.get(1).unwrap_or(0)
+        for j in 0..nc {
+            plano.push(r.get(j).unwrap_or(-1))
+        }
+        cuenta = cuenta + 1
+        pos = e0
+        avanzar = e0 == s0
+    }
+    return Calces { v: plano, n: cuenta, nc: nc }
+}
+
+fn _fila(c: Calces, i: i32) -> Vec<i32> {
+    let r: Vec<i32> = vec_new()
+    for j in 0..c.nc {
+        r.push(c.v.get(i * c.nc + j).unwrap_or(-1))
+    }
+    return r
+}
+
+# Todos los calces como Coincidencia (re.finditer).
+fn todas(p: Patron, s: str) -> Vec<Coincidencia> {
+    let t = _texto(s)
+    let rs = _todos(p, t, -1)
+    let out: Vec<Coincidencia> = vec_new()
+    for i in 0..rs.n {
+        out.push(Coincidencia { ok: true, pos: _fila(rs, i), s: s })
+    }
+    return out
+}
+
+# Los textos de todos los calces (grupo 0 de cada uno).
+fn encontrar(p: Patron, s: str) -> Vec<str> {
+    let t = _texto(s)
+    let rs = _todos(p, t, -1)
+    let out: Vec<str> = vec_new()
+    for i in 0..rs.n {
+        let r: Vec<i32> = _fila(rs, i)
+        out.push(_sub(t, r.get(0).unwrap_or(0), r.get(1).unwrap_or(0)))
+    }
+    return out
+}
+
+fn contar(p: Patron, s: str) -> i32 {
+    let t = _texto(s)
+    return _todos(p, t, -1).n
+}
+
+# ---------------------------------------------------------------------------
+# Reemplazar y dividir
+# ---------------------------------------------------------------------------
+
+# Una plantilla ya leída: trozos de texto y referencias a grupos, alternados.
+struct Plantilla {
+    lit: Vec<str>
+    grp: Vec<i32>
+}
+
+fn _plantilla(p: Patron, tpl: str) -> Result<Plantilla> {
+    let c = _puntos(tpl)
+    let n = c.len()
+    let lit: Vec<str> = vec_new()
+    let grp: Vec<i32> = vec_new()
+    let mut cur = ""
+    let mut i = 0
+    while i < n {
+        let ch = c.get(i).unwrap_or(0)
+        if ch != 92 {
+            cur = cur + chr(ch)
+            i = i + 1
+        } else {
+            i = i + 1
+            if i >= n {
+                return Err("patron: barra al final de la plantilla")
+            }
+            let d = c.get(i).unwrap_or(0)
+            i = i + 1
+            if d == 103 {
+                if c.get(i).unwrap_or(0) != 60 {
+                    return Err("patron: falta < después de \\g")
+                }
+                i = i + 1
+                let mut nombre = ""
+                while i < n and c.get(i).unwrap_or(0) != 62 {
+                    nombre = nombre + chr(c.get(i).unwrap_or(0))
+                    i = i + 1
+                }
+                if i >= n {
+                    return Err("patron: falta el > de \\g<")
+                }
+                i = i + 1
+                if nombre.len() == 0 {
+                    return Err("patron: falta el nombre del grupo en \\g<>")
+                }
+                let primero = ord(nombre[0])
+                let mut k = -1
+                if primero >= 48 and primero <= 57 {
+                    let mut v = 0
+                    for q in 0..nombre.len() {
+                        let dq = ord(nombre[q])
+                        if dq < 48 or dq > 57 or v > 100000 {
+                            return Err("patron: número de grupo inválido en \\g<" + nombre + ">")
+                        }
+                        v = v * 10 + (dq - 48)
+                    }
+                    k = v
+                } else {
+                    k = indice_grupo(p, nombre)
+                    if k < 0 {
+                        return Err("patron: no existe el grupo " + nombre)
+                    }
+                }
+                if k > p.ngrupos {
+                    return Err("patron: referencia a un grupo que no existe: " + a_texto(k))
+                }
+                lit.push(cur)
+                grp.push(k)
+                cur = ""
+            } else if d == 48 {
+                let mut v = 0
+                let mut q = 0
+                while q < 2 and c.get(i).unwrap_or(0) >= 48 and c.get(i).unwrap_or(0) <= 55 {
+                    v = v * 8 + (c.get(i).unwrap_or(0) - 48)
+                    i = i + 1
+                    q = q + 1
+                }
+                if v & 255 == 0 {
+                    return Err("patron: un texto de SCAR no puede tener el carácter nulo (\\0)")
+                }
+                cur = cur + chr(v & 255)
+            } else if d >= 49 and d <= 57 {
+                let mut k = d - 48
+                let mut octal = false
+                let e = c.get(i).unwrap_or(0)
+                if e >= 48 and e <= 57 {
+                    let e2 = c.get(i + 1).unwrap_or(0)
+                    if d <= 55 and e <= 55 and e2 >= 48 and e2 <= 55 {
+                        let v = (d - 48) * 64 + (e - 48) * 8 + (e2 - 48)
+                        if v > 255 {
+                            return Err("patron: escape octal fuera de rango")
+                        }
+                        if v == 0 {
+                            return Err("patron: un texto de SCAR no puede tener el carácter nulo")
+                        }
+                        cur = cur + chr(v)
+                        i = i + 2
+                        octal = true
+                    } else {
+                        k = k * 10 + (e - 48)
+                        i = i + 1
+                    }
+                }
+                if not octal {
+                    if k > p.ngrupos {
+                        return Err("patron: referencia a un grupo que no existe: " + a_texto(k))
+                    }
+                    lit.push(cur)
+                    grp.push(k)
+                    cur = ""
+                }
+            } else if d == 97 {
+                cur = cur + chr(7)
+            } else if d == 98 {
+                cur = cur + chr(8)
+            } else if d == 102 {
+                cur = cur + chr(12)
+            } else if d == 110 {
+                cur = cur + chr(10)
+            } else if d == 114 {
+                cur = cur + chr(13)
+            } else if d == 116 {
+                cur = cur + chr(9)
+            } else if d == 118 {
+                cur = cur + chr(11)
+            } else if d == 92 {
+                cur = cur + "\\"
+            } else if _es_letra_ascii(d) {
+                return Err("patron: escape inválido en la plantilla: \\" + chr(d))
+            } else {
+                cur = cur + "\\" + chr(d)
+            }
+        }
+    }
+    lit.push(cur)
+    grp.push(-1)
+    return Ok(Plantilla { lit: lit, grp: grp })
+}
+
+fn _lit_en(tp: Plantilla, i: i32) -> str {
+    match tp.lit.get(i) {
+        Some(x) => {
+            return x + ""
+        }
+        None => {
+            return ""
+        }
+    }
+    return ""
+}
+
+fn _expandir(tp: Plantilla, t: Texto, r: Vec<i32>) -> str {
+    let v: Vec<str> = vec_new()
+    for i in 0..tp.lit.len() {
+        v.push(_lit_en(tp, i))
+        let k = tp.grp.get(i).unwrap_or(-1)
+        if k >= 0 {
+            let a = r.get(2 * k).unwrap_or(-1)
+            let b = r.get(2 * k + 1).unwrap_or(-1)
+            if a >= 0 {
+                v.push(_sub(t, a, b))
+            }
+        }
+    }
+    return texto.unir(v, "")
+}
+
+fn _reemplazar(p: Patron, s: str, tp: Plantilla, maximo: i32) -> str {
+    let t = _texto(s)
+    let rs = _todos(p, t, maximo)
+    let v: Vec<str> = vec_new()
+    let mut ultimo = 0
+    for i in 0..rs.n {
+        let r: Vec<i32> = _fila(rs, i)
+        let a = r.get(0).unwrap_or(0)
+        let b = r.get(1).unwrap_or(0)
+        v.push(_sub(t, ultimo, a))
+        v.push(_expandir(tp, t, r))
+        ultimo = b
+    }
+    v.push(_sub(t, ultimo, t.c.len()))
+    return texto.unir(v, "")
+}
+
+# re.sub con una plantilla: \1, \g<1>, \g<nombre>, \0 (octal), \n \t etc. Un grupo que no
+# participó se reemplaza por "". maximo < 0 = todos (en re.sub, count=0).
+fn reemplazar_n(p: Patron, s: str, plantilla: str, maximo: i32) -> Result<str> {
+    match _plantilla(p, plantilla) {
+        Ok(tp) => {
+            return Ok(_reemplazar(p, s, tp, maximo))
+        }
+        Err(e) => {
+            return Err(e)
+        }
+    }
+    return Err("patron: error")
+}
+
+fn reemplazar(p: Patron, s: str, plantilla: str) -> Result<str> {
+    return reemplazar_n(p, s, plantilla, -1)
+}
+
+# Reemplaza por un texto tal cual, sin interpretar barras. maximo < 0 = todos.
+fn reemplazar_texto_n(p: Patron, s: str, nuevo: str, maximo: i32) -> str {
+    let lit: Vec<str> = vec_new()
+    let grp: Vec<i32> = vec_new()
+    lit.push(nuevo)
+    grp.push(-1)
+    return _reemplazar(p, s, Plantilla { lit: lit, grp: grp }, maximo)
+}
+
+fn reemplazar_texto(p: Patron, s: str, nuevo: str) -> str {
+    return reemplazar_texto_n(p, s, nuevo, -1)
+}
+
+# re.split: el texto cortado en los calces; los grupos que capturan van en medio (un grupo
+# que no participó da ""). maximo < 0 = sin tope de cortes.
+fn dividir_n(p: Patron, s: str, maximo: i32) -> Vec<str> {
+    let t = _texto(s)
+    let rs = _todos(p, t, maximo)
+    let out: Vec<str> = vec_new()
+    let mut ultimo = 0
+    for i in 0..rs.n {
+        let r: Vec<i32> = _fila(rs, i)
+        let a = r.get(0).unwrap_or(0)
+        let b = r.get(1).unwrap_or(0)
+        out.push(_sub(t, ultimo, a))
+        for k in 1..(p.ngrupos + 1) {
+            let ga = r.get(2 * k).unwrap_or(-1)
+            let gb = r.get(2 * k + 1).unwrap_or(-1)
+            if ga >= 0 {
+                out.push(_sub(t, ga, gb))
+            } else {
+                out.push("")
+            }
+        }
+        ultimo = b
+    }
+    out.push(_sub(t, ultimo, t.c.len()))
+    return out
+}
+
+fn dividir(p: Patron, s: str) -> Vec<str> {
+    return dividir_n(p, s, -1)
+}
+
+# re.escape: pone una barra delante de lo que en un patrón tiene significado.
+fn escapar(s: str) -> str {
+    let especiales = "()[]{}?*+-|^$\\.&~# \t\n\r" + chr(11) + chr(12)
+    let v: Vec<str> = vec_new()
+    for i in 0..s.len() {
+        let ch = s[i]
+        if texto.contiene(especiales, ch) {
+            v.push("\\")
+        }
+        v.push(ch)
+    }
+    return texto.unir(v, "")
+}
+
+# El programa compilado, una instrucción por línea (para depurar un patrón).
+fn desensamblar(p: Patron) -> str {
+    let v: Vec<str> = vec_new()
+    for i in 0..p.op.len() {
+        v.push(a_texto(i) + ": " + a_texto(p.op.get(i).unwrap_or(-1)) + " " + a_texto(p.ax.get(i).unwrap_or(0)) + " " + a_texto(p.ay.get(i).unwrap_or(0)))
+    }
+    return texto.unir(v, "\n")
+}

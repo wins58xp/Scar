@@ -1,0 +1,20 @@
+    TaskContext __scar_root = { .name = "@@NOMBRE@@" };
+    atomic_init(&__scar_root.cancelled, 0);
+    atomic_init(&__scar_root.panicked, 0);
+    atomic_init(&__scar_root.joined, 0);
+    atomic_init(&__scar_root.completed, 0);
+    __scar_root.parent = NULL;
+    __scar_root.children = NULL;
+    __scar_root.n_children = 0;
+    __scar_root.cap_children = 0;
+    pthread_mutex_init(&__scar_root.children_mu, NULL);
+    pthread_mutex_init(&__scar_root.wait_lock, NULL);
+    __scar_root.wait_mu = NULL;
+    __scar_root.wait_cond = NULL;
+    pthread_mutex_init(&__scar_root.done_mu, NULL);
+    scar_cond_init_mono(&__scar_root.done_cond);
+    pthread_mutex_init(&__scar_root.sleep_mu, NULL);
+    scar_cond_init_mono(&__scar_root.sleep_cond);
+    scar_arena_init(&__scar_root.arena);
+    __scar_ctx = &__scar_root;
+

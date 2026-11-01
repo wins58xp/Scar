@@ -1,0 +1,183 @@
+# lib/senal contra numpy.fft y scipy.signal: lo corre pruebas/test_senal_python.py.
+# Lee "casos.json" (en la carpeta donde corre) con las listas "fft", "conv",
+# "ventanas", "fir", "butter", "espectro", "remuestreo" y "poly", y escribe cada
+# resultado en una línea "ETIQUETA k valores..." con los f64 en su forma más corta
+# que vuelve idéntica (como repr de Python).
+
+use "json"
+use "texto"
+use "estadistica"
+use "senal"
+
+fn num(d: json.Doc, ruta: str) -> f64 {
+    match texto.a_f64(json.texto(d, ruta)) {
+        Ok(x) => {
+            return x
+        }
+        Err(e) => {
+            return 0.0 / 0.0
+        }
+    }
+    return 0.0
+}
+
+fn entero_en(d: json.Doc, ruta: str) -> i32 {
+    return to_i32(num(d, ruta))
+}
+
+fn vector(d: json.Doc, ruta: str) -> estadistica.Serie {
+    let s = estadistica.nueva()
+    for i in 0..json.largo(d, ruta) {
+        estadistica.agregar(s, num(d, ruta + "." + a_texto(i)))
+    }
+    return s
+}
+
+fn linea(etiqueta: str, k: i32, s: estadistica.Serie) {
+    let mut t = etiqueta + " " + a_texto(k)
+    for i in 0..estadistica.cantidad(s) {
+        t = t + " " + a_texto(estadistica.dato(s, i))
+    }
+    print(t)
+}
+
+fn lineaf(etiqueta: str, k: i32, x: f64) {
+    print(etiqueta + " " + a_texto(k) + " " + a_texto(x))
+}
+
+fn parte(c: senal.Complejos, imag: bool) -> estadistica.Serie {
+    let s = estadistica.nueva()
+    for i in 0..senal.largo_c(c) {
+        if imag {
+            estadistica.agregar(s, senal.parte_imag(c, i))
+        } else {
+            estadistica.agregar(s, senal.parte_real(c, i))
+        }
+    }
+    return s
+}
+
+fn caso_fft(d: json.Doc, k: i32) {
+    let x = vector(d, "fft." + a_texto(k) + ".x")
+    let c = senal.fft(x)
+    linea("FFTRE", k, parte(c, false))
+    linea("FFTIM", k, parte(c, true))
+    let r = senal.rfft(x)
+    linea("RFFTRE", k, parte(r, false))
+    linea("RFFTIM", k, parte(r, true))
+    linea("IFFT", k, parte(senal.ifft(c), false))
+    linea("IRFFT", k, senal.irfft(r, estadistica.cantidad(x)))
+    linea("MAG", k, senal.magnitud(c))
+    linea("FASE", k, senal.fase(c))
+    linea("FREQ", k, senal.frecuencias(estadistica.cantidad(x), 0.25))
+    linea("FREQR", k, senal.frecuencias_r(estadistica.cantidad(x), 0.25))
+}
+
+fn caso_conv(d: json.Doc, k: i32) {
+    let a = vector(d, "conv." + a_texto(k) + ".a")
+    let b = vector(d, "conv." + a_texto(k) + ".b")
+    linea("CONV", k, senal.convolucion(a, b))
+    linea("CONVFFT", k, senal.convolucion_fft(a, b))
+    linea("CORR", k, senal.correlacion_cruzada(a, b))
+}
+
+fn caso_ventana(d: json.Doc, k: i32) {
+    let r = "ventanas." + a_texto(k)
+    let nombre = json.texto(d, r + ".nombre")
+    let n = entero_en(d, r + ".n")
+    let sim = json.texto(d, r + ".sim") == "true"
+    linea("WIN", k, senal.ventana(nombre, n, sim))
+    linea("KAISER", k, senal.ventana_kaiser(n, num(d, r + ".beta"), sim))
+}
+
+fn caso_fir(d: json.Doc, k: i32) {
+    let r = "fir." + a_texto(k)
+    let tipo = json.texto(d, r + ".tipo")
+    let n = entero_en(d, r + ".numtaps")
+    let fs = num(d, r + ".fs")
+    let c = vector(d, r + ".cortes")
+    let mut h = estadistica.nueva()
+    if tipo == "pasabajo" {
+        h = senal.fir_pasabajo(n, estadistica.dato(c, 0), fs)
+    }
+    if tipo == "pasaalto" {
+        h = senal.fir_pasaalto(n, estadistica.dato(c, 0), fs)
+    }
+    if tipo == "pasabanda" {
+        h = senal.fir_pasabanda(n, estadistica.dato(c, 0), estadistica.dato(c, 1), fs)
+    }
+    if tipo == "rechazabanda" {
+        h = senal.fir_rechazabanda(n, estadistica.dato(c, 0), estadistica.dato(c, 1), fs)
+    }
+    linea("FIR", k, h)
+}
+
+fn caso_butter(d: json.Doc, k: i32) {
+    let r = "butter." + a_texto(k)
+    let tipo = json.texto(d, r + ".tipo")
+    let fs = num(d, r + ".fs")
+    let f = senal.butter(entero_en(d, r + ".orden"), vector(d, r + ".cortes"), tipo, fs)
+    linea("B", k, f.b)
+    linea("A", k, f.a)
+    let x = vector(d, r + ".x")
+    linea("LFILTER", k, senal.aplicar(f, x))
+    linea("ZI", k, senal.estado_inicial(f))
+    linea("FILTFILT", k, senal.filtfilt(f, x))
+    let hz = vector(d, r + ".hz")
+    let g = estadistica.nueva()
+    for i in 0..estadistica.cantidad(hz) {
+        estadistica.agregar(g, senal.ganancia(f, estadistica.dato(hz, i), fs))
+    }
+    linea("GAIN", k, g)
+}
+
+fn caso_espectro(d: json.Doc, k: i32) {
+    let r = "espectro." + a_texto(k)
+    let e = senal.periodograma(vector(d, r + ".x"), num(d, r + ".fs"), json.texto(d, r + ".ventana"))
+    linea("PERF", k, e.f)
+    linea("PERP", k, e.p)
+}
+
+fn caso_remuestreo(d: json.Doc, k: i32) {
+    let r = "remuestreo." + a_texto(k)
+    linea("RES", k, senal.remuestrear(vector(d, r + ".x"), entero_en(d, r + ".num")))
+}
+
+fn caso_poly(d: json.Doc, k: i32) {
+    let r = "poly." + a_texto(k)
+    linea("POLY", k, senal.remuestrear_poly(vector(d, r + ".x"), entero_en(d, r + ".up"), entero_en(d, r + ".down")))
+}
+
+fn main() {
+    match json.leer_archivo("casos.json") {
+        Err(e) => {
+            print("ERROR no se pudo leer casos.json")
+        }
+        Ok(d) => {
+            for k in 0..json.largo(d, "fft") {
+                caso_fft(d, k)
+            }
+            for k in 0..json.largo(d, "conv") {
+                caso_conv(d, k)
+            }
+            for k in 0..json.largo(d, "ventanas") {
+                caso_ventana(d, k)
+            }
+            for k in 0..json.largo(d, "fir") {
+                caso_fir(d, k)
+            }
+            for k in 0..json.largo(d, "butter") {
+                caso_butter(d, k)
+            }
+            for k in 0..json.largo(d, "espectro") {
+                caso_espectro(d, k)
+            }
+            for k in 0..json.largo(d, "remuestreo") {
+                caso_remuestreo(d, k)
+            }
+            for k in 0..json.largo(d, "poly") {
+                caso_poly(d, k)
+            }
+        }
+    }
+}

@@ -1,0 +1,54 @@
+# Las funciones puras de lib/tablero, contra Python: lo corre pruebas/test_tablero_python.py.
+# Lee "casos.json" (en la carpeta donde corre) y escribe "ETIQUETA k valor" por caso.
+
+use "json"
+use "gui"
+use "tablero"
+
+fn sal(e: str, k: i32, v: str) {
+    print(e + " " + a_texto(k) + " " + v)
+}
+
+fn correr() -> Result<i32> {
+    let d = json.leer_archivo("casos.json")?
+    for k in 0..json.largo(d, "fr") {
+        let r = "fr." + a_texto(k)
+        sal("FR", k, a_texto(tablero.fraccion(json.numero(d, r + ".0"), json.numero(d, r + ".1"), json.numero(d, r + ".2"))))
+    }
+    for k in 0..json.largo(d, "es") {
+        let r = "es." + a_texto(k)
+        sal("ES", k, a_texto(tablero.estado(json.numero(d, r + ".0"), json.numero(d, r + ".1"), json.numero(d, r + ".2"))))
+    }
+    for k in 0..json.largo(d, "co") {
+        sal("CO", k, tablero.compacto(json.numero(d, "co." + a_texto(k))))
+    }
+    for k in 0..json.largo(d, "ar") {
+        let r = "ar." + a_texto(k)
+        let cx = to_i32(json.entero(d, r + ".0"))
+        let ra = json.numero(d, r + ".1")
+        let f = json.numero(d, r + ".2")
+        sal("AR", k, a_texto(tablero.arco_x(cx, ra, f)) + " " + a_texto(tablero.arco_y(cx, ra, f)))
+    }
+    for k in 0..json.largo(d, "mz") {
+        let r = "mz." + a_texto(k)
+        sal("MZ", k, a_texto(tablero.mezclar(to_i32(json.entero(d, r + ".0")), to_i32(json.entero(d, r + ".1")), to_i32(json.entero(d, r + ".2")))))
+    }
+    for k in 0..json.largo(d, "so") {
+        sal("SO", k, a_texto(tablero.sobre(to_i32(json.entero(d, "so." + a_texto(k))))))
+    }
+    return Ok(0)
+}
+
+fn main() -> i32 {
+    let r = correr()
+    match r {
+        Ok(x) => {
+            return 0
+        }
+        Err(e) => {
+            print("ERROR " + e)
+            return 1
+        }
+    }
+    return 1
+}

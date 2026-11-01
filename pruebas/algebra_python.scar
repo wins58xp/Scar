@@ -1,0 +1,183 @@
+# lib/algebra para pruebas/test_algebra_python.py: arma matrices al azar y escribe cada operación con
+# todos los decimales ("NOMBRE filas cols v00 v01 ...").
+use "mate"
+use "algebra"
+
+fn mat(nombre: str, m: algebra.Matriz) {
+    let mut s = nombre + " " + a_texto(algebra.filas(m)) + " " + a_texto(algebra.columnas(m))
+    for i in 0..algebra.filas(m) {
+        for j in 0..algebra.columnas(m) {
+            s = s + " " + a_texto(algebra.get(m, i, j))
+        }
+    }
+    print(s)
+}
+
+fn al_azar(g: mate.Azar, f: i32, c: i32, enteros: bool) -> algebra.Matriz {
+    let m = algebra.matriz(f, c)
+    for i in 0..f {
+        for j in 0..c {
+            if enteros {
+                algebra.poner(m, i, j, to_f64(mate.azar_entero(g, 0 - 9, 9)))
+            } else {
+                algebra.poner(m, i, j, mate.azar_entre(g, 0.0 - 10.0, 10.0))
+            }
+        }
+    }
+    return m
+}
+
+fn resolver(a: algebra.Matriz, b: algebra.Matriz) -> Result<i32> {
+    let x = algebra.resolver(a, b)?
+    mat("X", x)
+    return Ok(0)
+}
+
+fn inversa(a: algebra.Matriz) -> Result<i32> {
+    let x = algebra.inversa(a)?
+    mat("INV", x)
+    return Ok(0)
+}
+
+fn mc(a: algebra.Matriz, b: algebra.Matriz) -> Result<i32> {
+    let x = algebra.minimos_cuadrados(a, b)?
+    mat("MC", x)
+    return Ok(0)
+}
+
+fn propios(a: algebra.Matriz) -> Result<i32> {
+    let p = algebra.propios(a)?
+    mat("VALORES", p.valores)
+    mat("VECTORES", p.vectores)
+    return Ok(0)
+}
+
+fn malcond(a: algebra.Matriz, b: algebra.Matriz) -> Result<i32> {
+    let x = algebra.resolver(a, b)?
+    mat("MALCOND", x)
+    print("MALCOND_RANGO", algebra.rango(a), algebra.determinante(a))
+    return Ok(0)
+}
+
+fn texto(s: str) -> Result<i32> {
+    let m = algebra.desde_texto(s)?
+    mat("TEXTO", m)
+    return Ok(0)
+}
+
+fn main() {
+    let g = mate.azar(1357)
+    for caso in 0..40 {
+        let n = mate.azar_entero(g, 1, 7)
+        let enteros = caso % 2 == 0
+        print("CASO", caso, n, enteros)
+        let a = al_azar(g, n, n, enteros)
+        let b = al_azar(g, n, n, enteros)
+        let k = mate.azar_entero(g, 1, 3)
+        let v = al_azar(g, n, k, enteros)
+        let p = mate.azar_entero(g, 1, 6)
+        let c = al_azar(g, n, p, enteros)
+        mat("A", a)
+        mat("B", b)
+        mat("V", v)
+        mat("C", c)
+        mat("SUMA", algebra.suma(a, b))
+        mat("RESTA", algebra.resta(a, b))
+        mat("ESCALA", algebra.escala(a, 0.0 - 2.5))
+        mat("PROD", algebra.producto(a, c))
+        mat("TRANS", algebra.transpuesta(c))
+        print("TRAZA", algebra.traza(a), "NORMA", algebra.norma(c))
+        print("DET", algebra.determinante(a))
+        print("RANGO", algebra.rango(a), algebra.rango(c))
+        let r1 = resolver(a, v)
+        if r1.is_err() {
+            print("X ERR")
+        }
+        let r2 = inversa(a)
+        if r2.is_err() {
+            print("INV ERR")
+        }
+        # una de rango r < n (producto de n x r por r x n, con enteros: el rango es exacto)
+        if n >= 2 {
+            let r = mate.azar_entero(g, 1, n - 1)
+            let u = al_azar(g, n, r, true)
+            let w = al_azar(g, r, n, true)
+            let s = algebra.producto(u, w)
+            mat("SING", s)
+            print("SING_RANGO", algebra.rango(s), "DET", algebra.determinante(s))
+            if resolver(s, v).is_err() {
+                print("SING_X ERR")
+            } else {
+                print("SING_X OK")
+            }
+        }
+        # mínimos cuadrados: más ecuaciones que incógnitas
+        let filas = n + mate.azar_entero(g, 0, 6)
+        let am = al_azar(g, filas, n, false)
+        let bm = al_azar(g, filas, k, false)
+        mat("AM", am)
+        mat("BM", bm)
+        let r3 = mc(am, bm)
+        if r3.is_err() {
+            print("MC ERR")
+        }
+        # simétrica: a + a^T
+        let sim = algebra.suma(a, algebra.transpuesta(a))
+        mat("SIM", sim)
+        let r4 = propios(sim)
+        if r4.is_err() {
+            print("PROPIOS ERR")
+        }
+        if n >= 2 {
+            let r5 = propios(a)
+            if r5.is_err() {
+                print("NOSIM ERR")
+            } else {
+                print("NOSIM OK")
+            }
+        }
+    }
+    # mal condicionadas pero regulares: se tienen que resolver
+    let h = algebra.matriz(6, 6)
+    for i in 0..6 {
+        for j in 0..6 {
+            algebra.poner(h, i, j, 1.0 / to_f64(i + j + 1))
+        }
+    }
+    let unos = algebra.matriz(6, 1)
+    for i in 0..6 {
+        algebra.poner(unos, i, 0, 1.0)
+    }
+    mat("HILBERT", h)
+    mat("UNOS", unos)
+    if malcond(h, unos).is_err() {
+        print("MALCOND ERR")
+    }
+    let d = algebra.identidad(2)
+    algebra.poner(d, 1, 1, 1.0e-9)
+    mat("HILBERT", d)
+    let dos = algebra.matriz(2, 1)
+    algebra.poner(dos, 0, 0, 1.0)
+    algebra.poner(dos, 1, 0, 1.0)
+    mat("UNOS", dos)
+    if malcond(d, dos).is_err() {
+        print("MALCOND ERR")
+    }
+    let t1 = texto("1 2 3; 4 5 6")
+    let t2 = texto("  -1.5, 2e3\n 0.25 -4E-2 ")
+    let t3 = texto("7")
+    if texto("1 2; 3").is_err() {
+        print("TEXTO_MAL filas ERR")
+    }
+    if texto("1 x").is_err() {
+        print("TEXTO_MAL numero ERR")
+    }
+    if texto("").is_err() {
+        print("TEXTO_MAL vacio ERR")
+    }
+    print("ATEXTO", algebra.a_texto_mat(algebra.identidad(2), 2))
+    let mc0 = mc(al_azar(g, 2, 3, false), al_azar(g, 2, 1, false))
+    if mc0.is_err() {
+        print("MC_POCAS ERR")
+    }
+}

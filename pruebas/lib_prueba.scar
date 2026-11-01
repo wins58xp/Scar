@@ -1,0 +1,35 @@
+# lib/prueba: el mini framework de pruebas, probado consigo mismo.
+#
+# Un conjunto "interno" recibe afirmaciones que pasan y otras que fallan a
+# propósito (las fallas se imprimen, es lo esperado); el conjunto de afuera
+# comprueba que las haya contado bien y que terminar() dé 1. El programa
+# termina con el código de salida del de afuera: 0.
+
+use "prueba"
+
+fn main() -> i32 {
+    let t = prueba.nueva("prueba")
+
+    let i = prueba.nueva("interna")
+    prueba.afirmar(i, true, "verdadero")
+    prueba.afirmar_igual_i32(i, 2 + 2, 4, "2 + 2")
+    prueba.afirmar_igual_i64(i, to_i64(1e12), to_i64(1e12), "i64")
+    prueba.afirmar_igual_str(i, "año" + "s", "años", "str con ñ")
+    prueba.afirmar_igual_bool(i, 3 > 2, true, "bool")
+    prueba.afirmar_igual_f64(i, 0.5 + 0.25, 0.75, "f64 exacto")
+    prueba.afirmar_cerca(i, 0.1 + 0.2, 0.3, 1e-15, "0,1 + 0,2 cerca de 0,3")
+    prueba.seccion(i, "a propósito")
+    prueba.afirmar(i, false, "esta falla")
+    prueba.afirmar_igual_i32(i, 7, 8, "7 no es 8")
+    prueba.afirmar_cerca(i, 1.0, 1.1, 0.01, "lejos")
+    prueba.afirmar_cerca(i, sqrt(0.0 - 1.0), 0.0, 1e9, "nan nunca está cerca")
+
+    prueba.seccion(t, "contadores")
+    prueba.afirmar_igual_i32(t, prueba.total(i), 11, "la interna contó 11")
+    prueba.afirmar_igual_i32(t, prueba.fallas(i), 4, "y 4 fallaron")
+    prueba.afirmar_igual_i32(t, prueba.terminar(i), 1, "terminar da 1 con fallas")
+
+    let vacia = prueba.nueva("vacía")
+    prueba.afirmar_igual_i32(t, prueba.terminar(vacia), 0, "terminar da 0 sin fallas")
+    return prueba.terminar(t)
+}

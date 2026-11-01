@@ -1,0 +1,1683 @@
+# lib/config.scar: archivos de configuración (use "config"). Escrita entera en SCAR;
+# probada contra configparser y tomllib de Python.
+#
+# Todo se lee a un json.Doc (el árbol de lib/json), así que se busca por ruta con las
+# mismas funciones: json.texto(d, "servidor.puerto"), json.entero, json.booleano...
+#
+#   INI   let d = config.leer_ini(texto)?                  (como RawConfigParser)
+#         config.ini_texto(d, "servidor", "host", "")      (usa [DEFAULT] de respaldo)
+#         config.ini_entero(d, "servidor", "puerto", 80)
+#         config.ini_booleano(d, "ui", "oscuro", false)
+#         config.escribir_ini(d)? -> texto
+#   TOML  let d = config.leer_toml(texto)?                 (como tomllib)
+#         json.texto(d, "tabla.clave")   json.largo(d, "lista")
+#         config.escribir_toml(d)? -> texto
+#   líneas (el formato del sismógrafo: "clave valor valor..." por línea)
+#         let d = config.leer_lineas(texto)
+#         config.ultima(d, "servidor", "")   config.todas(d, "estacion")
+#         config.campo("PB06 CX BHZ", 1)  # "CX"
+#
+# INI: como RawConfigParser con los valores por omisión de Python: claves en minúsculas,
+# separadores = y :, comentarios # y ; solo en una línea propia, valores en varias líneas
+# con sangría, [DEFAULT]; sin interpolación; sección o clave repetida y línea sin = son
+# errores. [DEFAULT] queda como una sección más del árbol (la primera vez que aparece) y
+# los ini_* la usan de respaldo. Las claves se bajan con texto.minusculas (latín).
+#
+# TOML: la versión 1.0 que lee tomllib, con las mismas reglas de tablas, tablas en línea,
+# arreglos de tablas y claves con puntos, y con sus mismos errores. Los enteros salen en
+# decimal (0x1F -> 31), los flotantes como el texto del archivo sin guiones bajos, inf y
+# nan como "inf", "-inf" y "nan". No acepta fechas ni horas (es un Err), enteros en
+# hexadecimal/octal/binario de más de 63 bits, ni "\u0000" (un str de SCAR no guarda NUL).
+# Anidar más de 470 niveles, o una clave de más de 1000 partes, es un Err. Está pensada para archivos de configuración
+# (cientos de líneas), no para tablas de miles de claves.
+
+use "json"
+use "texto"
+
+# ---------------------------------------------------------------------------
+# Convertir textos
+# ---------------------------------------------------------------------------
+
+# Un entero como lo lee int() de Python (espacios, signo, guiones bajos entre cifras).
+# Si no es un entero o no cabe en un i64, `defecto`.
+fn entero_de(s: str, defecto: i64) -> i64 {
+    let t = texto.recortar(s)
+    let n = len(t)
+    if n == 0 {
+        return defecto
+    }
+    let mut i = 0
+    let mut neg = false
+    let c0 = ord(t[0])
+    if c0 == 43 or c0 == 45 {
+        neg = c0 == 45
+        i = 1
+    }
+    if i >= n {
+        return defecto
+    }
+    let mut v: i64 = 0
+    let mut previo_cifra = false
+    while i < n {
+        let c = ord(t[i])
+        if c >= 48 and c <= 57 {
+            let dig = to_i64(c - 48)
+            if v > (9223372036854775807 - dig) / 10 {
+                return defecto
+            }
+            v = v * 10 + dig
+            previo_cifra = true
+        } else if c == 95 and previo_cifra and i + 1 < n and ord(t[i + 1]) >= 48 and ord(t[i + 1]) <= 57 {
+            previo_cifra = false
+        } else {
+            return defecto
+        }
+        i = i + 1
+    }
+    if neg {
+        return 0 - v
+    }
+    return v
+}
+
+# Un número con decimales (texto.a_f64); si no lo es, `defecto`.
+fn decimal_de(s: str, defecto: f64) -> f64 {
+    let r = texto.a_f64(s)
+    match r {
+        Ok(x) => {
+            return x
+        }
+        Err(e) => {
+            return defecto
+        }
+    }
+    return defecto
+}
+
+# Un booleano como getboolean de configparser: 1 yes true on / 0 no false off (sin
+# importar mayúsculas, y sin quitar espacios: un valor de varias líneas no es un booleano). Si no es ninguno, `defecto`.
+fn booleano_de(s: str, defecto: bool) -> bool {
+    let t = texto.minusculas(s)
+    if t == "1" or t == "yes" or t == "true" or t == "on" {
+        return true
+    }
+    if t == "0" or t == "no" or t == "false" or t == "off" {
+        return false
+    }
+    return defecto
+}
+
+# ---------------------------------------------------------------------------
+# Leer archivos y juntar partes
+# ---------------------------------------------------------------------------
+
+struct Sal {
+    partes: Vec<str>
+    escrito: bool
+}
+
+fn _sal() -> Sal {
+    let p: Vec<str> = vec_new()
+    return Sal { partes: p, escrito: false }
+}
+
+# Junta las partes de a pares (así no se copia el texto entero por cada parte).
+fn _juntar_partes(partes: Vec<str>) -> str {
+    let mut actual = partes
+    while actual.len() > 1 {
+        let sig: Vec<str> = vec_new()
+        let n = actual.len()
+        let mut i = 0
+        while i < n {
+            let mut t = ""
+            let mut a = actual.get(i)
+            while let Some(e) = a {
+                t = e + ""
+                a = None
+            }
+            if i + 1 < n {
+                let mut b = actual.get(i + 1)
+                while let Some(e) = b {
+                    t = t + e
+                    b = None
+                }
+            }
+            sig.push(t)
+            i = i + 2
+        }
+        actual = sig
+    }
+    let mut r = ""
+    let mut a = actual.get(0)
+    while let Some(e) = a {
+        r = e + ""
+        a = None
+    }
+    return r
+}
+
+fn _leer_texto(ruta: str) -> Result<str> {
+    let f = file_open(ruta, "r")?
+    let todo = f.read_all()?
+    f.close()
+    return Ok(todo)
+}
+
+fn _guardar_texto(ruta: str, s: str) -> Result<i32> {
+    let bytes = json.bytes_de(s)
+    let f = file_open(ruta, "w")?
+    f.write_bytes(bytes)?
+    f.close()
+    return Ok(bytes.len())
+}
+
+# Guarda un texto en un archivo. Devuelve cuántos bytes escribió.
+fn guardar(ruta: str, s: str) -> Result<i32> {
+    return _guardar_texto(ruta, s)
+}
+
+# ---------------------------------------------------------------------------
+# INI
+# ---------------------------------------------------------------------------
+
+struct Ls {
+    v: Vec<str>
+}
+
+fn _linea(l: Ls, i: i32) -> str {
+    let mut s = ""
+    let mut o = l.v.get(i)
+    while let Some(e) = o {
+        s = e + ""
+        o = None
+    }
+    return s
+}
+
+fn _fin_opcion(d: json.Doc, nodo: i32, valor: str) {
+    if nodo >= 0 {
+        d.valor.set(nodo, texto.recortar_der(valor))
+    }
+}
+
+# Lee un INI como RawConfigParser().read_string. Árbol: la raíz es un objeto con una
+# sección por clave (cada una un objeto de texto).
+fn leer_ini(contenido: str) -> Result<json.Doc> {
+    let d = json.nuevo_objeto()
+    let lineas = Ls { v: texto.dividir(contenido, "\n") }
+    let mut total = lineas.v.len()
+    if total > 0 and _linea(lineas, total - 1) == "" {
+        total = total - 1
+    }
+    let mut sec = 0 - 1
+    let mut en_opcion = false
+    let mut nodo_op = 0 - 1
+    let mut valor_op = ""
+    let mut sangria_ref = 0
+    let mut k = 0
+    while k < total {
+        let raw = _linea(lineas, k)
+        let est = texto.recortar(raw)
+        let mut limpio = est + ""
+        let mut comentario = false
+        if len(est) > 0 {
+            let c0 = ord(est[0])
+            if c0 == 35 or c0 == 59 {
+                limpio = ""
+                comentario = true
+            }
+        }
+        if len(limpio) == 0 {
+            if comentario == false and sec >= 0 and en_opcion {
+                valor_op = valor_op + "\n"
+            }
+        } else {
+            let mut ind = 0
+            while ind < len(raw) and texto.es_espacio(raw[ind]) {
+                ind = ind + 1
+            }
+            if sec >= 0 and en_opcion and ind > sangria_ref {
+                valor_op = valor_op + "\n" + limpio
+            } else {
+                _fin_opcion(d, nodo_op, valor_op)
+                en_opcion = false
+                nodo_op = 0 - 1
+                valor_op = ""
+                sangria_ref = ind
+                let ult = texto.buscar_ultimo(limpio, "]")
+                if ord(limpio[0]) == 91 and ult >= 2 {
+                    let nombre = texto.subtexto(limpio, 1, ult)
+                    let existente = json.hijo(d, 0, nombre)
+                    if nombre == "DEFAULT" {
+                        if existente >= 0 {
+                            sec = existente
+                        } else {
+                            sec = json.poner_objeto(d, 0, nombre)
+                        }
+                    } else {
+                        if existente >= 0 {
+                            return Err("INI: sección repetida '" + nombre + "' (línea " + a_texto(k + 1) + ")")
+                        }
+                        sec = json.poner_objeto(d, 0, nombre)
+                    }
+                } else if sec < 0 {
+                    return Err("INI: el archivo no empieza con una sección (línea " + a_texto(k + 1) + ")")
+                } else {
+                    let mut idx = 0 - 1
+                    let mut i = 0
+                    while i < len(limpio) and idx < 0 {
+                        let c = ord(limpio[i])
+                        if c == 61 or c == 58 {
+                            idx = i
+                        }
+                        i = i + 1
+                    }
+                    if idx < 0 {
+                        return Err("INI: línea sin = ni : (línea " + a_texto(k + 1) + ")")
+                    }
+                    let opcion = texto.recortar_der(texto.subtexto(limpio, 0, idx))
+                    if len(opcion) == 0 {
+                        return Err("INI: clave vacía (línea " + a_texto(k + 1) + ")")
+                    }
+                    let nombre = texto.minusculas(opcion)
+                    if json.hijo(d, sec, nombre) >= 0 {
+                        return Err("INI: clave repetida '" + nombre + "' (línea " + a_texto(k + 1) + ")")
+                    }
+                    valor_op = texto.recortar(texto.subtexto(limpio, idx + 1, len(limpio)))
+                    nodo_op = json.poner_texto(d, sec, nombre, valor_op)
+                    en_opcion = true
+                }
+            }
+        }
+        k = k + 1
+    }
+    _fin_opcion(d, nodo_op, valor_op)
+    return Ok(d)
+}
+
+fn leer_ini_archivo(ruta: str) -> Result<json.Doc> {
+    return leer_ini(_leer_texto(ruta)?)
+}
+
+fn _seccion(d: json.Doc, seccion: str) -> i32 {
+    let s = json.hijo(d, 0, seccion)
+    if s >= 0 and json.doc_tipo(d, s) == 5 {
+        return s
+    }
+    return 0 - 1
+}
+
+# El nodo de una clave de una sección (la clave se baja a minúsculas). Si la sección no
+# la tiene, el de [DEFAULT]. -1 si no está.
+fn _opcion(d: json.Doc, seccion: str, clave: str) -> i32 {
+    let c = texto.minusculas(clave)
+    let s = _seccion(d, seccion)
+    if s >= 0 and seccion != "DEFAULT" {
+        let h = json.hijo(d, s, c)
+        if h >= 0 {
+            return h
+        }
+    }
+    let p = _seccion(d, "DEFAULT")
+    if p >= 0 and (s >= 0 or seccion == "DEFAULT") {
+        return json.hijo(d, p, c)
+    }
+    return 0 - 1
+}
+
+# ¿Está la clave en la sección (o en [DEFAULT])?
+fn ini_tiene(d: json.Doc, seccion: str, clave: str) -> bool {
+    return _opcion(d, seccion, clave) >= 0
+}
+
+# El valor de la clave, o `defecto` si no está.
+fn ini_texto(d: json.Doc, seccion: str, clave: str, defecto: str) -> str {
+    let h = _opcion(d, seccion, clave)
+    if h < 0 {
+        return defecto
+    }
+    return json.doc_valor(d, h)
+}
+
+fn ini_entero(d: json.Doc, seccion: str, clave: str, defecto: i64) -> i64 {
+    let h = _opcion(d, seccion, clave)
+    if h < 0 {
+        return defecto
+    }
+    return entero_de(json.doc_valor(d, h), defecto)
+}
+
+fn ini_decimal(d: json.Doc, seccion: str, clave: str, defecto: f64) -> f64 {
+    let h = _opcion(d, seccion, clave)
+    if h < 0 {
+        return defecto
+    }
+    return decimal_de(json.doc_valor(d, h), defecto)
+}
+
+fn ini_booleano(d: json.Doc, seccion: str, clave: str, defecto: bool) -> bool {
+    let h = _opcion(d, seccion, clave)
+    if h < 0 {
+        return defecto
+    }
+    return booleano_de(json.doc_valor(d, h), defecto)
+}
+
+# Los nombres de las secciones, sin DEFAULT, en el orden del archivo.
+fn ini_secciones(d: json.Doc) -> Vec<str> {
+    let r: Vec<str> = vec_new()
+    let mut h = json.doc_campo(d, 0, 0)
+    while h >= 0 {
+        let nombre = json.doc_nombre(d, h)
+        if nombre != "DEFAULT" {
+            r.push(nombre)
+        }
+        h = json.doc_campo(d, 2, h)
+    }
+    return r
+}
+
+# Las claves de la sección (las suyas primero y después las de [DEFAULT] que no repite,
+# como items() de configparser, pero con las de DEFAULT al final).
+fn ini_claves(d: json.Doc, seccion: str) -> Vec<str> {
+    let r: Vec<str> = vec_new()
+    let s = _seccion(d, seccion)
+    if s >= 0 {
+        let mut h = json.doc_campo(d, 0, s)
+        while h >= 0 {
+            r.push(json.doc_nombre(d, h))
+            h = json.doc_campo(d, 2, h)
+        }
+    }
+    return r
+}
+
+fn _valor_escalar(d: json.Doc, h: i32) -> Result<str> {
+    let t = json.doc_tipo(d, h)
+    if t == 1 or t == 2 or t == 3 {
+        return Ok(json.doc_valor(d, h))
+    }
+    return Err("config: '" + json.doc_nombre(d, h) + "' no es un texto, número ni booleano")
+}
+
+fn _ini_seccion(d: json.Doc, s: i32, nombre: str, o: Sal) -> Result<i32> {
+    o.partes.push("[" + nombre + "]\n")
+    let mut h = json.doc_campo(d, 0, s)
+    while h >= 0 {
+        let v = _valor_escalar(d, h)?
+        o.partes.push(json.doc_nombre(d, h) + " = " + texto.reemplazar(texto.reemplazar(texto.reemplazar(v, "\r\n", "\n"), "\r", "\n"), "\n", "\n\t") + "\n")
+        h = json.doc_campo(d, 2, h)
+    }
+    o.partes.push("\n")
+    return Ok(0)
+}
+
+# Escribe el árbol como RawConfigParser.write: primero [DEFAULT] (si no está vacía), después
+# las secciones, "clave = valor", los saltos de línea (\n, \r\n o \r) de un valor se escriben como salto y tab.
+fn escribir_ini(d: json.Doc) -> Result<str> {
+    let o = _sal()
+    if json.doc_tipo(d, 0) != 5 {
+        return Err("config: el INI tiene que ser un objeto de secciones")
+    }
+    let p = _seccion(d, "DEFAULT")
+    if p >= 0 and json.doc_campo(d, 3, p) > 0 {
+        _ini_seccion(d, p, "DEFAULT", o)?
+    }
+    let mut h = json.doc_campo(d, 0, 0)
+    while h >= 0 {
+        let nombre = json.doc_nombre(d, h)
+        if nombre != "DEFAULT" {
+            if json.doc_tipo(d, h) != 5 {
+                return Err("config: la sección '" + nombre + "' tiene que ser un objeto")
+            }
+            _ini_seccion(d, h, nombre, o)?
+        }
+        h = json.doc_campo(d, 2, h)
+    }
+    return Ok(_juntar_partes(o.partes))
+}
+
+# ---------------------------------------------------------------------------
+# Líneas "clave valor valor..." (el formato de sismografo_vivo.conf)
+# ---------------------------------------------------------------------------
+
+# Lee el texto: cada línea es una clave y el resto de la línea; las líneas en blanco y las
+# que empiezan con # no cuentan. La raíz es un objeto con un arreglo de textos por clave
+# (una clave puede repetirse: "estacion").
+fn leer_lineas(contenido: str) -> json.Doc {
+    let d = json.nuevo_objeto()
+    let lineas = Ls { v: texto.dividir(contenido, "\n") }
+    let total = lineas.v.len()
+    let mut k = 0
+    while k < total {
+        let l = texto.recortar(_linea(lineas, k))
+        if len(l) > 0 and ord(l[0]) != 35 {
+            let mut i = 0
+            while i < len(l) and texto.es_espacio(l[i]) == false {
+                i = i + 1
+            }
+            let clave = texto.subtexto(l, 0, i)
+            let resto = texto.recortar(texto.subtexto(l, i, len(l)))
+            let mut arr = json.hijo(d, 0, clave)
+            if arr < 0 {
+                arr = json.poner_arreglo(d, 0, clave)
+            }
+            json.agregar_texto(d, arr, resto)
+        }
+        k = k + 1
+    }
+    return d
+}
+
+fn leer_lineas_archivo(ruta: str) -> Result<json.Doc> {
+    return Ok(leer_lineas(_leer_texto(ruta)?))
+}
+
+# El resto de la última línea con esa clave (la que manda cuando se repite), o `defecto`.
+fn ultima(d: json.Doc, clave: str, defecto: str) -> str {
+    let arr = json.hijo(d, 0, clave)
+    if arr < 0 or json.doc_campo(d, 3, arr) == 0 {
+        return defecto
+    }
+    return json.doc_valor(d, json.doc_campo(d, 1, arr))
+}
+
+# El resto de todas las líneas con esa clave, en orden.
+fn todas(d: json.Doc, clave: str) -> Vec<str> {
+    let r: Vec<str> = vec_new()
+    let arr = json.hijo(d, 0, clave)
+    if arr >= 0 {
+        let mut h = json.doc_campo(d, 0, arr)
+        while h >= 0 {
+            r.push(json.doc_valor(d, h))
+            h = json.doc_campo(d, 2, h)
+        }
+    }
+    return r
+}
+
+# La palabra número `i` (desde 0) de un texto separado por espacios ("" si no hay).
+fn campo(s: str, i: i32) -> str {
+    let partes = Ls { v: texto.dividir_espacios(s) }
+    return _linea(partes, i)
+}
+
+fn escribir_lineas(d: json.Doc) -> Result<str> {
+    let o = _sal()
+    if json.doc_tipo(d, 0) != 5 {
+        return Err("config: las líneas tienen que ser un objeto")
+    }
+    let mut h = json.doc_campo(d, 0, 0)
+    while h >= 0 {
+        let clave = json.doc_nombre(d, h)
+        let t = json.doc_tipo(d, h)
+        if t == 4 {
+            let mut e = json.doc_campo(d, 0, h)
+            while e >= 0 {
+                let v = _valor_escalar(d, e)?
+                o.partes.push(clave + " " + v + "\n")
+                e = json.doc_campo(d, 2, e)
+            }
+        } else {
+            let v = _valor_escalar(d, h)?
+            o.partes.push(clave + " " + v + "\n")
+        }
+        h = json.doc_campo(d, 2, h)
+    }
+    return Ok(_juntar_partes(o.partes))
+}
+
+# ---------------------------------------------------------------------------
+# TOML: leer (un puerto de tomllib)
+# ---------------------------------------------------------------------------
+#
+# Las banderas de tomllib (EXPLICIT_NEST y FROZEN, por ruta) viven en cada nodo del árbol:
+# bit 1 = la tabla se declaró a mano o con una clave con puntos, bit 2 = el valor es un
+# arreglo o tabla en línea (no se puede tocar, ni lo que tiene adentro).
+
+struct T {
+    src: str
+    c: Vec<i32>
+    n: i32
+    fl: Vec<i32>
+    pend: Vec<i32>
+    r: Vec<i32>
+    s: Vec<str>
+}
+
+# Los pedazos de una clave: a.b."c d" -> ["a", "b", "c d"].
+struct Clave {
+    p: Vec<str>
+}
+
+fn _clave_nueva() -> Clave {
+    let v: Vec<str> = vec_new()
+    return Clave { p: v }
+}
+
+fn _kp(k: Clave, i: i32) -> str {
+    let mut s = ""
+    let mut o = k.p.get(i)
+    while let Some(e) = o {
+        s = e + ""
+        o = None
+    }
+    return s
+}
+
+fn _juntar(h: Clave, k: Clave) -> Clave {
+    let r = _clave_nueva()
+    let mut i = 0
+    while i < h.p.len() {
+        r.p.push(_kp(h, i))
+        i = i + 1
+    }
+    i = 0
+    while i < k.p.len() {
+        r.p.push(_kp(k, i))
+        i = i + 1
+    }
+    return r
+}
+
+fn _cp(t: T, i: i32) -> i32 {
+    if i < 0 {
+        return 0 - 1
+    }
+    return t.c.get(i).unwrap_or(0 - 1)
+}
+
+fn _sl(t: T, i: i32) -> str {
+    let mut s = ""
+    let mut o = t.s.get(i)
+    while let Some(e) = o {
+        s = e + ""
+        o = None
+    }
+    return s
+}
+
+fn _ult(t: T) -> i32 {
+    return t.r.get(0).unwrap_or(0 - 1)
+}
+
+fn _marcado(t: T, k: i32, bit: i32) -> bool {
+    let v = t.fl.get(k).unwrap_or(0)
+    return (v / bit) % 2 == 1
+}
+
+fn _marcar(t: T, k: i32, bit: i32) {
+    if k >= 0 and _marcado(t, k, bit) == false {
+        t.fl.set(k, t.fl.get(k).unwrap_or(0) + bit)
+    }
+}
+
+fn _nuevo(t: T, d: json.Doc, tipo: i32, nombre: str, valor: str) -> i32 {
+    t.fl.push(0)
+    return json.doc_nodo(d, tipo, nombre, valor)
+}
+
+fn _coord(t: T, pos: i32) -> str {
+    if pos >= t.n {
+        return "fin del documento"
+    }
+    let mut linea = 1
+    let mut ultimo = 0 - 1
+    let mut i = 0
+    while i < pos {
+        if _cp(t, i) == 10 {
+            linea = linea + 1
+            ultimo = i
+        }
+        i = i + 1
+    }
+    let col = if linea == 1 { pos + 1 } else { pos - ultimo }
+    return "línea " + a_texto(linea) + ", columna " + a_texto(col)
+}
+
+fn _err(t: T, pos: i32, msg: str) -> str {
+    return "TOML: " + msg + " (" + _coord(t, pos) + ")"
+}
+
+fn _pref(t: T, pos: i32, s: str) -> bool {
+    let n = len(s)
+    let mut i = 0
+    while i < n {
+        if _cp(t, pos + i) != ord(s[i]) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn _bare(c: i32) -> bool {
+    return (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or (c >= 48 and c <= 57) or c == 45 or c == 95
+}
+
+fn _digito(c: i32) -> bool {
+    return c >= 48 and c <= 57
+}
+
+fn _ws(t: T, pos: i32) -> i32 {
+    let mut p = pos
+    while _cp(t, p) == 32 or _cp(t, p) == 9 {
+        p = p + 1
+    }
+    return p
+}
+
+fn _wsnl(t: T, pos: i32) -> i32 {
+    let mut p = pos
+    while _cp(t, p) == 32 or _cp(t, p) == 9 or _cp(t, p) == 10 {
+        p = p + 1
+    }
+    return p
+}
+
+# El primer carácter de control no permitido entre desde y hasta (-1 si no hay). En las
+# cadenas de varias líneas se permite el salto de línea.
+fn _ilegal(t: T, desde: i32, hasta: i32, multi: bool) -> i32 {
+    let mut i = desde
+    while i < hasta {
+        let c = _cp(t, i)
+        if (c < 32 and c != 9 and not (multi and c == 10)) or c == 127 {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+# Dónde empieza la primera vez que aparece el carácter c, `veces` seguidas (1 o 3).
+fn _indice(t: T, pos: i32, c: i32, veces: i32) -> i32 {
+    let mut i = pos
+    while i < t.n {
+        if _cp(t, i) == c and (veces == 1 or (_cp(t, i + 1) == c and _cp(t, i + 2) == c)) {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+# skip_until de tomllib: hasta el cierre, revisando que no haya caracteres ilegales.
+fn _hasta(t: T, pos: i32, c: i32, veces: i32, multi: bool, error_en_fin: bool) -> Result<i32> {
+    let k = _indice(t, pos, c, veces)
+    let mut fin = k
+    if k < 0 {
+        fin = t.n
+        if error_en_fin {
+            return Err(_err(t, fin, "falta el cierre"))
+        }
+    }
+    let mal = _ilegal(t, pos, fin, multi)
+    if mal >= 0 {
+        return Err(_err(t, mal, "carácter no permitido"))
+    }
+    return Ok(fin)
+}
+
+fn _comentario(t: T, pos: i32) -> Result<i32> {
+    if _cp(t, pos) == 35 {
+        return _hasta(t, pos + 1, 10, 1, false, false)
+    }
+    return Ok(pos)
+}
+
+fn _salta_com(t: T, pos: i32) -> Result<i32> {
+    let mut p = pos
+    while true {
+        let antes = p
+        p = _wsnl(t, p)
+        let q = _comentario(t, p)?
+        p = q
+        if p == antes {
+            return Ok(p)
+        }
+    }
+    return Ok(p)
+}
+
+# ---- cadenas ----
+
+fn _hex(t: T, pos: i32, largo: i32) -> Result<i32> {
+    let mut v: i64 = 0
+    let mut k = 0
+    while k < largo {
+        let c = _cp(t, pos + k)
+        let mut dig = 0 - 1
+        if c >= 48 and c <= 57 {
+            dig = c - 48
+        } else if c >= 97 and c <= 102 {
+            dig = c - 87
+        } else if c >= 65 and c <= 70 {
+            dig = c - 55
+        }
+        if dig < 0 {
+            return Err(_err(t, pos, "valor hexadecimal inválido"))
+        }
+        v = v * 16 + to_i64(dig)
+        k = k + 1
+    }
+    if (v <= 55295) == false and (v >= 57344 and v <= 1114111) == false {
+        return Err(_err(t, pos + largo, "el carácter escapado no es un valor escalar Unicode"))
+    }
+    if v == 0 {
+        return Err(_err(t, pos + largo, "un str de SCAR no puede guardar el carácter NUL (\\u0000)"))
+    }
+    t.s.set(1, chr(to_i32(v)))
+    return Ok(pos + largo)
+}
+
+# El escape que empieza en pos (una barra invertida). Deja lo que significa en s[1].
+fn _escape(t: T, pos0: i32, multi: bool) -> Result<i32> {
+    let b = _cp(t, pos0 + 1)
+    let pos = pos0 + 2
+    t.s.set(1, "")
+    if multi and (b == 32 or b == 9 or b == 10) {
+        let mut p = pos
+        if b != 10 {
+            p = _ws(t, p)
+            let c = _cp(t, p)
+            if c < 0 {
+                return Ok(p)
+            }
+            if c != 10 {
+                return Err(_err(t, p, "barra invertida sin escape en la cadena"))
+            }
+            p = p + 1
+        }
+        p = _wsnl(t, p)
+        return Ok(p)
+    }
+    if b == 117 {
+        return _hex(t, pos, 4)
+    }
+    if b == 85 {
+        return _hex(t, pos, 8)
+    }
+    let mut r = 0 - 1
+    if b == 98 {
+        r = 8
+    } else if b == 116 {
+        r = 9
+    } else if b == 110 {
+        r = 10
+    } else if b == 102 {
+        r = 12
+    } else if b == 114 {
+        r = 13
+    } else if b == 34 {
+        r = 34
+    } else if b == 92 {
+        r = 92
+    }
+    if r < 0 {
+        return Err(_err(t, pos, "barra invertida sin escape en la cadena"))
+    }
+    t.s.set(1, chr(r))
+    return Ok(pos)
+}
+
+# Una cadena entre comillas dobles; pos0 es lo que sigue a la comilla de apertura. El
+# texto queda en s[0].
+fn _basica(t: T, pos0: i32, multi: bool) -> Result<i32> {
+    let mut pos = pos0
+    let mut ini = pos0
+    let mut res = ""
+    while true {
+        let c = _cp(t, pos)
+        if c < 0 {
+            return Err(_err(t, pos, "cadena sin cerrar"))
+        }
+        if c == 34 {
+            if multi == false {
+                t.s.set(0, res + texto.subtexto(t.src, ini, pos))
+                return Ok(pos + 1)
+            }
+            if _cp(t, pos + 1) == 34 and _cp(t, pos + 2) == 34 {
+                t.s.set(0, res + texto.subtexto(t.src, ini, pos))
+                return Ok(pos + 3)
+            }
+            pos = pos + 1
+        } else if c == 92 {
+            res = res + texto.subtexto(t.src, ini, pos)
+            let p2 = _escape(t, pos, multi)?
+            res = res + _sl(t, 1)
+            pos = p2
+            ini = pos
+        } else {
+            if (c < 32 and c != 9 and not (multi and c == 10)) or c == 127 {
+                return Err(_err(t, pos, "carácter no permitido en la cadena"))
+            }
+            pos = pos + 1
+        }
+    }
+    return Err("")
+}
+
+fn _literal(t: T, pos0: i32) -> Result<i32> {
+    let ini = pos0 + 1
+    let fin = _hasta(t, ini, 39, 1, false, true)?
+    t.s.set(0, texto.subtexto(t.src, ini, fin))
+    return Ok(fin + 1)
+}
+
+fn _multi(t: T, pos0: i32, literal: bool) -> Result<i32> {
+    let mut pos = pos0 + 3
+    if _cp(t, pos) == 10 {
+        pos = pos + 1
+    }
+    let mut res = ""
+    let mut delim = 34
+    if literal {
+        delim = 39
+        let fin = _hasta(t, pos, 39, 3, true, true)?
+        res = texto.subtexto(t.src, pos, fin)
+        pos = fin + 3
+    } else {
+        let p2 = _basica(t, pos, true)?
+        res = _sl(t, 0)
+        pos = p2
+    }
+    if _cp(t, pos) != delim {
+        t.s.set(0, res)
+        return Ok(pos)
+    }
+    pos = pos + 1
+    if _cp(t, pos) != delim {
+        t.s.set(0, res + chr(delim))
+        return Ok(pos)
+    }
+    pos = pos + 1
+    t.s.set(0, res + chr(delim) + chr(delim))
+    return Ok(pos)
+}
+
+# ---- claves ----
+
+fn _parte_clave(t: T, pos: i32) -> Result<i32> {
+    let c = _cp(t, pos)
+    if _bare(c) {
+        let mut p = pos
+        while _bare(_cp(t, p)) {
+            p = p + 1
+        }
+        t.s.set(0, texto.subtexto(t.src, pos, p))
+        return Ok(p)
+    }
+    if c == 39 {
+        return _literal(t, pos)
+    }
+    if c == 34 {
+        return _basica(t, pos + 1, false)
+    }
+    return Err(_err(t, pos, "carácter inicial inválido para una parte de la clave"))
+}
+
+fn _clave(t: T, k: Clave, pos0: i32) -> Result<i32> {
+    let p1 = _parte_clave(t, pos0)?
+    k.p.push(_sl(t, 0))
+    let mut pos = _ws(t, p1)
+    while true {
+        if _cp(t, pos) != 46 {
+            return Ok(pos)
+        }
+        pos = _ws(t, pos + 1)
+        let p2 = _parte_clave(t, pos)?
+        k.p.push(_sl(t, 0))
+        if k.p.len() > 1000 {
+            return Err(_err(t, pos, "la clave tiene demasiadas partes"))
+        }
+        pos = _ws(t, p2)
+    }
+    return Ok(pos)
+}
+
+# ---- recorrer el árbol por una clave ----
+
+# Baja por los primeros m pedazos de la clave desde `base` (en un arreglo de tablas, por
+# su último elemento). Devuelve el nodo (-1 si no existe) y deja en r[1] si algún nodo del
+# camino está congelado.
+fn _resolver(t: T, d: json.Doc, base: i32, k: Clave, m: i32) -> i32 {
+    t.r.set(1, 0)
+    let mut cur = base
+    let mut i = 0
+    while i < m {
+        let h = json.hijo(d, cur, _kp(k, i))
+        if h < 0 {
+            return 0 - 1
+        }
+        if _marcado(t, h, 2) {
+            t.r.set(1, 1)
+        }
+        cur = h
+        if i < m - 1 and json.doc_tipo(d, cur) == 4 {
+            let u = json.doc_campo(d, 1, cur)
+            if u < 0 {
+                return 0 - 1
+            }
+            cur = u
+        }
+        i = i + 1
+    }
+    return cur
+}
+
+fn _congelado(t: T) -> bool {
+    return t.r.get(1).unwrap_or(0) == 1
+}
+
+# get_or_create_nest: la tabla de esos m pedazos, creando las que falten. Con `listas`,
+# un arreglo de tablas se cruza por su último elemento.
+fn _nido(t: T, d: json.Doc, base: i32, k: Clave, m: i32, listas: bool) -> Result<i32> {
+    let mut cur = base
+    let mut i = 0
+    while i < m {
+        let nom = _kp(k, i)
+        let mut h = json.hijo(d, cur, nom)
+        if h < 0 {
+            h = _nuevo(t, d, 5, nom, "")
+            json.doc_enganchar(d, cur, h)
+        }
+        cur = h
+        if listas and json.doc_tipo(d, cur) == 4 {
+            let u = json.doc_campo(d, 1, cur)
+            if u < 0 {
+                return Err(_err(t, 0, "no hay una tabla detrás de la clave"))
+            }
+            cur = u
+        }
+        if json.doc_tipo(d, cur) != 5 {
+            return Err(_err(t, 0, "no se puede sobrescribir un valor"))
+        }
+        i = i + 1
+    }
+    return Ok(cur)
+}
+
+# ---- valores ----
+
+fn _nodo_texto(t: T, d: json.Doc, p: i32, nombre: str) -> Result<i32> {
+    let k = _nuevo(t, d, 3, nombre, _sl(t, 0))
+    t.r.set(0, k)
+    return Ok(p)
+}
+
+fn _num_nodo(t: T, d: json.Doc, p: i32, nombre: str, valor: str) -> Result<i32> {
+    let k = _nuevo(t, d, 2, nombre, valor)
+    t.r.set(0, k)
+    return Ok(p)
+}
+
+fn _valor_digito(c: i32, base: i32) -> i32 {
+    let mut v = 0 - 1
+    if c >= 48 and c <= 57 {
+        v = c - 48
+    } else if c >= 97 and c <= 102 {
+        v = c - 87
+    } else if c >= 65 and c <= 70 {
+        v = c - 55
+    }
+    if v >= base {
+        return 0 - 1
+    }
+    return v
+}
+
+# (_?[0-9])*
+fn _cifras(t: T, p0: i32) -> i32 {
+    let mut p = p0
+    while true {
+        let c = _cp(t, p)
+        if _digito(c) {
+            p = p + 1
+        } else if c == 95 and _digito(_cp(t, p + 1)) {
+            p = p + 2
+        } else {
+            return p
+        }
+    }
+    return p
+}
+
+# RE_NUMBER de tomllib. Devuelve la posición después del número, o -1 si no hay uno.
+fn _numero(t: T, d: json.Doc, pos: i32, nombre: str) -> Result<i32> {
+    let c0 = _cp(t, pos)
+    let b1 = _cp(t, pos + 1)
+    let mut base = 0
+    if c0 == 48 {
+        if b1 == 120 {
+            base = 16
+        } else if b1 == 98 {
+            base = 2
+        } else if b1 == 111 {
+            base = 8
+        }
+    }
+    if base > 0 {
+        let d0 = _valor_digito(_cp(t, pos + 2), base)
+        if d0 >= 0 {
+            let mut v: i64 = to_i64(d0)
+            let mut p = pos + 3
+            let mut seguir = true
+            while seguir {
+                let c = _cp(t, p)
+                let mut dd = _valor_digito(c, base)
+                let mut avance = 1
+                if c == 95 {
+                    dd = _valor_digito(_cp(t, p + 1), base)
+                    avance = 2
+                }
+                if dd < 0 {
+                    seguir = false
+                } else {
+                    if v > (9223372036854775807 - to_i64(dd)) / to_i64(base) {
+                        return Err(_err(t, pos, "entero demasiado grande para SCAR (más de 63 bits)"))
+                    }
+                    v = v * to_i64(base) + to_i64(dd)
+                    p = p + avance
+                }
+            }
+            return _num_nodo(t, d, p, nombre, a_texto(v))
+        }
+    }
+    let mut p = pos
+    if c0 == 43 or c0 == 45 {
+        p = p + 1
+    }
+    let c1 = _cp(t, p)
+    if c1 == 48 {
+        p = p + 1
+    } else if c1 >= 49 and c1 <= 57 {
+        p = _cifras(t, p + 1)
+    } else {
+        return Ok(0 - 1)
+    }
+    let mut flotante = false
+    if _cp(t, p) == 46 and _digito(_cp(t, p + 1)) {
+        p = _cifras(t, p + 2)
+        flotante = true
+    }
+    let ce = _cp(t, p)
+    if ce == 101 or ce == 69 {
+        let mut q = p + 1
+        let cs = _cp(t, q)
+        if cs == 43 or cs == 45 {
+            q = q + 1
+        }
+        if _digito(_cp(t, q)) {
+            p = _cifras(t, q + 1)
+            flotante = true
+        }
+    }
+    let mut limpio = ""
+    let mut i = pos
+    while i < p {
+        let c = _cp(t, i)
+        if c != 95 and not (i == pos and c == 43) {
+            limpio = limpio + chr(c)
+        }
+        i = i + 1
+    }
+    if flotante == false and limpio == "-0" {
+        limpio = "0"
+    }
+    return _num_nodo(t, d, p, nombre, limpio)
+}
+
+# ¿Empieza una fecha (RE_DATETIME) en pos?
+fn _es_fecha(t: T, pos: i32) -> bool {
+    let mut i = 0
+    while i < 4 {
+        if _digito(_cp(t, pos + i)) == false {
+            return false
+        }
+        i = i + 1
+    }
+    if _cp(t, pos + 4) != 45 or _cp(t, pos + 7) != 45 {
+        return false
+    }
+    let m1 = _cp(t, pos + 5) - 48
+    let m2 = _cp(t, pos + 6) - 48
+    if _digito(_cp(t, pos + 5)) == false or _digito(_cp(t, pos + 6)) == false {
+        return false
+    }
+    if (m1 == 0 and m2 >= 1) == false and (m1 == 1 and m2 <= 2) == false {
+        return false
+    }
+    let d1 = _cp(t, pos + 8) - 48
+    let d2 = _cp(t, pos + 9) - 48
+    if _digito(_cp(t, pos + 8)) == false or _digito(_cp(t, pos + 9)) == false {
+        return false
+    }
+    if (d1 == 0 and d2 >= 1) or d1 == 1 or d1 == 2 or (d1 == 3 and d2 <= 1) {
+        return true
+    }
+    return false
+}
+
+# ¿Empieza una hora (RE_LOCALTIME) en pos?
+fn _es_hora(t: T, pos: i32) -> bool {
+    let h1 = _cp(t, pos) - 48
+    let h2 = _cp(t, pos + 1) - 48
+    if _digito(_cp(t, pos)) == false or _digito(_cp(t, pos + 1)) == false {
+        return false
+    }
+    if (h1 <= 1) == false and (h1 == 2 and h2 <= 3) == false {
+        return false
+    }
+    if _cp(t, pos + 2) != 58 or _cp(t, pos + 5) != 58 {
+        return false
+    }
+    let a1 = _cp(t, pos + 3) - 48
+    let b1 = _cp(t, pos + 6) - 48
+    if _digito(_cp(t, pos + 3)) == false or _digito(_cp(t, pos + 4)) == false {
+        return false
+    }
+    if _digito(_cp(t, pos + 6)) == false or _digito(_cp(t, pos + 7)) == false {
+        return false
+    }
+    return a1 <= 5 and b1 <= 5
+}
+
+# Un par clave = valor: deja la clave en k y el valor (un nodo suelto, con el nombre de la
+# última parte de la clave) en r[0].
+fn _par(t: T, d: json.Doc, k: Clave, pos0: i32) -> Result<i32> {
+    let p1 = _clave(t, k, pos0)?
+    if _cp(t, p1) != 61 {
+        return Err(_err(t, p1, "se esperaba '=' después de la clave"))
+    }
+    let p2 = _ws(t, p1 + 1)
+    let p3 = _valor(t, d, p2, _kp(k, k.p.len() - 1))?
+    return Ok(p3)
+}
+
+fn _matriz(t: T, d: json.Doc, pos0: i32, nombre: str) -> Result<i32> {
+    let arr = _nuevo(t, d, 4, nombre, "")
+    let mut pos = _salta_com(t, pos0 + 1)?
+    if _cp(t, pos) == 93 {
+        t.r.set(0, arr)
+        return Ok(pos + 1)
+    }
+    while true {
+        let q = _valor(t, d, pos, "")?
+        json.doc_enganchar(d, arr, _ult(t))
+        pos = _salta_com(t, q)?
+        let c = _cp(t, pos)
+        if c == 93 {
+            t.r.set(0, arr)
+            return Ok(pos + 1)
+        }
+        if c != 44 {
+            return Err(_err(t, pos, "arreglo sin cerrar"))
+        }
+        pos = _salta_com(t, pos + 1)?
+        if _cp(t, pos) == 93 {
+            t.r.set(0, arr)
+            return Ok(pos + 1)
+        }
+    }
+    return Ok(pos)
+}
+
+fn _en_linea(t: T, d: json.Doc, pos0: i32, nombre: str) -> Result<i32> {
+    let tabla = _nuevo(t, d, 5, nombre, "")
+    let mut pos = _ws(t, pos0 + 1)
+    if _cp(t, pos) == 125 {
+        t.r.set(0, tabla)
+        return Ok(pos + 1)
+    }
+    while true {
+        let k = _clave_nueva()
+        let q = _par(t, d, k, pos)?
+        let v = _ult(t)
+        let nk = k.p.len()
+        _resolver(t, d, tabla, k, nk)
+        if _congelado(t) {
+            return Err(_err(t, q, "no se puede modificar un espacio de nombres inmutable"))
+        }
+        let nido = _nido(t, d, tabla, k, nk - 1, false)?
+        if json.hijo(d, nido, _kp(k, nk - 1)) >= 0 {
+            return Err(_err(t, q, "clave repetida en la tabla en línea"))
+        }
+        json.doc_enganchar(d, nido, v)
+        pos = _ws(t, q)
+        let c = _cp(t, pos)
+        if c == 125 {
+            t.r.set(0, tabla)
+            return Ok(pos + 1)
+        }
+        if c != 44 {
+            return Err(_err(t, pos, "tabla en línea sin cerrar"))
+        }
+        let tv = json.doc_tipo(d, v)
+        if tv == 4 or tv == 5 {
+            _marcar(t, v, 2)
+        }
+        pos = _ws(t, pos + 1)
+    }
+    return Ok(pos)
+}
+
+fn _valor(t: T, d: json.Doc, pos: i32, nombre: str) -> Result<i32> {
+    let c = _cp(t, pos)
+    if c == 34 {
+        if _cp(t, pos + 1) == 34 and _cp(t, pos + 2) == 34 {
+            let p = _multi(t, pos, false)?
+            return _nodo_texto(t, d, p, nombre)
+        }
+        let p = _basica(t, pos + 1, false)?
+        return _nodo_texto(t, d, p, nombre)
+    }
+    if c == 39 {
+        if _cp(t, pos + 1) == 39 and _cp(t, pos + 2) == 39 {
+            let p = _multi(t, pos, true)?
+            return _nodo_texto(t, d, p, nombre)
+        }
+        let p = _literal(t, pos)?
+        return _nodo_texto(t, d, p, nombre)
+    }
+    if c == 116 and _pref(t, pos, "true") {
+        let k = _nuevo(t, d, 1, nombre, "true")
+        t.r.set(0, k)
+        return Ok(pos + 4)
+    }
+    if c == 102 and _pref(t, pos, "false") {
+        let k = _nuevo(t, d, 1, nombre, "false")
+        t.r.set(0, k)
+        return Ok(pos + 5)
+    }
+    if c == 91 or c == 123 {
+        let prof = t.r.get(2).unwrap_or(0) + 1
+        if prof > 470 {
+            return Err(_err(t, pos, "demasiado anidado"))
+        }
+        t.r.set(2, prof)
+        let mut p = 0
+        if c == 91 {
+            let q = _matriz(t, d, pos, nombre)?
+            p = q
+        } else {
+            let q = _en_linea(t, d, pos, nombre)?
+            p = q
+        }
+        t.r.set(2, prof - 1)
+        return Ok(p)
+    }
+    if _es_fecha(t, pos) or _es_hora(t, pos) {
+        return Err(_err(t, pos, "las fechas y horas no están soportadas"))
+    }
+    let pn = _numero(t, d, pos, nombre)?
+    if pn >= 0 {
+        return Ok(pn)
+    }
+    if _pref(t, pos, "inf") {
+        return _num_nodo(t, d, pos + 3, nombre, "inf")
+    }
+    if _pref(t, pos, "nan") {
+        return _num_nodo(t, d, pos + 3, nombre, "nan")
+    }
+    if _pref(t, pos, "-inf") {
+        return _num_nodo(t, d, pos + 4, nombre, "-inf")
+    }
+    if _pref(t, pos, "+inf") {
+        return _num_nodo(t, d, pos + 4, nombre, "inf")
+    }
+    if _pref(t, pos, "-nan") or _pref(t, pos, "+nan") {
+        return _num_nodo(t, d, pos + 4, nombre, "nan")
+    }
+    return Err(_err(t, pos, "valor inválido"))
+}
+
+# ---- reglas del documento ----
+
+fn _regla_kv(t: T, d: json.Doc, header: Clave, pos0: i32) -> Result<i32> {
+    let k = _clave_nueva()
+    let pos = _par(t, d, k, pos0)?
+    let v = _ult(t)
+    let nk = k.p.len()
+    let nh = header.p.len()
+    let abs = _juntar(header, k)
+    let mut i = 1
+    while i < nk {
+        let nd = _resolver(t, d, 0, abs, nh + i)
+        if nd >= 0 and _marcado(t, nd, 1) {
+            return Err(_err(t, pos, "no se puede redefinir un espacio de nombres"))
+        }
+        i = i + 1
+    }
+    let m = nh + nk - 1
+    if m > 0 {
+        _resolver(t, d, 0, abs, m)
+        if _congelado(t) {
+            return Err(_err(t, pos, "no se puede modificar un espacio de nombres inmutable"))
+        }
+    }
+    let nido = _nido(t, d, 0, abs, m, true)?
+    if json.hijo(d, nido, _kp(k, nk - 1)) >= 0 {
+        return Err(_err(t, pos, "no se puede sobrescribir un valor"))
+    }
+    let tv = json.doc_tipo(d, v)
+    if tv == 4 or tv == 5 {
+        _marcar(t, v, 2)
+    }
+    json.doc_enganchar(d, nido, v)
+    i = 1
+    while i < nk {
+        t.pend.push(_resolver(t, d, 0, abs, nh + i))
+        i = i + 1
+    }
+    return Ok(pos)
+}
+
+fn _regla_tabla(t: T, d: json.Doc, k: Clave, pos0: i32) -> Result<i32> {
+    let p0 = _ws(t, pos0 + 1)
+    let pos = _clave(t, k, p0)?
+    let nk = k.p.len()
+    let nodo = _resolver(t, d, 0, k, nk)
+    if _congelado(t) or (nodo >= 0 and _marcado(t, nodo, 1)) {
+        return Err(_err(t, pos, "la tabla ya se declaró"))
+    }
+    _nido(t, d, 0, k, nk, true)?
+    let sello = _resolver(t, d, 0, k, nk)
+    _marcar(t, sello, 1)
+    if _cp(t, pos) != 93 {
+        return Err(_err(t, pos, "se esperaba ']' al final de la declaración de la tabla"))
+    }
+    return Ok(pos + 1)
+}
+
+fn _regla_lista(t: T, d: json.Doc, k: Clave, pos0: i32) -> Result<i32> {
+    let p0 = _ws(t, pos0 + 2)
+    let pos = _clave(t, k, p0)?
+    let nk = k.p.len()
+    _resolver(t, d, 0, k, nk)
+    if _congelado(t) {
+        return Err(_err(t, pos, "no se puede modificar un espacio de nombres inmutable"))
+    }
+    let padre = _nido(t, d, 0, k, nk - 1, true)?
+    let nom = _kp(k, nk - 1)
+    let mut arr = json.hijo(d, padre, nom)
+    if arr >= 0 {
+        if json.doc_tipo(d, arr) != 4 {
+            return Err(_err(t, pos, "no se puede sobrescribir un valor"))
+        }
+    } else {
+        arr = _nuevo(t, d, 4, nom, "")
+        json.doc_enganchar(d, padre, arr)
+    }
+    let el = _nuevo(t, d, 5, "", "")
+    json.doc_enganchar(d, arr, el)
+    _marcar(t, arr, 1)
+    if _cp(t, pos) != 93 or _cp(t, pos + 1) != 93 {
+        return Err(_err(t, pos, "se esperaba ']]' al final de la declaración del arreglo"))
+    }
+    return Ok(pos + 2)
+}
+
+fn _finalizar(t: T) {
+    while let Some(k) = t.pend.pop() {
+        _marcar(t, k, 1)
+    }
+}
+
+fn _programa(t: T, d: json.Doc) -> Result<i32> {
+    let mut header = _clave_nueva()
+    let mut pos = 0
+    while true {
+        pos = _ws(t, pos)
+        let c = _cp(t, pos)
+        if c < 0 {
+            return Ok(0)
+        }
+        if c == 10 {
+            pos = pos + 1
+        } else {
+            if _bare(c) or c == 34 or c == 39 {
+                let p = _regla_kv(t, d, header, pos)?
+                pos = _ws(t, p)
+            } else if c == 91 {
+                _finalizar(t)
+                let nueva = _clave_nueva()
+                if _cp(t, pos + 1) == 91 {
+                    let p = _regla_lista(t, d, nueva, pos)?
+                    pos = p
+                } else {
+                    let p = _regla_tabla(t, d, nueva, pos)?
+                    pos = p
+                }
+                header = nueva
+                pos = _ws(t, pos)
+            } else if c != 35 {
+                return Err(_err(t, pos, "instrucción inválida"))
+            }
+            let p = _comentario(t, pos)?
+            pos = p
+            let c2 = _cp(t, pos)
+            if c2 < 0 {
+                return Ok(0)
+            }
+            if c2 != 10 {
+                return Err(_err(t, pos, "se esperaba un salto de línea o el fin del documento después de la instrucción"))
+            }
+            pos = pos + 1
+        }
+    }
+    return Ok(0)
+}
+
+# Lee un TOML como tomllib.loads (sin fechas ni horas). Árbol: la raíz es un objeto.
+fn leer_toml(contenido: str) -> Result<json.Doc> {
+    let src = if texto.contiene(contenido, "\r\n") { texto.reemplazar(contenido, "\r\n", "\n") } else { contenido }
+    let n = len(src)
+    let c: Vec<i32> = vec_new()
+    let mut i = 0
+    while i < n {
+        c.push(ord(src[i]))
+        i = i + 1
+    }
+    let fl: Vec<i32> = vec_new()
+    let pend: Vec<i32> = vec_new()
+    let r: Vec<i32> = vec_new()
+    r.push(0 - 1)
+    r.push(0)
+    r.push(0)
+    let s: Vec<str> = vec_new()
+    s.push("")
+    s.push("")
+    let t = T { src: src, c: c, n: n, fl: fl, pend: pend, r: r, s: s }
+    let d = json.doc_vacio()
+    _nuevo(t, d, 5, "", "")
+    _programa(t, d)?
+    return Ok(d)
+}
+
+fn leer_toml_archivo(ruta: str) -> Result<json.Doc> {
+    return leer_toml(_leer_texto(ruta)?)
+}
+
+# ---------------------------------------------------------------------------
+# TOML: escribir
+# ---------------------------------------------------------------------------
+
+fn _hex2(n: i32) -> str {
+    let digitos = "0123456789ABCDEF"
+    return "00" + digitos[(n >> 4) & 15] + digitos[n & 15]
+}
+
+fn _cadena_toml(s: str) -> str {
+    let mut r = "\""
+    let n = len(s)
+    let mut i = 0
+    while i < n {
+        let c = s[i]
+        let o = ord(c)
+        if o == 34 {
+            r = r + "\\\""
+        } else if o == 92 {
+            r = r + "\\\\"
+        } else if o == 8 {
+            r = r + "\\b"
+        } else if o == 9 {
+            r = r + "\\t"
+        } else if o == 10 {
+            r = r + "\\n"
+        } else if o == 12 {
+            r = r + "\\f"
+        } else if o == 13 {
+            r = r + "\\r"
+        } else if o < 32 or o == 127 {
+            r = r + "\\u" + _hex2(o)
+        } else {
+            r = r + c
+        }
+        i = i + 1
+    }
+    return r + "\""
+}
+
+fn _clave_toml(s: str) -> str {
+    let n = len(s)
+    if n == 0 {
+        return "\"\""
+    }
+    let mut i = 0
+    while i < n {
+        if _bare(ord(s[i])) == false {
+            return _cadena_toml(s)
+        }
+        i = i + 1
+    }
+    return s
+}
+
+fn _es_lista_de_tablas(d: json.Doc, h: i32) -> bool {
+    if json.doc_tipo(d, h) != 4 or json.doc_campo(d, 3, h) == 0 {
+        return false
+    }
+    let mut e = json.doc_campo(d, 0, h)
+    while e >= 0 {
+        if json.doc_tipo(d, e) != 5 {
+            return false
+        }
+        e = json.doc_campo(d, 2, e)
+    }
+    return true
+}
+
+fn _numero_valido(s: str) -> bool {
+    let r = leer_toml("v = " + s)
+    return r.is_ok()
+}
+
+# Un valor en una sola línea (dentro de un arreglo o una tabla en línea).
+fn _valor_toml(d: json.Doc, h: i32, o: Sal) -> Result<i32> {
+    let t = json.doc_tipo(d, h)
+    if t == 3 {
+        o.partes.push(_cadena_toml(json.doc_valor(d, h)))
+        return Ok(0)
+    }
+    if t == 2 {
+        let v = json.doc_valor(d, h)
+        if _numero_valido(v) == false {
+            return Err("config: '" + v + "' no es un número válido en TOML")
+        }
+        o.partes.push(v)
+        return Ok(0)
+    }
+    if t == 1 {
+        o.partes.push(json.doc_valor(d, h))
+        return Ok(0)
+    }
+    if t == 4 {
+        o.partes.push("[")
+        let mut e = json.doc_campo(d, 0, h)
+        let mut primero = true
+        while e >= 0 {
+            if primero == false {
+                o.partes.push(", ")
+            }
+            primero = false
+            _valor_toml(d, e, o)?
+            e = json.doc_campo(d, 2, e)
+        }
+        o.partes.push("]")
+        return Ok(0)
+    }
+    if t == 5 {
+        if json.doc_campo(d, 3, h) == 0 {
+            o.partes.push("{}")
+            return Ok(0)
+        }
+        o.partes.push("{ ")
+        let mut e = json.doc_campo(d, 0, h)
+        let mut primero = true
+        while e >= 0 {
+            if primero == false {
+                o.partes.push(", ")
+            }
+            primero = false
+            o.partes.push(_clave_toml(json.doc_nombre(d, e)) + " = ")
+            _valor_toml(d, e, o)?
+            e = json.doc_campo(d, 2, e)
+        }
+        o.partes.push(" }")
+        return Ok(0)
+    }
+    return Err("config: TOML no tiene valor nulo ('" + json.doc_nombre(d, h) + "')")
+}
+
+fn _encabezado(o: Sal, texto_h: str) {
+    if o.escrito {
+        o.partes.push("\n")
+    }
+    o.partes.push(texto_h + "\n")
+    o.escrito = true
+}
+
+fn _cuerpo_toml(d: json.Doc, nodo: i32, ruta: str, o: Sal) -> Result<i32> {
+    let mut h = json.doc_campo(d, 0, nodo)
+    while h >= 0 {
+        let t = json.doc_tipo(d, h)
+        if t != 5 and _es_lista_de_tablas(d, h) == false {
+            o.partes.push(_clave_toml(json.doc_nombre(d, h)) + " = ")
+            _valor_toml(d, h, o)?
+            o.partes.push("\n")
+            o.escrito = true
+        }
+        h = json.doc_campo(d, 2, h)
+    }
+    h = json.doc_campo(d, 0, nodo)
+    while h >= 0 {
+        let t = json.doc_tipo(d, h)
+        let nombre = _clave_toml(json.doc_nombre(d, h))
+        let sub = if len(ruta) == 0 { nombre } else { ruta + "." + nombre }
+        if t == 5 {
+            _encabezado(o, "[" + sub + "]")
+            _cuerpo_toml(d, h, sub, o)?
+        } else if _es_lista_de_tablas(d, h) {
+            let mut e = json.doc_campo(d, 0, h)
+            while e >= 0 {
+                _encabezado(o, "[[" + sub + "]]")
+                _cuerpo_toml(d, e, sub, o)?
+                e = json.doc_campo(d, 2, e)
+            }
+        }
+        h = json.doc_campo(d, 2, h)
+    }
+    return Ok(0)
+}
+
+# Escribe el árbol como TOML: primero los valores sueltos de cada tabla, después sus
+# subtablas ([a.b]) y los arreglos de tablas ([[a]]); los demás arreglos y las tablas
+# dentro de arreglos, en una línea. Lo que escribe lo lee leer_toml (y tomllib) igual.
+fn escribir_toml(d: json.Doc) -> Result<str> {
+    if json.doc_tipo(d, 0) != 5 {
+        return Err("config: el TOML tiene que ser un objeto")
+    }
+    let o = _sal()
+    _cuerpo_toml(d, 0, "", o)?
+    return Ok(_juntar_partes(o.partes))
+}

@@ -1,0 +1,83 @@
+# lib/fecha, probada con
+# lib/prueba.
+#
+# El calendario (bisiestos, días por mes, día de la semana, 1970 y antes),
+# instantes y fechas, sumar días y meses, diferencias, ISO 8601 al leer y al
+# escribir, formato en español, y las zonas de Chile en los dos cambios de
+# hora (incluidas la hora que no existe y la que pasa dos veces, y 2022).
+# La comparación grande con datetime y zoneinfo está en
+# pruebas/test_fecha_python.py. Termina con el código de salida de prueba.
+
+use "prueba"
+use "fecha"
+
+fn main() -> i32 {
+    let t = prueba.nueva("fecha")
+
+    prueba.seccion(t, "calendario")
+    prueba.afirmar(t, fecha.es_bisiesto(2024) and fecha.es_bisiesto(2000) and not fecha.es_bisiesto(1900), "bisiestos")
+    prueba.afirmar_igual_i32(t, fecha.dias_del_mes(2024, 2), 29, "febrero bisiesto")
+    prueba.afirmar_igual_i32(t, fecha.dias_del_mes(2023, 2), 28, "febrero")
+    prueba.afirmar_igual_i32(t, fecha.dias_del_mes(2026, 9), 30, "septiembre")
+    prueba.afirmar_igual_i64(t, fecha.dias_desde_civil(1970, 1, 1), 0, "el día 0")
+    prueba.afirmar_igual_i64(t, fecha.dias_desde_civil(2000, 3, 1), 11017, "2000-03-01")
+    prueba.afirmar_igual_i32(t, fecha.dia_semana(fecha.fecha(2026, 10, 26, 0, 0, 0)), 1, "26-10-2026 es lunes")
+    prueba.afirmar_igual_i32(t, fecha.dia_semana(fecha.fecha(1969, 12, 31, 0, 0, 0)), 3, "31-12-1969 fue miércoles")
+    prueba.afirmar_igual_i32(t, fecha.dia_del_anio(fecha.fecha(2024, 12, 31, 0, 0, 0)), 366, "día 366")
+
+    prueba.seccion(t, "instantes")
+    prueba.afirmar_igual_str(t, fecha.iso(0), "1970-01-01T00:00:00Z", "el instante 0")
+    prueba.afirmar_igual_str(t, fecha.iso(0 - 1), "1969-12-31T23:59:59Z", "un segundo antes")
+    prueba.afirmar_igual_str(t, fecha.iso(1700000000), "2023-11-14T22:13:20Z", "1700000000")
+    prueba.afirmar_igual_i64(t, fecha.a_segundos(fecha.fecha(2038, 1, 19, 3, 14, 8)), 2147483648, "2038, después del i32")
+    let f = fecha.fecha(2024, 1, 31, 10, 0, 0)
+    prueba.afirmar_igual_str(t, fecha.formato(fecha.sumar_meses(f, 1), "%Y-%m-%d"), "2024-02-29", "31 de enero más un mes")
+    prueba.afirmar_igual_str(t, fecha.formato(fecha.sumar_meses(f, 0 - 2), "%Y-%m-%d"), "2023-11-30", "menos dos meses")
+    prueba.afirmar_igual_str(t, fecha.formato(fecha.sumar_dias(f, 30), "%Y-%m-%d %H:%M"), "2024-03-01 10:00", "más 30 días")
+    prueba.afirmar_igual_i64(t, fecha.diferencia_dias(fecha.fecha(2026, 1, 1, 0, 0, 0), fecha.fecha(2026, 12, 25, 0, 0, 0)), 358,
+                             "días hasta navidad")
+    prueba.afirmar_igual_i64(t, fecha.diferencia_dias(fecha.fecha(2026, 1, 2, 0, 0, 0), fecha.fecha(2026, 1, 1, 12, 0, 0)), 0 - 1,
+                             "diferencia negativa, hacia abajo")
+
+    prueba.seccion(t, "ISO 8601")
+    match fecha.de_iso("2026-10-26T16:30:00-03:00") {
+        Ok(s) => { prueba.afirmar_igual_str(t, fecha.iso(s), "2026-10-26T19:30:00Z", "con desfase") }
+        Err(e) => { prueba.afirmar(t, false, e) }
+    }
+    match fecha.de_iso("2026-10-26 16:30:05.75Z") {
+        Ok(s) => { prueba.afirmar_igual_str(t, fecha.iso(s), "2026-10-26T16:30:05Z", "con espacio, fracción y Z") }
+        Err(e) => { prueba.afirmar(t, false, e) }
+    }
+    match fecha.de_iso("2026-10-26") {
+        Ok(s) => { prueba.afirmar_igual_str(t, fecha.iso(s), "2026-10-26T00:00:00Z", "solo la fecha") }
+        Err(e) => { prueba.afirmar(t, false, e) }
+    }
+    prueba.afirmar(t, fecha.de_iso("2023-02-29").is_err(), "29 de febrero de un año común")
+    prueba.afirmar(t, fecha.de_iso("2026-10-26T24:00").is_err(), "hora 24")
+
+    prueba.seccion(t, "formato")
+    let g = fecha.fecha(2026, 9, 18, 9, 5, 3)
+    prueba.afirmar_igual_str(t, fecha.formato(g, "%A %d de %B de %Y, %H:%M:%S"), "viernes 18 de septiembre de 2026, 09:05:03", "largo")
+    prueba.afirmar_igual_str(t, fecha.formato(g, "%a %b %j %%"), "vie sep 261 %", "corto")
+
+    prueba.seccion(t, "Chile")
+    let chile = fecha.chile()
+    # 2026: el verano termina el domingo 5 de abril a las 03:00 UTC y empieza el 6 de septiembre a las 04:00 UTC
+    prueba.afirmar_igual_i32(t, fecha.desfase(chile, fecha.a_segundos(fecha.fecha(2026, 4, 5, 2, 59, 59))), 0 - 180, "verano")
+    prueba.afirmar_igual_i32(t, fecha.desfase(chile, fecha.a_segundos(fecha.fecha(2026, 4, 5, 3, 0, 0))), 0 - 240, "invierno")
+    prueba.afirmar_igual_i32(t, fecha.desfase(chile, fecha.a_segundos(fecha.fecha(2026, 9, 6, 4, 0, 0))), 0 - 180, "verano otra vez")
+    prueba.afirmar_igual_i32(t, fecha.desfase(fecha.pascua(), fecha.a_segundos(fecha.fecha(2026, 7, 1, 0, 0, 0))), 0 - 360, "Pascua en invierno")
+    prueba.afirmar_igual_i32(t, fecha.desfase(fecha.magallanes(), fecha.a_segundos(fecha.fecha(2026, 7, 1, 0, 0, 0))), 0 - 180, "Magallanes")
+    # 2022: el verano empezó el 11 de septiembre, no el 4
+    prueba.afirmar_igual_i32(t, fecha.desfase(chile, fecha.a_segundos(fecha.fecha(2022, 9, 5, 12, 0, 0))), 0 - 240, "2022, todavía invierno")
+    # las 23:30 del sábado 4 de abril pasan dos veces: la primera (verano)
+    prueba.afirmar_igual_str(t, fecha.iso(fecha.instante(fecha.fecha(2026, 4, 4, 23, 30, 0), chile)), "2026-04-05T02:30:00Z",
+                             "la hora que pasa dos veces")
+    # las 00:30 del domingo 6 de septiembre no existen: con el desfase de antes
+    prueba.afirmar_igual_str(t, fecha.iso(fecha.instante(fecha.fecha(2026, 9, 6, 0, 30, 0), chile)), "2026-09-06T04:30:00Z",
+                             "la hora que no existe")
+    prueba.afirmar_igual_str(t, fecha.iso_local(fecha.a_segundos(fecha.fecha(2026, 10, 26, 19, 30, 0)), chile),
+                             "2026-10-26T16:30:00-03:00", "iso con desfase")
+
+    return prueba.terminar(t)
+}

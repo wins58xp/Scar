@@ -1,0 +1,739 @@
+# lib/grafos.scar: grafos con pesos y búsqueda de caminos (use "grafos").
+#
+#   use "grafos"
+#
+#   let g = grafos.grafo(5, false)                 # 5 nodos (0 a 4), sin dirección
+#   grafos.arista(g, 0, 1, 2.0)
+#   grafos.arista(g, 1, 2, 1.5)
+#   let c = grafos.dijkstra(g, 0)                  # los caminos más cortos desde el nodo 0
+#   print(grafos.distancia(c, 2))                  # 3.5
+#   let ruta = grafos.camino(c, 2)                 # [0, 1, 2]
+#
+#   let mapa = grafos.grilla(40, 30)               # para juegos: una grilla con paredes
+#   grafos.pared(mapa, 10, 5)
+#   let pasos = grafos.a_estrella(mapa, 0, 0, 39, 29, false)   # casillas (y * ancho + x) del camino
+#
+# Qué hay:
+# - Grafo: n nodos numerados desde 0 y aristas con peso, dirigidas o no (en uno sin dirección cada
+#   arista sirve para los dos lados). Los vecinos de un nodo salen en el orden en que se agregaron
+#   las aristas, así que todos los resultados son siempre los mismos.
+# - bfs (cuántas aristas hay hasta cada nodo), recorrido_ancho y recorrido_profundo (en qué orden
+#   se visitan los nodos; el de profundidad es el mismo que haría la versión recursiva).
+# - dijkstra: distancias y caminos más cortos desde un nodo (los pesos no pueden ser negativos).
+# - componentes: a qué grupo conectado pertenece cada nodo (en uno dirigido, sin mirar la dirección).
+# - orden_topologico: los nodos de un grafo dirigido de modo que toda arista vaya de uno anterior a
+#   uno posterior (error si hay un ciclo).
+# - arbol_minimo: las aristas de menor peso total que conectan todo lo que se puede conectar
+#   (Kruskal; en un grafo con varios grupos, un árbol por grupo).
+# - Grilla y a_estrella: el camino más corto entre dos casillas libres, en 4 direcciones (cada paso
+#   cuesta 1) o en 8 (en diagonal cuesta raíz de 2 y no se cortan esquinas de paredes).
+
+struct Grafo {
+    n: i32
+    dirigido: bool
+    # las aristas como se agregaron
+    desde: Vec<i32>
+    hasta: Vec<i32>
+    peso: Vec<f64>
+    # listas de vecinos encadenadas: los arcos (dos por arista si no es dirigido)
+    primero: Vec<i32>
+    ultimo: Vec<i32>
+    arco_sig: Vec<i32>
+    arco_dest: Vec<i32>
+    arco_arista: Vec<i32>
+}
+
+fn grafo(n: i32, dirigido: bool) -> Grafo {
+    let g = Grafo {
+        n: 0, dirigido: dirigido, desde: vec_new(), hasta: vec_new(), peso: vec_new(), primero: vec_new(),
+        ultimo: vec_new(), arco_sig: vec_new(), arco_dest: vec_new(), arco_arista: vec_new()
+    }
+    for i in 0..n {
+        agregar_nodo(g)
+    }
+    return g
+}
+
+# Agrega un nodo y devuelve su número.
+fn agregar_nodo(g: Grafo) -> i32 {
+    g.primero.push(0 - 1)
+    g.ultimo.push(0 - 1)
+    g.n = g.n + 1
+    return g.n - 1
+}
+
+fn nodos(g: Grafo) -> i32 {
+    return g.n
+}
+
+fn aristas(g: Grafo) -> i32 {
+    return g.desde.len()
+}
+
+fn _arco(g: Grafo, a: i32, b: i32, e: i32) {
+    let k = g.arco_dest.len()
+    g.arco_dest.push(b)
+    g.arco_sig.push(0 - 1)
+    g.arco_arista.push(e)
+    let u = g.ultimo.get(a).unwrap_or(0 - 1)
+    if u < 0 {
+        g.primero.set(a, k)
+    } else {
+        g.arco_sig.set(u, k)
+    }
+    g.ultimo.set(a, k)
+}
+
+# arista(g, a, b, peso): une a con b (y b con a si el grafo no es dirigido). Devuelve el número de la
+# arista. Si a o b no son nodos del grafo es un panic.
+fn arista(g: Grafo, a: i32, b: i32, peso: f64) -> i32 {
+    if a < 0 or b < 0 or a >= g.n or b >= g.n {
+        panic("grafos.arista: nodo fuera del grafo")
+    }
+    let e = g.desde.len()
+    g.desde.push(a)
+    g.hasta.push(b)
+    g.peso.push(peso)
+    _arco(g, a, b, e)
+    if not g.dirigido and a != b {
+        _arco(g, b, a, e)
+    }
+    return e
+}
+
+fn arista_desde(g: Grafo, e: i32) -> i32 {
+    return g.desde.get(e).unwrap_or(0 - 1)
+}
+
+fn arista_hasta(g: Grafo, e: i32) -> i32 {
+    return g.hasta.get(e).unwrap_or(0 - 1)
+}
+
+fn arista_peso(g: Grafo, e: i32) -> f64 {
+    return g.peso.get(e).unwrap_or(0.0)
+}
+
+# Los vecinos de v (a donde se puede ir desde v), en el orden en que se agregaron.
+fn vecinos(g: Grafo, v: i32) -> Vec<i32> {
+    let r: Vec<i32> = vec_new()
+    let mut k = g.primero.get(v).unwrap_or(0 - 1)
+    while k >= 0 {
+        r.push(g.arco_dest.get(k).unwrap_or(0))
+        k = g.arco_sig.get(k).unwrap_or(0 - 1)
+    }
+    return r
+}
+
+fn _llenos(n: i32, v: i32) -> Vec<i32> {
+    let r: Vec<i32> = vec_new()
+    for i in 0..n {
+        r.push(v)
+    }
+    return r
+}
+
+# ---- recorridos ----------------------------------------------------------------------------
+
+# bfs(g, origen) -> Vec<i32>: cuántas aristas hay que cruzar como mínimo para llegar a cada nodo
+# (-1 si no se llega).
+fn bfs(g: Grafo, origen: i32) -> Vec<i32> {
+    let dist = _llenos(g.n, 0 - 1)
+    let cola: Vec<i32> = vec_new()
+    dist.set(origen, 0)
+    cola.push(origen)
+    let mut i = 0
+    while i < cola.len() {
+        let v = cola.get(i).unwrap_or(0)
+        i = i + 1
+        let mut k = g.primero.get(v).unwrap_or(0 - 1)
+        while k >= 0 {
+            let w = g.arco_dest.get(k).unwrap_or(0)
+            if dist.get(w).unwrap_or(0) < 0 {
+                dist.set(w, dist.get(v).unwrap_or(0) + 1)
+                cola.push(w)
+            }
+            k = g.arco_sig.get(k).unwrap_or(0 - 1)
+        }
+    }
+    return dist
+}
+
+# recorrido_ancho(g, origen) -> Vec<i32>: los nodos alcanzables, en el orden en que los visita una
+# búsqueda en anchura.
+fn recorrido_ancho(g: Grafo, origen: i32) -> Vec<i32> {
+    let visto = _llenos(g.n, 0)
+    let cola: Vec<i32> = vec_new()
+    visto.set(origen, 1)
+    cola.push(origen)
+    let mut i = 0
+    while i < cola.len() {
+        let v = cola.get(i).unwrap_or(0)
+        i = i + 1
+        let mut k = g.primero.get(v).unwrap_or(0 - 1)
+        while k >= 0 {
+            let w = g.arco_dest.get(k).unwrap_or(0)
+            if visto.get(w).unwrap_or(1) == 0 {
+                visto.set(w, 1)
+                cola.push(w)
+            }
+            k = g.arco_sig.get(k).unwrap_or(0 - 1)
+        }
+    }
+    return cola
+}
+
+# recorrido_profundo(g, origen) -> Vec<i32>: los nodos alcanzables en el orden en que los visita una
+# búsqueda en profundidad (el mismo de la versión recursiva, pero sin recursión: no se queda sin pila
+# con grafos grandes).
+fn recorrido_profundo(g: Grafo, origen: i32) -> Vec<i32> {
+    let visto = _llenos(g.n, 0)
+    let orden: Vec<i32> = vec_new()
+    # la pila guarda el nodo y el próximo arco que le falta mirar
+    let pila_v: Vec<i32> = vec_new()
+    let pila_k: Vec<i32> = vec_new()
+    visto.set(origen, 1)
+    orden.push(origen)
+    pila_v.push(origen)
+    pila_k.push(g.primero.get(origen).unwrap_or(0 - 1))
+    while pila_v.len() > 0 {
+        let tope = pila_v.len() - 1
+        let k = pila_k.get(tope).unwrap_or(0 - 1)
+        if k < 0 {
+            let a = pila_v.pop()
+            let b = pila_k.pop()
+        } else {
+            pila_k.set(tope, g.arco_sig.get(k).unwrap_or(0 - 1))
+            let w = g.arco_dest.get(k).unwrap_or(0)
+            if visto.get(w).unwrap_or(1) == 0 {
+                visto.set(w, 1)
+                orden.push(w)
+                pila_v.push(w)
+                pila_k.push(g.primero.get(w).unwrap_or(0 - 1))
+            }
+        }
+    }
+    return orden
+}
+
+# componentes(g) -> Vec<i32>: para cada nodo, el número de su grupo conectado. Los grupos se numeran
+# desde 0 en el orden de su nodo más chico. En un grafo dirigido no se mira la dirección.
+fn componentes(g: Grafo) -> Vec<i32> {
+    let cj = _conjuntos(g.n)
+    for e in 0..g.desde.len() {
+        _unir(cj, g.desde.get(e).unwrap_or(0), g.hasta.get(e).unwrap_or(0))
+    }
+    let nombre = _llenos(g.n, 0 - 1)
+    let r = _llenos(g.n, 0)
+    let mut siguiente = 0
+    for i in 0..g.n {
+        let raiz = _raiz(cj, i)
+        if nombre.get(raiz).unwrap_or(0) < 0 {
+            nombre.set(raiz, siguiente)
+            siguiente = siguiente + 1
+        }
+        r.set(i, nombre.get(raiz).unwrap_or(0))
+    }
+    return r
+}
+
+# cuántos grupos conectados hay
+fn cantidad_componentes(g: Grafo) -> i32 {
+    let c = componentes(g)
+    let mut m = 0
+    for i in 0..c.len() {
+        m = max(m, c.get(i).unwrap_or(0) + 1)
+    }
+    return m
+}
+
+# conjuntos disjuntos con compresión de camino (a medias: cada nodo apunta a su abuelo)
+struct Conjuntos {
+    padre: Vec<i32>
+}
+
+fn _conjuntos(n: i32) -> Conjuntos {
+    let p = _llenos(n, 0)
+    for i in 0..n {
+        p.set(i, i)
+    }
+    return Conjuntos { padre: p }
+}
+
+fn _raiz(cj: Conjuntos, v0: i32) -> i32 {
+    let mut v = v0
+    while cj.padre.get(v).unwrap_or(v) != v {
+        let p = cj.padre.get(v).unwrap_or(v)
+        cj.padre.set(v, cj.padre.get(p).unwrap_or(p))
+        v = cj.padre.get(v).unwrap_or(v)
+    }
+    return v
+}
+
+# une los grupos de a y b; true si estaban separados
+fn _unir(cj: Conjuntos, a: i32, b: i32) -> bool {
+    let ra = _raiz(cj, a)
+    let rb = _raiz(cj, b)
+    if ra == rb {
+        return false
+    }
+    if ra < rb {
+        cj.padre.set(rb, ra)
+    } else {
+        cj.padre.set(ra, rb)
+    }
+    return true
+}
+
+# orden_topologico(g) -> Result<Vec<i32>>: los nodos de modo que cada arista vaya de uno anterior a
+# uno posterior (entre los que están listos sale primero el que se liberó antes, y al principio el de
+# número menor). Error si el grafo tiene un ciclo (o si no es dirigido y tiene alguna arista).
+fn orden_topologico(g: Grafo) -> Result<Vec<i32>> {
+    let entrantes = _llenos(g.n, 0)
+    for k in 0..g.arco_dest.len() {
+        let w = g.arco_dest.get(k).unwrap_or(0)
+        entrantes.set(w, entrantes.get(w).unwrap_or(0) + 1)
+    }
+    let cola: Vec<i32> = vec_new()
+    for v in 0..g.n {
+        if entrantes.get(v).unwrap_or(0) == 0 {
+            cola.push(v)
+        }
+    }
+    let mut i = 0
+    while i < cola.len() {
+        let v = cola.get(i).unwrap_or(0)
+        i = i + 1
+        let mut k = g.primero.get(v).unwrap_or(0 - 1)
+        while k >= 0 {
+            let w = g.arco_dest.get(k).unwrap_or(0)
+            entrantes.set(w, entrantes.get(w).unwrap_or(0) - 1)
+            if entrantes.get(w).unwrap_or(0) == 0 {
+                cola.push(w)
+            }
+            k = g.arco_sig.get(k).unwrap_or(0 - 1)
+        }
+    }
+    if cola.len() < g.n {
+        return Err("grafos.orden_topologico: el grafo tiene un ciclo")
+    }
+    return Ok(cola)
+}
+
+# ---- cola de prioridad (montículo binario de mínimos) ---------------------------------------
+
+struct Monticulo {
+    clave: Vec<f64>
+    orden: Vec<i32>
+    valor: Vec<i32>
+    n: i32
+    contador: i32
+}
+
+fn _monticulo() -> Monticulo {
+    return Monticulo { clave: vec_new(), orden: vec_new(), valor: vec_new(), n: 0, contador: 0 }
+}
+
+# a va antes que b: menor clave, y a igual clave el que entró primero (así el resultado no depende de
+# cómo se acomoda el montículo)
+fn _antes(h: Monticulo, a: i32, b: i32) -> bool {
+    let ka = h.clave.get(a).unwrap_or(0.0)
+    let kb = h.clave.get(b).unwrap_or(0.0)
+    if ka != kb {
+        return ka < kb
+    }
+    return h.orden.get(a).unwrap_or(0) < h.orden.get(b).unwrap_or(0)
+}
+
+fn _cambiar(h: Monticulo, a: i32, b: i32) {
+    let k = h.clave.get(a).unwrap_or(0.0)
+    let o = h.orden.get(a).unwrap_or(0)
+    let v = h.valor.get(a).unwrap_or(0)
+    h.clave.set(a, h.clave.get(b).unwrap_or(0.0))
+    h.orden.set(a, h.orden.get(b).unwrap_or(0))
+    h.valor.set(a, h.valor.get(b).unwrap_or(0))
+    h.clave.set(b, k)
+    h.orden.set(b, o)
+    h.valor.set(b, v)
+}
+
+fn _meter(h: Monticulo, clave: f64, valor: i32) {
+    if h.n < h.clave.len() {
+        h.clave.set(h.n, clave)
+        h.orden.set(h.n, h.contador)
+        h.valor.set(h.n, valor)
+    } else {
+        h.clave.push(clave)
+        h.orden.push(h.contador)
+        h.valor.push(valor)
+    }
+    h.contador = h.contador + 1
+    let mut i = h.n
+    h.n = h.n + 1
+    while i > 0 {
+        let p = (i - 1) / 2
+        if _antes(h, i, p) {
+            _cambiar(h, i, p)
+            i = p
+        } else {
+            i = 0
+        }
+    }
+}
+
+# saca el primero y devuelve su valor (antes de llamarla, h.n > 0); su clave queda en h.clave[h.n]
+fn _sacar(h: Monticulo) -> i32 {
+    let v = h.valor.get(0).unwrap_or(0)
+    h.n = h.n - 1
+    _cambiar(h, 0, h.n)
+    let mut i = 0
+    let mut sigue = true
+    while sigue {
+        let a = 2 * i + 1
+        let b = 2 * i + 2
+        let mut m = i
+        if a < h.n and _antes(h, a, m) {
+            m = a
+        }
+        if b < h.n and _antes(h, b, m) {
+            m = b
+        }
+        if m == i {
+            sigue = false
+        } else {
+            _cambiar(h, i, m)
+            i = m
+        }
+    }
+    return v
+}
+
+# ---- caminos más cortos ------------------------------------------------------------------
+
+# El resultado de dijkstra: la distancia a cada nodo y de qué nodo se llega (-1 en el origen y en los
+# que no se alcanzan).
+struct Caminos {
+    origen: i32
+    dist: Vec<f64>
+    previo: Vec<i32>
+    llega: Vec<i32>
+}
+
+# dijkstra(g, origen) -> Caminos. Los pesos negativos no están permitidos (es un panic).
+fn dijkstra(g: Grafo, origen: i32) -> Caminos {
+    for e in 0..g.peso.len() {
+        if g.peso.get(e).unwrap_or(0.0) < 0.0 {
+            panic("grafos.dijkstra: hay una arista con peso negativo")
+        }
+    }
+    let dist: Vec<f64> = vec_new()
+    for i in 0..g.n {
+        dist.push(0.0)
+    }
+    let previo = _llenos(g.n, 0 - 1)
+    let llega = _llenos(g.n, 0)
+    let listo = _llenos(g.n, 0)
+    let h = _monticulo()
+    llega.set(origen, 1)
+    _meter(h, 0.0, origen)
+    while h.n > 0 {
+        let v = _sacar(h)
+        if listo.get(v).unwrap_or(1) == 0 {
+            listo.set(v, 1)
+            let dv = dist.get(v).unwrap_or(0.0)
+            let mut k = g.primero.get(v).unwrap_or(0 - 1)
+            while k >= 0 {
+                let w = g.arco_dest.get(k).unwrap_or(0)
+                let nd = dv + g.peso.get(g.arco_arista.get(k).unwrap_or(0)).unwrap_or(0.0)
+                if listo.get(w).unwrap_or(1) == 0 and (llega.get(w).unwrap_or(0) == 0 or nd < dist.get(w).unwrap_or(0.0)) {
+                    llega.set(w, 1)
+                    dist.set(w, nd)
+                    previo.set(w, v)
+                    _meter(h, nd, w)
+                }
+                k = g.arco_sig.get(k).unwrap_or(0 - 1)
+            }
+        }
+    }
+    return Caminos { origen: origen, dist: dist, previo: previo, llega: llega }
+}
+
+# alcanza(c, v) -> bool: se puede llegar a v desde el origen.
+fn alcanza(c: Caminos, v: i32) -> bool {
+    return c.llega.get(v).unwrap_or(0) == 1
+}
+
+# distancia(c, v) -> f64: el largo del camino más corto hasta v (-1.0 si no se llega).
+fn distancia(c: Caminos, v: i32) -> f64 {
+    if not alcanza(c, v) {
+        return 0.0 - 1.0
+    }
+    return c.dist.get(v).unwrap_or(0.0)
+}
+
+# camino(c, v) -> Vec<i32>: los nodos del camino más corto desde el origen hasta v, los dos incluidos
+# (vacío si no se llega).
+fn camino(c: Caminos, v: i32) -> Vec<i32> {
+    let al_reves: Vec<i32> = vec_new()
+    if not alcanza(c, v) {
+        return al_reves
+    }
+    let mut x = v
+    while x >= 0 {
+        al_reves.push(x)
+        x = c.previo.get(x).unwrap_or(0 - 1)
+    }
+    let r: Vec<i32> = vec_new()
+    let mut i = al_reves.len() - 1
+    while i >= 0 {
+        r.push(al_reves.get(i).unwrap_or(0))
+        i = i - 1
+    }
+    return r
+}
+
+# ---- árbol de expansión mínima ------------------------------------------------------------
+
+# ordena los números de arista por peso, y a igual peso por número (ordenamiento por mezcla, estable)
+fn _ordenar_por_peso(g: Grafo) -> Vec<i32> {
+    let n = g.peso.len()
+    let a = _llenos(n, 0)
+    let b = _llenos(n, 0)
+    for i in 0..n {
+        a.set(i, i)
+    }
+    let mut ancho = 1
+    let mut en_a = true
+    while ancho < n {
+        let mut i = 0
+        while i < n {
+            let medio = min(i + ancho, n)
+            let fin = min(i + 2 * ancho, n)
+            let mut p = i
+            let mut q = medio
+            let mut k = i
+            while k < fin {
+                let mut toma_p = false
+                if p < medio {
+                    if q >= fin {
+                        toma_p = true
+                    } else {
+                        let ep = if en_a { a.get(p).unwrap_or(0) } else { b.get(p).unwrap_or(0) }
+                        let eq = if en_a { a.get(q).unwrap_or(0) } else { b.get(q).unwrap_or(0) }
+                        toma_p = g.peso.get(ep).unwrap_or(0.0) <= g.peso.get(eq).unwrap_or(0.0)
+                    }
+                }
+                let mut e = 0
+                if toma_p {
+                    e = if en_a { a.get(p).unwrap_or(0) } else { b.get(p).unwrap_or(0) }
+                    p = p + 1
+                } else {
+                    e = if en_a { a.get(q).unwrap_or(0) } else { b.get(q).unwrap_or(0) }
+                    q = q + 1
+                }
+                if en_a {
+                    b.set(k, e)
+                } else {
+                    a.set(k, e)
+                }
+                k = k + 1
+            }
+            i = i + 2 * ancho
+        }
+        en_a = not en_a
+        ancho = ancho * 2
+    }
+    if en_a {
+        return a
+    }
+    return b
+}
+
+# arbol_minimo(g) -> Vec<i32>: los números de las aristas del árbol (o bosque) de expansión mínima,
+# en el orden en que se eligieron (de menor a mayor peso). Mira las aristas sin dirección.
+fn arbol_minimo(g: Grafo) -> Vec<i32> {
+    let orden = _ordenar_por_peso(g)
+    let cj = _conjuntos(g.n)
+    let r: Vec<i32> = vec_new()
+    for i in 0..orden.len() {
+        let e = orden.get(i).unwrap_or(0)
+        if _unir(cj, g.desde.get(e).unwrap_or(0), g.hasta.get(e).unwrap_or(0)) {
+            r.push(e)
+        }
+    }
+    return r
+}
+
+# peso_total(g, lista) -> f64: la suma de los pesos de esas aristas.
+fn peso_total(g: Grafo, lista: Vec<i32>) -> f64 {
+    let mut s = 0.0
+    for i in 0..lista.len() {
+        s = s + g.peso.get(lista.get(i).unwrap_or(0)).unwrap_or(0.0)
+    }
+    return s
+}
+
+# ---- grillas y A* ---------------------------------------------------------------------------
+
+struct Grilla {
+    ancho: i32
+    alto: i32
+    muro: Vec<i32>
+}
+
+# grilla(ancho, alto) -> Grilla: todas las casillas libres. La casilla (x, y) es el número y * ancho + x.
+fn grilla(ancho: i32, alto: i32) -> Grilla {
+    return Grilla { ancho: ancho, alto: alto, muro: _llenos(ancho * alto, 0) }
+}
+
+fn _dentro(gr: Grilla, x: i32, y: i32) -> bool {
+    return x >= 0 and y >= 0 and x < gr.ancho and y < gr.alto
+}
+
+# pared(gr, x, y) / quitar_pared(gr, x, y): fuera de la grilla no hace nada.
+fn pared(gr: Grilla, x: i32, y: i32) {
+    if _dentro(gr, x, y) {
+        gr.muro.set(y * gr.ancho + x, 1)
+    }
+}
+
+fn quitar_pared(gr: Grilla, x: i32, y: i32) {
+    if _dentro(gr, x, y) {
+        gr.muro.set(y * gr.ancho + x, 0)
+    }
+}
+
+# libre(gr, x, y) -> bool: adentro y sin pared.
+fn libre(gr: Grilla, x: i32, y: i32) -> bool {
+    return _dentro(gr, x, y) and gr.muro.get(y * gr.ancho + x).unwrap_or(1) == 0
+}
+
+fn casilla_x(gr: Grilla, c: i32) -> i32 {
+    return c % gr.ancho
+}
+
+fn casilla_y(gr: Grilla, c: i32) -> i32 {
+    return c / gr.ancho
+}
+
+fn _estimar(x: i32, y: i32, x1: i32, y1: i32, diagonal: bool) -> f64 {
+    let dx = abs(x - x1)
+    let dy = abs(y - y1)
+    if not diagonal {
+        return to_f64(dx + dy)
+    }
+    let corto = min(dx, dy)
+    let largo = max(dx, dy)
+    return to_f64(largo - corto) + to_f64(corto) * sqrt(2.0)
+}
+
+# a_estrella(gr, x0, y0, x1, y1, diagonal) -> Vec<i32>: las casillas del camino más corto de (x0, y0) a
+# (x1, y1), las dos incluidas (vacío si alguna está ocupada o no hay camino). Sin diagonal se mueve en
+# 4 direcciones; con diagonal en 8, sin pasar en diagonal entre dos casillas si una de las dos de al
+# lado es pared.
+fn a_estrella(gr: Grilla, x0: i32, y0: i32, x1: i32, y1: i32, diagonal: bool) -> Vec<i32> {
+    let vacio: Vec<i32> = vec_new()
+    if not libre(gr, x0, y0) or not libre(gr, x1, y1) {
+        return vacio
+    }
+    let n = gr.ancho * gr.alto
+    let g_costo: Vec<f64> = vec_new()
+    for i in 0..n {
+        g_costo.push(0.0)
+    }
+    let previo = _llenos(n, 0 - 1)
+    let visto = _llenos(n, 0)
+    let cerrado = _llenos(n, 0)
+    let inicio = y0 * gr.ancho + x0
+    let meta = y1 * gr.ancho + x1
+    let h = _monticulo()
+    visto.set(inicio, 1)
+    _meter(h, _estimar(x0, y0, x1, y1, diagonal), inicio)
+    let r2 = sqrt(2.0)
+    let mut hallado = false
+    let mut direcciones = 4
+    if diagonal {
+        direcciones = 8
+    }
+    while h.n > 0 and not hallado {
+        let c = _sacar(h)
+        if c == meta {
+            hallado = true
+        } else {
+            if cerrado.get(c).unwrap_or(1) == 0 {
+                cerrado.set(c, 1)
+                let cx = c % gr.ancho
+                let cy = c / gr.ancho
+                for d in 0..direcciones {
+                    # der, abajo, izq, arriba y después las diagonales
+                    let mut dx = 0
+                    let mut dy = 0
+                    if d == 0 {
+                        dx = 1
+                    }
+                    if d == 1 {
+                        dy = 1
+                    }
+                    if d == 2 {
+                        dx = 0 - 1
+                    }
+                    if d == 3 {
+                        dy = 0 - 1
+                    }
+                    if d >= 4 {
+                        dx = if d == 4 or d == 7 { 1 } else { 0 - 1 }
+                        dy = if d == 4 or d == 5 { 1 } else { 0 - 1 }
+                    }
+                    let nx = cx + dx
+                    let ny = cy + dy
+                    let mut puede = libre(gr, nx, ny)
+                    if puede and d >= 4 {
+                        puede = libre(gr, cx + dx, cy) and libre(gr, cx, cy + dy)
+                    }
+                    if puede {
+                        let w = ny * gr.ancho + nx
+                        let paso = if d >= 4 { r2 } else { 1.0 }
+                        let ng = g_costo.get(c).unwrap_or(0.0) + paso
+                        if cerrado.get(w).unwrap_or(1) == 0 and (visto.get(w).unwrap_or(0) == 0 or ng < g_costo.get(w).unwrap_or(0.0)) {
+                            visto.set(w, 1)
+                            g_costo.set(w, ng)
+                            previo.set(w, c)
+                            _meter(h, ng + _estimar(nx, ny, x1, y1, diagonal), w)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if not hallado {
+        return vacio
+    }
+    let al_reves: Vec<i32> = vec_new()
+    let mut x = meta
+    while x >= 0 {
+        al_reves.push(x)
+        x = previo.get(x).unwrap_or(0 - 1)
+    }
+    let r: Vec<i32> = vec_new()
+    let mut i = al_reves.len() - 1
+    while i >= 0 {
+        r.push(al_reves.get(i).unwrap_or(0))
+        i = i - 1
+    }
+    return r
+}
+
+# costo(gr, ruta) -> f64: lo que cuesta recorrer esa lista de casillas (1 por paso recto, raíz de 2 en
+# diagonal).
+fn costo(gr: Grilla, ruta: Vec<i32>) -> f64 {
+    let mut s = 0.0
+    for i in 1..ruta.len() {
+        let a = ruta.get(i - 1).unwrap_or(0)
+        let b = ruta.get(i).unwrap_or(0)
+        if a % gr.ancho != b % gr.ancho and a / gr.ancho != b / gr.ancho {
+            s = s + sqrt(2.0)
+        } else {
+            s = s + 1.0
+        }
+    }
+    return s
+}

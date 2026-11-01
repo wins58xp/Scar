@@ -1,0 +1,111 @@
+# lib/texto, probada con lib/prueba.
+#
+# Casos fijos de cada función, con tildes, ñ y emojis, incluidos los bordes que
+# Python resuelve de una forma particular (split con separadores seguidos,
+# count con el texto vacío, center con ancho impar, f"{x:.2f}" en un empate).
+# La comparación al azar contra Python está en pruebas/test_texto_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "texto"
+
+fn lista(v: Vec<str>) -> str {
+    return "[" + texto.unir(v, "|") + "]"
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("texto")
+
+    prueba.seccion(t, "pedazos")
+    prueba.afirmar_igual_str(t, texto.subtexto("ñandú🦤ok", 2, 7), "ndú🦤o", "subtexto con emoji")
+    prueba.afirmar_igual_str(t, texto.subtexto("abc", 0 - 5, 99), "abc", "subtexto se ajusta")
+    prueba.afirmar_igual_str(t, texto.subtexto("abc", 2, 1), "", "subtexto al revés es vacío")
+    prueba.afirmar_igual_str(t, texto.invertir("añob🦤"), "🦤boña", "invertir")
+    prueba.afirmar_igual_str(t, texto.repetir("ñ", 3), "ñññ", "repetir")
+    prueba.afirmar_igual_str(t, texto.repetir("x", 0 - 1), "", "repetir negativo")
+    prueba.afirmar_igual_str(t, lista(texto.caracteres("aé🦤")), "[a|é|🦤]", "caracteres")
+    prueba.afirmar_igual_str(t, texto.unir(texto.caracteres(""), ","), "", "unir vacío")
+    let largo = texto.repetir("áb", 5000)
+    prueba.afirmar_igual_i32(t, len(largo), 10000, "repetir largo")
+    prueba.afirmar_igual_str(t, texto.subtexto(largo, 9997, 10000), "báb", "subtexto del final")
+
+    prueba.seccion(t, "buscar")
+    prueba.afirmar_igual_i32(t, texto.buscar("hola mundo", "mu"), 5, "buscar")
+    prueba.afirmar_igual_i32(t, texto.buscar("año, año", "ño"), 1, "buscar con ñ")
+    prueba.afirmar_igual_i32(t, texto.buscar("abc", "z"), 0 - 1, "buscar sin encontrar")
+    prueba.afirmar_igual_i32(t, texto.buscar("abc", ""), 0, "buscar vacío")
+    prueba.afirmar_igual_i32(t, texto.buscar_desde("abcabc", "b", 2), 4, "buscar desde")
+    prueba.afirmar_igual_i32(t, texto.buscar_desde("abc", "", 5), 0 - 1, "buscar desde más allá")
+    prueba.afirmar_igual_i32(t, texto.buscar_ultimo("abcabc", "bc"), 4, "buscar el último")
+    prueba.afirmar_igual_i32(t, texto.buscar_ultimo("abc", ""), 3, "buscar el último vacío")
+    prueba.afirmar_igual_i32(t, texto.contar("aaaa", "aa"), 2, "contar sin pisarse")
+    prueba.afirmar_igual_i32(t, texto.contar("abc", ""), 4, "contar vacío")
+    prueba.afirmar(t, texto.contiene("ñandú", "and"), "contiene")
+    prueba.afirmar(t, texto.empieza("ñandú", "ña"), "empieza")
+    prueba.afirmar(t, texto.termina("ñandú", "dú"), "termina")
+    prueba.afirmar(t, not texto.termina("ñandú", "du"), "una tilde cuenta")
+
+    prueba.seccion(t, "reemplazar")
+    prueba.afirmar_igual_str(t, texto.reemplazar("a-b-c", "-", "--"), "a--b--c", "reemplazar")
+    prueba.afirmar_igual_str(t, texto.reemplazar("ñañaña", "ña", "Ñ"), "ÑÑÑ", "reemplazar con ñ")
+    prueba.afirmar_igual_str(t, texto.reemplazar("abc", "", "x"), "abc", "reemplazar vacío")
+    prueba.afirmar_igual_str(t, texto.reemplazar("abc", "z", "x"), "abc", "reemplazar sin encontrar")
+
+    prueba.seccion(t, "dividir")
+    prueba.afirmar_igual_str(t, lista(texto.dividir("uno,dos,,tres", ",")), "[uno|dos||tres]", "dividir")
+    prueba.afirmar_igual_str(t, lista(texto.dividir(",a,", ",")), "[|a|]", "dividir con bordes")
+    prueba.afirmar_igual_str(t, lista(texto.dividir("", ",")), "[]", "dividir vacío da un pedazo vacío")
+    prueba.afirmar_igual_i32(t, texto.dividir("", ",").len(), 1, "un pedazo")
+    prueba.afirmar_igual_str(t, lista(texto.dividir("a<>b<>c", "<>")), "[a|b|c]", "separador de dos")
+    prueba.afirmar_igual_str(t, lista(texto.dividir_espacios("  hola \t mundo\n ")), "[hola|mundo]",
+                             "dividir por espacios")
+    prueba.afirmar_igual_i32(t, texto.dividir_espacios("   ").len(), 0, "solo espacios")
+    prueba.afirmar_igual_str(t, lista(texto.lineas("a\r\nb\n\nc\n")), "[a|b||c]", "líneas")
+    prueba.afirmar_igual_str(t, lista(texto.lineas("x\r\n")), "[x]", "línea con \\r\\n al final")
+    prueba.afirmar_igual_str(t, texto.unir(texto.dividir("1 2 3", " "), " + "), "1 + 2 + 3", "unir")
+
+    prueba.seccion(t, "espacios y relleno")
+    prueba.afirmar_igual_str(t, texto.recortar("  x y \n"), "x y", "recortar")
+    prueba.afirmar_igual_str(t, texto.recortar_izq("\t x "), "x ", "recortar a la izquierda")
+    prueba.afirmar_igual_str(t, texto.recortar_der(" x 　"), " x", "recortar a la derecha (espacio ideográfico)")
+    prueba.afirmar_igual_str(t, texto.rellenar_izq("7", 3, "0"), "007", "rellenar a la izquierda")
+    prueba.afirmar_igual_str(t, texto.rellenar_der("ñ", 3, "."), "ñ..", "rellenar a la derecha")
+    prueba.afirmar_igual_str(t, texto.rellenar_izq("largo", 2, "0"), "largo", "no corta")
+    prueba.afirmar_igual_str(t, texto.centrar("ab", 7, "*"), "***ab**", "centrar con ancho impar")
+    prueba.afirmar_igual_str(t, texto.centrar("ab", 6, "*"), "**ab**", "centrar con ancho par")
+    prueba.afirmar_igual_str(t, texto.centrar("abc", 6, "-"), "-abc--", "centrar, sobra uno")
+    prueba.afirmar(t, texto.es_espacio(" "), "el espacio que no corta es espacio")
+    prueba.afirmar(t, not texto.es_espacio("x"), "x no es espacio")
+
+    prueba.seccion(t, "mayúsculas")
+    prueba.afirmar_igual_str(t, texto.mayusculas("año ñandú, pingüino"), "AÑO ÑANDÚ, PINGÜINO", "mayúsculas")
+    prueba.afirmar_igual_str(t, texto.minusculas("ÁRBOL ÇA VA Ñ"), "árbol ça va ñ", "minúsculas")
+    prueba.afirmar_igual_str(t, texto.mayusculas("straße"), "STRASSE", "ß da SS")
+    prueba.afirmar_igual_str(t, texto.mayusculas("łódź žluťoučký"), "ŁÓDŹ ŽLUŤOUČKÝ", "polaco y checo")
+    prueba.afirmar_igual_str(t, texto.minusculas("ŒUVRE ĞÜŞ"), "œuvre ğüş", "latín extendido")
+    prueba.afirmar_igual_str(t, texto.mayusculas("ÿ"), "Ÿ", "ÿ")
+    prueba.afirmar_igual_str(t, texto.mayusculas("123 🦤 中"), "123 🦤 中", "lo que no tiene mayúscula queda")
+    prueba.afirmar(t, texto.es_letra("ñ") and texto.es_letra("Ł") and not texto.es_letra("1"), "es_letra")
+    prueba.afirmar(t, texto.es_digito("7") and not texto.es_digito("a") and not texto.es_digito("77"), "es_digito")
+
+    prueba.seccion(t, "números")
+    prueba.afirmar_igual_str(t, texto.decimales(3.14159, 2), "3.14", "decimales")
+    prueba.afirmar_igual_str(t, texto.decimales(2.675, 2), "2.67", "2.675 es un poco menos")
+    prueba.afirmar_igual_str(t, texto.decimales(0.125, 2), "0.12", "empate exacto: al par")
+    prueba.afirmar_igual_str(t, texto.decimales(0.375, 2), "0.38", "empate exacto: al par (arriba)")
+    prueba.afirmar_igual_str(t, texto.decimales(2.5, 0), "2", "2.5 sin decimales")
+    prueba.afirmar_igual_str(t, texto.decimales(0.0 - 0.001, 2), "-0.00", "el signo queda")
+    prueba.afirmar_igual_str(t, texto.decimales(7.0, 3), "7.000", "ceros")
+    prueba.afirmar_igual_str(t, texto.decimales(1e22, 1), "10000000000000000000000.0", "grande")
+    prueba.afirmar_igual_str(t, texto.decimales(0.1, 20), "0.10000000000000000555", "el valor exacto del f64")
+    prueba.afirmar_igual_str(t, texto.decimales(sqrt(0.0 - 1.0), 2), "nan", "nan")
+    prueba.afirmar_igual_str(t, texto.decimales(0.0 - 1.0 / 0.0, 2), "-inf", "-inf")
+    prueba.afirmar_igual_str(t, texto.con_miles(1234567, "."), "1.234.567", "miles")
+    prueba.afirmar_igual_str(t, texto.con_miles(0 - 999, "."), "-999", "miles, menos de mil")
+    prueba.afirmar_igual_str(t, texto.con_miles(0 - 9223372036854775807 - 1, ","),
+                             "-9,223,372,036,854,775,808", "el i64 más chico")
+    prueba.afirmar_igual_str(t, texto.decimales_miles(1234567.891, 2, ".", ","), "1.234.567,89", "a la chilena")
+    prueba.afirmar_igual_str(t, texto.decimales_miles(0.0 - 1234.5, 0, ",", "."), "-1,234", "sin decimales")
+
+    return prueba.terminar(t)
+}

@@ -1,0 +1,56 @@
+# lib/fisica contra una referencia en Python: lo corre
+# pruebas/test_fisica_python.py. Arma mundos al azar (círculos y cajas, fijos
+# y móviles, con restitución, fricción y velocidades al azar, con y sin
+# gravedad), los avanza 300 pasos y escribe cada cuerpo al armarlo y su
+# posición y velocidad cada 25 pasos.
+
+use "mate"
+use "fisica"
+
+fn main() {
+    let g = mate.azar(2026)
+    for k in 0..12 {
+        let gy = if k % 3 == 0 { 0.0 } else { 0.0 - 9.8 }
+        let m = fisica.mundo(0.0, gy)
+        print("MUNDO", k, gy)
+        # paredes fijas: piso, techo y costados
+        let paredes = [0.0, 0.0 - 0.5, 20.0, 1.0, 0.0, 10.5, 20.0, 1.0, 0.0 - 10.5, 5.0, 1.0, 12.0, 10.5, 5.0, 1.0, 12.0]
+        for w in 0..4 {
+            let c = fisica.caja(m, paredes.get(w * 4).unwrap_or(0.0), paredes.get(w * 4 + 1).unwrap_or(0.0),
+                                paredes.get(w * 4 + 2).unwrap_or(0.0), paredes.get(w * 4 + 3).unwrap_or(0.0), 0.0)
+            let e = mate.azar_entre(g, 0.0, 1.0)
+            let mu = mate.azar_entre(g, 0.0, 0.5)
+            fisica.restitucion(m, c, e)
+            fisica.friccion(m, c, mu)
+            print("CUERPO", k, 1, paredes.get(w * 4).unwrap_or(0.0), paredes.get(w * 4 + 1).unwrap_or(0.0),
+                  paredes.get(w * 4 + 2).unwrap_or(0.0), paredes.get(w * 4 + 3).unwrap_or(0.0), 0.0, e, mu, 0.0, 0.0)
+        }
+        let n = mate.azar_entero(g, 2, 7)
+        for i in 0..n {
+            let forma = mate.azar_entero(g, 0, 1)
+            let px = mate.azar_entre(g, 0.0 - 8.0, 8.0)
+            let py = mate.azar_entre(g, 1.0, 8.0)
+            let s1 = mate.azar_entre(g, 0.3, 1.5)
+            let s2 = mate.azar_entre(g, 0.3, 1.5)
+            let masa = if mate.azar_entero(g, 0, 5) == 0 { 0.0 } else { mate.azar_entre(g, 0.5, 4.0) }
+            let e = mate.azar_entre(g, 0.0, 1.0)
+            let mu = mate.azar_entre(g, 0.0, 0.5)
+            let vx = mate.azar_entre(g, 0.0 - 6.0, 6.0)
+            let vy = mate.azar_entre(g, 0.0 - 6.0, 6.0)
+            let c = if forma == 0 { fisica.circulo(m, px, py, s1, masa) } else { fisica.caja(m, px, py, s1, s2, masa) }
+            fisica.restitucion(m, c, e)
+            fisica.friccion(m, c, mu)
+            fisica.velocidad(m, c, vx, vy)
+            print("CUERPO", k, forma, px, py, s1, s2, masa, e, mu, vx, vy)
+        }
+        for p in 1..301 {
+            fisica.paso(m, 1.0 / 60.0)
+            if p % 25 == 0 {
+                for c in 0..fisica.cuerpos(m) {
+                    print("EST", k, p, c, fisica.x(m, c), fisica.y(m, c), fisica.vx(m, c), fisica.vy(m, c))
+                }
+                print("CHOQUES", k, p, m.choques)
+            }
+        }
+    }
+}

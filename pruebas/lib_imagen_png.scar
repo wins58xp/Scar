@@ -1,0 +1,97 @@
+# lib/imagen, PNG, probada con
+# lib/prueba.
+#
+# Un PNG chico hecho por Pillow (copiado acá como arreglo) leído píxel por
+# píxel; ida y vuelta de una imagen opaca (sale RGB) y de una con alfa (RGBA);
+# el encabezado; y los errores (firma, CRC roto, 16 bits, entrelazado, un
+# archivo que no existe). Imagen chica: el intérprete tiene 20 s. La
+# comparación con Pillow está en pruebas/test_png_pillow.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "lienzo"
+use "imagen"
+
+# Un PNG de 4x3 RGBA que guardó Pillow con optimize=True: el píxel (x, y) es
+# (60x, 100y, 30(x+y)) con alfa 255 si x+y es par y 100 si no.
+fn png_de_pillow() -> Vec<i32> {
+    return [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 3, 8, 6, 0, 0, 0,
+            180, 244, 174, 198, 0, 0, 0, 47, 73, 68, 65, 84, 120, 218, 99, 102, 96, 96, 248, 111, 195, 32, 247, 52,
+            138, 65, 247, 108, 5, 131, 205, 83, 22, 134, 20, 185, 84, 6, 6, 185, 217, 12, 12, 16, 154, 133, 33, 5,
+            193, 97, 96, 144, 75, 5, 0, 53, 73, 10, 239, 235, 42, 160, 160, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
+            96, 130]
+}
+
+fn escena(alfa: bool) -> lienzo.Lienzo {
+    let fondo = if alfa { lienzo.transparente() } else { lienzo.color(12, 34, 56) }
+    let l = lienzo.nuevo(13, 9, fondo)
+    lienzo.rect_lleno(l, 1, 1, 6, 4, lienzo.color(200, 30, 60))
+    lienzo.circulo_lleno(l, 8, 5, 3, lienzo.color_a(20, 220, 90, 140))
+    lienzo.linea(l, 0, 8, 12, 0, lienzo.blanco())
+    return l
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("png")
+
+    prueba.seccion(t, "un PNG de Pillow")
+    match imagen.de_png(png_de_pillow()) {
+        Ok(l) => {
+            prueba.afirmar_igual_i32(t, lienzo.ancho(l), 4, "ancho")
+            prueba.afirmar_igual_i32(t, lienzo.alto(l), 3, "alto")
+            let mut bien = true
+            for y in 0..3 {
+                for x in 0..4 {
+                    let a = if (x + y) % 2 == 0 { 255 } else { 100 }
+                    if lienzo.leer(l, x, y) != lienzo.color_a(x * 60, y * 100, (x + y) * 30, a) {
+                        bien = false
+                    }
+                }
+            }
+            prueba.afirmar(t, bien, "cada píxel, con su alfa")
+        }
+        Err(e) => { prueba.afirmar(t, false, "leer el de Pillow: " + e) }
+    }
+
+    prueba.seccion(t, "ida y vuelta")
+    let opaca = imagen.a_png(escena(false))
+    prueba.afirmar_igual_i32(t, opaca.get(25).unwrap_or(0 - 1), 2, "opaca: tipo de color 2 (RGB)")
+    match imagen.de_png(opaca) {
+        Ok(l) => { prueba.afirmar_igual_i64(t, lienzo.suma(l), lienzo.suma(escena(false)), "opaca vuelve igual") }
+        Err(e) => { prueba.afirmar(t, false, "opaca: " + e) }
+    }
+    let con_alfa = imagen.a_png(escena(true))
+    prueba.afirmar_igual_i32(t, con_alfa.get(25).unwrap_or(0 - 1), 6, "con alfa: tipo de color 6 (RGBA)")
+    match imagen.de_png(con_alfa) {
+        Ok(l) => { prueba.afirmar_igual_i64(t, lienzo.suma(l), lienzo.suma(escena(true)), "con alfa vuelve igual") }
+        Err(e) => { prueba.afirmar(t, false, "con alfa: " + e) }
+    }
+    match imagen.guardar_png(escena(true), "/tmp/scar_277_lib_imagen_png.png") {
+        Ok(n) => { prueba.afirmar(t, n > 57, "guardar_png") }
+        Err(e) => { prueba.afirmar(t, false, "guardar: " + e) }
+    }
+    match imagen.leer_png("/tmp/scar_277_lib_imagen_png.png") {
+        Ok(l) => { prueba.afirmar_igual_i64(t, lienzo.suma(l), lienzo.suma(escena(true)), "leer_png") }
+        Err(e) => { prueba.afirmar(t, false, "leer: " + e) }
+    }
+
+    prueba.seccion(t, "errores")
+    let mut firma = png_de_pillow()
+    firma.set(1, 81)
+    prueba.afirmar(t, imagen.de_png(firma).is_err(), "la firma")
+    let mut crc = png_de_pillow()
+    crc.set(50, (crc.get(50).unwrap_or(0) + 1) % 256)
+    match imagen.de_png(crc) {
+        Ok(l) => { prueba.afirmar(t, false, "CRC roto: tenía que dar Err") }
+        Err(e) => { prueba.afirmar_igual_str(t, e, "imagen: PNG dañado (el CRC del chunk IDAT no coincide)", "CRC roto") }
+    }
+    let mut corto: Vec<i32> = vec_new()
+    let entero = png_de_pillow()
+    for i in 0..60 {
+        corto.push(entero.get(i).unwrap_or(0))
+    }
+    prueba.afirmar(t, imagen.de_png(corto).is_err(), "cortado")
+    prueba.afirmar(t, imagen.leer_png("/no/existe.png").is_err(), "un archivo que no existe")
+
+    return prueba.terminar(t)
+}

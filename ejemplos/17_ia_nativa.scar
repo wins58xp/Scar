@@ -1,0 +1,88 @@
+# Capítulo 17: IA nativa. Dos regiones cognitivas aprenden en paralelo, cada
+# una dueña de su modelo; a una se le cambia la tasa de aprendizaje en
+# caliente, mientras corre.
+use "autodiff"
+
+struct Muestra {
+    x: f64
+    y: f64
+}
+
+struct Modelo {
+    w: f64
+    b: f64
+}
+
+# Un paso de descenso de gradiente: la derivada de la pérdida respecto de w y
+# de b la calcula autodiff.
+fn aprender(m: Modelo, x: f64, y: f64, tasa: f64) -> Modelo {
+    let c = autodiff.cinta()
+    let w = autodiff.variable(c, m.w)
+    let b = autodiff.variable(c, m.b)
+    let pred = autodiff.suma(c, autodiff.escalar(c, w, x), b)
+    let error = autodiff.resta(c, pred, autodiff.constante(c, y))
+    let perdida = autodiff.cuadrado(c, error)
+    autodiff.derivar(c, perdida)
+    return Modelo { w: m.w - tasa * autodiff.gradiente(c, w), b: m.b - tasa * autodiff.gradiente(c, b) }
+}
+
+fn redondear(x: f64) -> f64 {
+    return floor(x * 100.0 + 0.5) / 100.0
+}
+
+# Una región cognitiva: una tarea dueña de su modelo. Aprende de lo que le
+# llega por `muestras`; si alguien le inyecta un Chan<f64>, lee de ahí una
+# tasa de aprendizaje nueva.
+task region(nombre: str, muestras: Chan<Muestra>) accepts Chan<f64> -> Modelo {
+    let mut m = Modelo { w: 0.0, b: 0.0 }
+    let mut tasa = 0.02
+    let mut ajustada = false
+    while let Some(s) = muestras.recv() {
+        m = aprender(m, s.x, s.y, tasa)
+        if not ajustada {
+            let mut nuevo: Option<Chan<f64>> = accept_chan()
+            while let Some(canal) = nuevo {
+                nuevo = None
+                while let Some(t) = canal.recv() {
+                    tasa = t
+                    ajustada = true
+                }
+            }
+        }
+    }
+    if ajustada {
+        print(nombre + ": terminó con la tasa nueva,", tasa)
+    }
+    return m
+}
+
+fn main() {
+    let a: Chan<Muestra> = chan_new()
+    let b: Chan<Muestra> = chan_new()
+    let ha = spawn region("A", a)
+    let hb = spawn region("B", b)
+
+    # a la región A se le cambia la tasa mientras ya está aprendiendo
+    let ajuste: Chan<f64> = chan_new()
+    ajuste.send(0.05)
+    ajuste.close()
+    let r = inject_chan(ha, ajuste)
+    if r.is_err() {
+        print("no se pudo inyectar:", r.err())
+    }
+
+    let mut vuelta = 0
+    while vuelta < 400 {
+        let x = to_f64(vuelta % 9) - 4.0
+        a.send(Muestra { x: x, y: 2.0 * x + 1.0 })
+        b.send(Muestra { x: x, y: 3.0 - x })
+        vuelta = vuelta + 1
+    }
+    a.close()
+    b.close()
+
+    let ma = ha.join()
+    let mb = hb.join()
+    print("A aprendió y =", redondear(ma.w), "x +", redondear(ma.b))
+    print("B aprendió y =", redondear(mb.w), "x +", redondear(mb.b))
+}

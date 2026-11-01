@@ -1,0 +1,56 @@
+# Capítulo 13: genéricos y funciones como valor.
+#
+#   scar run ejemplos/13_genericos.scar
+
+struct Rango<T: Numeric> {
+    desde: T
+    hasta: T
+}
+
+fn adentro<T: Numeric>(r: Rango<T>, x: T) -> bool {
+    return x >= r.desde and x <= r.hasta
+}
+
+fn maximo<T: Numeric>(v: Vec<T>, si_vacio: T) -> T {
+    let mut m = si_vacio
+    for i in 0..v.len() {
+        let x = v.get(i).unwrap_or(si_vacio)
+        if i == 0 or x > m {
+            m = x
+        }
+    }
+    return m
+}
+
+# una función que recibe otra función: el criterio se elige al llamarla
+fn filtrar(v: Vec<i32>, sirve: fn(i32) -> bool) -> Vec<i32> {
+    let r: Vec<i32> = vec_new()
+    for i in 0..v.len() {
+        let x = v.get(i).unwrap_or(0)
+        if sirve(x) {
+            r.push(x)
+        }
+    }
+    return r
+}
+
+fn es_par(x: i32) -> bool {
+    return x % 2 == 0
+}
+
+fn es_grande(x: i32) -> bool {
+    return x > 10
+}
+
+fn main() {
+    let edades = Rango { desde: 18, hasta: 65 }
+    let temperaturas = Rango { desde: -5.0, hasta: 35.5 }
+    print(adentro(edades, 30), adentro(edades, 70), adentro(temperaturas, 36.0))
+
+    print(maximo([4, 17, 9], 0), maximo([2.5, -1.0], 0.0))
+
+    let numeros = [3, 12, 7, 20, 8, 15]
+    print("pares:", filtrar(numeros, es_par))
+    let otros = [3, 12, 7, 20, 8, 15]
+    print("grandes:", filtrar(otros, es_grande))
+}

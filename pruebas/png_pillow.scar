@@ -1,0 +1,85 @@
+# lib/imagen (PNG) contra Pillow: lo corre pruebas/test_png_pillow.py, que antes
+# deja en la carpeta arg(0) unos PNG hechos con Pillow (y otros dañados a mano)
+# y un indice.txt con sus nombres. Este programa lee cada uno y escribe sus
+# píxeles, y después dibuja dos escenas con lienzo (una opaca, otra con alfa)
+# y las guarda como PNG para que Python las abra con Pillow.
+
+use "lienzo"
+use "imagen"
+use "texto"
+
+fn hex(p: i32) -> str {
+    let d = "0123456789abcdef"
+    let mut r = ""
+    for k in 0..8 {
+        r = r + d[(p >> (28 - 4 * k)) & 15]
+    }
+    return r
+}
+
+fn volcar(l: lienzo.Lienzo) -> str {
+    let mut v: Vec<str> = vec_new()
+    for y in 0..lienzo.alto(l) {
+        for x in 0..lienzo.ancho(l) {
+            v.push(hex(lienzo.leer(l, x, y)))
+        }
+    }
+    return texto.unir(v, "")
+}
+
+fn main() -> i32 {
+    let mut dir = ""
+    match arg(0) {
+        Some(a) => { dir = a + "" }
+        None => {
+            print("falta la carpeta")
+            return 2
+        }
+    }
+    let mut indice = ""
+    match file_open(dir + "/indice.txt", "r") {
+        Ok(f) => {
+            match f.read_all() {
+                Ok(s) => { indice = s + "" }
+                Err(e) => {}
+            }
+            f.close()
+        }
+        Err(e) => {
+            print("no hay indice.txt:", e)
+            return 2
+        }
+    }
+    let nombres = texto.lineas(indice)
+    for i in 0..nombres.len() {
+        let mut nombre = ""
+        match nombres.get(i) {
+            Some(x) => { nombre = x + "" }
+            None => {}
+        }
+        match imagen.leer_png(dir + "/" + nombre) {
+            Ok(l) => { print("LEE", nombre, lienzo.ancho(l), lienzo.alto(l), volcar(l)) }
+            Err(e) => { print("ERR", nombre, e) }
+        }
+    }
+
+    let opaca = lienzo.nuevo(37, 21, lienzo.color(12, 34, 56))
+    lienzo.rect_lleno(opaca, 2, 2, 15, 9, lienzo.color(200, 30, 60))
+    lienzo.circulo_lleno(opaca, 22, 11, 8, lienzo.color_a(20, 220, 90, 140))
+    lienzo.linea(opaca, 0, 20, 36, 0, lienzo.blanco())
+    lienzo.texto(opaca, 3, 12, "PNG ñ", lienzo.amarillo())
+    let con_alfa = lienzo.nuevo(19, 11, lienzo.transparente())
+    lienzo.circulo_lleno(con_alfa, 9, 5, 5, lienzo.color_a(255, 0, 0, 128))
+    lienzo.rect_lleno(con_alfa, 0, 0, 4, 11, lienzo.azul())
+    match imagen.guardar_png(opaca, dir + "/scar_opaca.png") {
+        Ok(n) => { print("GUARDA scar_opaca.png", n) }
+        Err(e) => { print("ERRG scar_opaca.png", e) }
+    }
+    match imagen.guardar_png(con_alfa, dir + "/scar_alfa.png") {
+        Ok(n) => { print("GUARDA scar_alfa.png", n) }
+        Err(e) => { print("ERRG scar_alfa.png", e) }
+    }
+    print("ESCENA scar_opaca.png", lienzo.ancho(opaca), lienzo.alto(opaca), volcar(opaca))
+    print("ESCENA scar_alfa.png", lienzo.ancho(con_alfa), lienzo.alto(con_alfa), volcar(con_alfa))
+    return 0
+}

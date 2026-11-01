@@ -1,0 +1,131 @@
+# lib/neuronalgames: una red aprende XOR con retropropagación; después una población de 30 redes aprende la
+# misma tabla SIN gradientes, por neuroevolución (como criaturas o bots de un juego: las mejores se copian,
+# se cruzan y se mutan), y al final la mejor se guarda en texto y se vuelve a leer idéntica.
+
+use "neuronalgames"
+
+fn tabla() -> neuronalgames.Datos {
+    let d = neuronalgames.datos(2, 1)
+    neuronalgames.ejemplo(d, [0.0, 0.0], [0.0])
+    neuronalgames.ejemplo(d, [0.0, 1.0], [1.0])
+    neuronalgames.ejemplo(d, [1.0, 0.0], [1.0])
+    neuronalgames.ejemplo(d, [1.0, 1.0], [0.0])
+    return d
+}
+
+fn mostrar(r: neuronalgames.Red) {
+    for k in 0..4 {
+        let a = to_f64(k / 2)
+        let b = to_f64(k % 2)
+        neuronalgames.entrada(r, 0, a)
+        neuronalgames.entrada(r, 1, b)
+        neuronalgames.calcular(r)
+        print("  " + a_texto(to_i32(a)) + " xor " + a_texto(to_i32(b)) + " -> " + a_texto(floor(neuronalgames.salida(r, 0) * 1000.0 + 0.5) / 1000.0))
+    }
+}
+
+fn nueva(semilla: i32) -> neuronalgames.Red {
+    let r = neuronalgames.red(2, semilla)
+    neuronalgames.capa(r, 4, neuronalgames.tanh())
+    neuronalgames.capa(r, 1, neuronalgames.sigmoide())
+    return r
+}
+
+fn releer(r: neuronalgames.Red) -> Result<i32> {
+    let texto = neuronalgames.a_texto_red(r)
+    let otra = neuronalgames.desde_texto(texto)?
+    print("guardada en " + a_texto(len(texto)) + " letras; releída da el mismo error: " + a_texto(neuronalgames.error(otra, tabla()) == neuronalgames.error(r, tabla())))
+    return Ok(0)
+}
+
+fn main() -> i32 {
+    # 1. retropropagación
+    let r = nueva(7)
+    neuronalgames.momento(r, 0.5)
+    print("error antes de entrenar: " + a_texto(neuronalgames.error(r, tabla())))
+    let e = neuronalgames.entrenar(r, tabla(), 2000, 0.3)
+    print("error después de 2000 vueltas: " + a_texto(e))
+    mostrar(r)
+    # 2. neuroevolución: 30 redes, se quedan las 6 mejores y el resto se rehace con ellas
+    let pob: Vec<neuronalgames.Red> = vec_new()
+    for i in 0..30 {
+        pob.push(nueva(100 + i))
+    }
+    let mut mejor_error = 1.0
+    let mut mejor = 0
+    for gen in 0..60 {
+        # error de cada una
+        let errores: Vec<f64> = vec_new()
+        for i in 0..30 {
+            let mut o = pob.get(i)
+            while let Some(red) = o {
+                errores.push(neuronalgames.error(red, tabla()))
+                o = None
+            }
+        }
+        # las 6 mejores (por selección, sin reordenar la población)
+        let elegidas: Vec<i32> = vec_new()
+        for k in 0..6 {
+            let mut b = 0 - 1
+            for i in 0..30 {
+                let mut ya = false
+                for j in 0..elegidas.len() {
+                    if elegidas.get(j).unwrap_or(0 - 1) == i {
+                        ya = true
+                    }
+                }
+                if not ya and (b < 0 or errores.get(i).unwrap_or(9.0) < errores.get(b).unwrap_or(9.0)) {
+                    b = i
+                }
+            }
+            elegidas.push(b)
+        }
+        mejor = elegidas.get(0).unwrap_or(0)
+        mejor_error = errores.get(mejor).unwrap_or(1.0)
+        if gen % 10 == 0 or gen == 59 {
+            print("generación " + a_texto(gen) + ": mejor error " + a_texto(mejor_error))
+        }
+        if gen < 59 {
+            # la generación siguiente: las 6 tal cual, y 24 hijas de dos de ellas, mutadas
+            let nueva_pob: Vec<neuronalgames.Red> = vec_new()
+            for k in 0..30 {
+                let pa = elegidas.get(k % 6).unwrap_or(0)
+                let pb = elegidas.get((k * 7 + gen) % 6).unwrap_or(0)
+                let mut oa = pob.get(pa)
+                while let Some(ra) = oa {
+                    let mut ob = pob.get(pb)
+                    while let Some(rb) = ob {
+                        if k < 6 {
+                            nueva_pob.push(neuronalgames.copiar(ra, gen * 100 + k))
+                        } else {
+                            let h = neuronalgames.cruzar(ra, rb, gen * 100 + k)
+                            neuronalgames.mutar(h, 0.3, 0.6)
+                            nueva_pob.push(h)
+                        }
+                        ob = None
+                    }
+                    oa = None
+                }
+            }
+            # se pasa la nueva población a pob, de a una
+            while pob.len() > 0 {
+                let x = pob.pop()
+            }
+            for k in 0..30 {
+                let mut o = nueva_pob.get(k)
+                while let Some(red) = o {
+                    pob.push(neuronalgames.copiar(red, k))
+                    o = None
+                }
+            }
+        }
+    }
+    let mut o = pob.get(mejor)
+    while let Some(red) = o {
+        print("la mejor de la población:")
+        mostrar(red)
+        let rr = releer(red)
+        o = None
+    }
+    return 0
+}

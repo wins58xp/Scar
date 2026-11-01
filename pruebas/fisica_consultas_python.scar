@@ -1,0 +1,101 @@
+# lib/fisica (rayos, puntos, contactos, impulso) para pruebas/test_fisica_consultas_python.py: arma mundos al
+# azar, y escribe los cuerpos, las preguntas y las respuestas, una por línea.
+use "mate"
+use "fisica"
+
+fn main() {
+    let g = mate.azar(77)
+    for k in 0..10 {
+        let m = fisica.mundo(0.0, 0.0)
+        print("MUNDO", k)
+        let n = mate.azar_entero(g, 3, 9)
+        for i in 0..n {
+            let forma = mate.azar_entero(g, 0, 1)
+            let px = mate.azar_entre(g, 0.0 - 8.0, 8.0)
+            let py = mate.azar_entre(g, 0.0 - 8.0, 8.0)
+            let s1 = mate.azar_entre(g, 0.4, 3.0)
+            let s2 = mate.azar_entre(g, 0.4, 3.0)
+            let masa = mate.azar_entre(g, 0.5, 4.0)
+            if forma == 0 {
+                fisica.circulo(m, px, py, s1, masa)
+            } else {
+                fisica.caja(m, px, py, s1, s2, masa)
+            }
+            print("CUERPO", forma, px, py, s1, s2, masa)
+        }
+        for q in 0..60 {
+            let mut ox = mate.azar_entre(g, 0.0 - 12.0, 12.0)
+            let mut oy = mate.azar_entre(g, 0.0 - 12.0, 12.0)
+            let mut dx = mate.azar_entre(g, 0.0 - 1.0, 1.0)
+            let mut dy = mate.azar_entre(g, 0.0 - 1.0, 1.0)
+            let tipo = q % 6
+            if tipo == 1 {
+                dx = 0.0
+            }
+            if tipo == 2 {
+                dy = 0.0
+            }
+            if tipo == 3 {
+                let c = mate.azar_entero(g, 0, n - 1)
+                dx = fisica.x(m, c) - ox
+                dy = fisica.y(m, c) - oy
+            }
+            if tipo == 5 {
+                # casi tangente a un círculo (o rozando el borde de una caja): a r * 0,995 o r * 1,005 del centro
+                let c = mate.azar_entero(g, 0, n - 1)
+                let rr = if m.forma.get(c).unwrap_or(0) == 0 { m.r.get(c).unwrap_or(1.0) } else { m.b.get(c).unwrap_or(1.0) }
+                let k = if mate.azar_entero(g, 0, 1) == 0 { 0.995 } else { 1.005 }
+                ox = fisica.x(m, c) - 15.0
+                oy = fisica.y(m, c) + rr * k
+                dx = 1.0
+                dy = 0.0
+            }
+            if tipo == 4 {
+                let c = mate.azar_entero(g, 0, n - 1)
+                ox = fisica.x(m, c) + mate.azar_entre(g, 0.0 - 0.1, 0.1)
+                oy = fisica.y(m, c) + mate.azar_entre(g, 0.0 - 0.1, 0.1)
+            }
+            let maximo = mate.azar_entre(g, 2.0, 30.0)
+            let r = fisica.rayo(m, ox, oy, dx, dy, maximo)
+            print("RAYO", ox, oy, dx, dy, maximo, r.cuerpo, r.t, r.x, r.y, r.nx, r.ny)
+        }
+        let nada = fisica.rayo(m, 0.0, 0.0, 0.0, 0.0, 10.0)
+        print("RAYO0", nada.cuerpo)
+        for q in 0..40 {
+            let px = mate.azar_entre(g, 0.0 - 10.0, 10.0)
+            let py = mate.azar_entre(g, 0.0 - 10.0, 10.0)
+            print("PUNTO", px, py, fisica.cuerpo_en(m, px, py))
+        }
+        # puntos pegados al borde de cada cuerpo, adentro (0,95) y afuera (1,05)
+        for c in 0..n {
+            let cx = fisica.x(m, c)
+            let cy = fisica.y(m, c)
+            for lado in 0..2 {
+                let k = if lado == 0 { 0.95 } else { 1.05 }
+                if m.forma.get(c).unwrap_or(0) == 0 {
+                    let r = m.r.get(c).unwrap_or(1.0)
+                    print("PUNTO", cx + r * k * 0.70710678, cy + r * k * 0.70710678, fisica.cuerpo_en(m, cx + r * k * 0.70710678, cy + r * k * 0.70710678))
+                    print("PUNTO", cx - r * k, cy, fisica.cuerpo_en(m, cx - r * k, cy))
+                } else {
+                    let a = m.a.get(c).unwrap_or(1.0)
+                    let b = m.b.get(c).unwrap_or(1.0)
+                    print("PUNTO", cx + a * k, cy + b * 0.5, fisica.cuerpo_en(m, cx + a * k, cy + b * 0.5))
+                    print("PUNTO", cx - a * 0.5, cy - b * k, fisica.cuerpo_en(m, cx - a * 0.5, cy - b * k))
+                }
+            }
+        }
+        for c in 0..n {
+            let l = fisica.contactos_de(m, c)
+            let mut s = ""
+            for i in 0..l.len() {
+                s = s + " " + a_texto(l.get(i).unwrap_or(0 - 1))
+            }
+            print("CONTACTOS", c, l.len(), s)
+        }
+        let jx = mate.azar_entre(g, 0.0 - 5.0, 5.0)
+        let jy = mate.azar_entre(g, 0.0 - 5.0, 5.0)
+        fisica.velocidad(m, 0, 1.0, 2.0)
+        fisica.impulso(m, 0, jx, jy)
+        print("IMPULSO", jx, jy, fisica.vx(m, 0), fisica.vy(m, 0))
+    }
+}

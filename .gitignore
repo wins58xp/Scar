@@ -1,0 +1,17 @@
+# lo que se genera al instalar, compilar o probar
+__pycache__/
+*.pyc
+native/lib/
+*.so
+*.c
+!native/runtime/*.c
+!native/scarsdl.c
+!native/scarhttp.c
+!native/scarproc.c
+# los binarios que deja `scar build` (archivos sin extensión en ejemplos/ y pruebas/)
+ejemplos/**/*
+!ejemplos/**/*.*
+!ejemplos/**/
+pruebas/**/*
+!pruebas/**/*.*
+!pruebas/**/

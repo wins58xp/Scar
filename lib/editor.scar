@@ -1,0 +1,725 @@
+# lib/editor.scar -- un editor de texto de varias líneas para lib/gui, pensado para código.
+#
+# Letra de ancho fijo, números de línea, colores para SCAR (lib/buffer.clases), cursor y selección
+# con el teclado y el ratón, Ctrl+C / Ctrl+X / Ctrl+V con el portapapeles del sistema, deshacer
+# (Ctrl+Z, Ctrl+Y), sangría automática, Tab y Mayús+Tab, doble clic para elegir una palabra,
+# rueda para desplazarse. El texto y las operaciones están en lib/buffer.
+#
+#     use "gui"
+#     use "editor"
+#
+#     fn main() {
+#         let ui = gui.ventana("Editor", 800, 600)
+#         let e = editor.nuevo("fn main() {\n}\n")
+#         while gui.abierta(ui) {
+#             editor.dibujar(ui, e, 0, 500)          # 0: todo el ancho; 500: de alto
+#         }
+#     }
+#
+# `e.b` es el buffer: editor.nuevo(texto), buffer.contenido(e.b), buffer.buscar(e.b, ...) etc.
+# Usa la fuente de ancho fijo de libscarsdl (native/scarsdl.c).
+
+use "gui"
+use "buffer"
+use "texto"
+
+extern "C" fn scar_sdl_mods() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_portapapeles() -> str from "scarsdl"
+extern "C" fn scar_sdl_copiar(t: str) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_texto_mono(x: i32, y: i32, s: str, tam: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_texto_mono_ancho(s: str, tam: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_texto_mono_alto(tam: i32) -> i32 from "scarsdl"
+
+struct Editor {
+    b: buffer.Buffer
+    # la primera línea que se ve, y cuántos píxeles está corrido hacia la izquierda
+    desde: i32
+    izq: i32
+    # tamaño de la letra (13, 16 o 20)
+    tam: i32
+    # el número de la pieza en el cuadro (para el foco) y si hay que pedirlo
+    id: i32
+    pedir_foco: bool
+    # arrastrando con el ratón: el texto, o la barra de desplazamiento
+    arrastrando: bool
+    arrastrando_barra: bool
+    # el último clic (cuadro, fila, columna), para el doble clic
+    clic_cuadro: i32
+    clic_fila: i32
+    clic_col: i32
+    # el último cuadro en que se tocó el teclado o el ratón (el cursor no parpadea justo después)
+    toque: i32
+    # una línea marcada (un error) o -1
+    marca: i32
+    # al dibujar, ubicar el cursor en el medio de la vista
+    centrar: bool
+    # cuántas líneas entraron en la vista la última vez (para RePág y AvPág)
+    visibles: i32
+    # solo se puede mirar, seleccionar y copiar (la salida del compilador)
+    solo_lectura: bool
+    # mostrar los números de línea
+    numeros: bool
+    # pintar el texto con los colores de SCAR (la salida del compilador no los lleva)
+    colorear: bool
+    # los colores de cada fila de la vista, guardados mientras la línea no cambie (una cifra por
+    # carácter): el texto que se pintó y su clase
+    cache_t: Vec<str>
+    cache_c: Vec<str>
+    # líneas con un error (desde 0), para marcarlas en el margen
+    errores: Vec<i32>
+    # resaltar la llave que hace pareja con la del cursor
+    parejas: bool
+}
+
+# editor.nuevo(texto) -> Editor
+fn nuevo(t: str) -> Editor {
+    let e = Editor {
+        b: buffer.nuevo(t),
+        desde: 0,
+        izq: 0,
+        tam: 16,
+        id: 0,
+        pedir_foco: false,
+        arrastrando: false,
+        arrastrando_barra: false,
+        clic_cuadro: -100,
+        clic_fila: -1,
+        clic_col: -1,
+        toque: 0,
+        marca: -1,
+        centrar: false,
+        visibles: 20,
+        solo_lectura: false,
+        numeros: true,
+        colorear: true,
+        cache_t: vec_new(),
+        cache_c: vec_new(),
+        errores: vec_new(),
+        parejas: true,
+    }
+    return e
+}
+
+# editor.enfocar(e): el próximo cuadro, las teclas van a este editor.
+fn enfocar(e: Editor) {
+    e.pedir_foco = true
+}
+
+# editor.marcar_linea(e, n): pinta la línea n (desde 1) como línea con un error; 0 la quita.
+fn marcar_linea(e: Editor, n: i32) {
+    e.marca = n - 1
+}
+
+# editor.limpiar_errores(e) y editor.agregar_error(e, n): las líneas con un error (n desde 1) llevan un
+# punto rojo en el margen y una línea ondulada debajo. Para marcar lo que dice el compilador.
+fn limpiar_errores(e: Editor) {
+    while e.errores.len() > 0 {
+        let x = e.errores.pop()
+    }
+}
+
+fn agregar_error(e: Editor, n: i32) {
+    if n >= 1 {
+        e.errores.push(n - 1)
+    }
+}
+
+fn _tiene_error(e: Editor, f: i32) -> bool {
+    for i in 0..e.errores.len() {
+        if e.errores.get(i).unwrap_or(0 - 1) == f {
+            return true
+        }
+    }
+    return false
+}
+
+# editor.cerrar_pares(e, si): cerrar solo paréntesis, corchetes, llaves y comillas (ver buffer.cerrar_pares).
+fn cerrar_pares(e: Editor, si: bool) {
+    buffer.cerrar_pares(e.b, si)
+}
+
+# editor.comentar(e) y editor.duplicar(e): lo mismo que Ctrl+/ y Ctrl+D (buffer.comentar, buffer.duplicar).
+fn comentar(e: Editor) {
+    if not e.solo_lectura {
+        buffer.comentar(e.b)
+    }
+}
+
+fn duplicar(e: Editor) {
+    if not e.solo_lectura {
+        buffer.duplicar(e.b)
+    }
+}
+
+# editor.ir_a_linea(e, n): lleva el cursor a la línea n (desde 1) y la muestra en el medio.
+fn ir_a_linea(e: Editor, n: i32) {
+    buffer.ir_a_linea(e.b, n)
+    e.centrar = true
+}
+
+# editor.mostrar_cursor(e): la próxima vez que se dibuje, la vista incluye el cursor.
+fn mostrar_cursor(e: Editor) {
+    e.b.mover = true
+}
+
+# editor.solo_lectura(e, si): con true, el editor solo deja mirar, seleccionar y copiar.
+fn solo_lectura(e: Editor, si: bool) {
+    e.solo_lectura = si
+}
+
+# editor.numeros(e, si): mostrar (o no) los números de línea.
+fn numeros(e: Editor, si: bool) {
+    e.numeros = si
+}
+
+# editor.colorear(e, si): pintar (o no) el texto con los colores de SCAR.
+fn colorear(e: Editor, si: bool) {
+    e.colorear = si
+}
+
+# editor.modificadores() -> i32: las teclas modificadoras apretadas ahora, sumadas: 1 Mayús, 2 Ctrl,
+# 4 Alt (para atajos como Ctrl+S).
+fn modificadores() -> i32 {
+    return scar_sdl_mods()
+}
+
+# editor.seleccionar_todo(e), editor.copiar(e), editor.cortar(e), editor.pegar(e), editor.deshacer(e),
+# editor.rehacer(e): lo mismo que hacen Ctrl+A, C, X, V, Z e Y adentro del editor, para llamarlas desde
+# un menú o un botón. Cortar, pegar, deshacer y rehacer no hacen nada si el editor es de solo lectura.
+fn seleccionar_todo(e: Editor) {
+    buffer.seleccionar_todo(e.b)
+}
+
+fn copiar(e: Editor) {
+    if buffer.hay_sel(e.b) {
+        scar_sdl_copiar(buffer.sel_texto(e.b))
+    }
+}
+
+fn cortar(e: Editor) {
+    if not e.solo_lectura and buffer.hay_sel(e.b) {
+        scar_sdl_copiar(buffer.sel_texto(e.b))
+        buffer.borrar_sel(e.b)
+    }
+}
+
+fn pegar(e: Editor) {
+    if not e.solo_lectura {
+        buffer.pegar(e.b, scar_sdl_portapapeles())
+    }
+}
+
+fn deshacer(e: Editor) {
+    if not e.solo_lectura {
+        buffer.deshacer(e.b)
+    }
+}
+
+fn rehacer(e: Editor) {
+    if not e.solo_lectura {
+        buffer.rehacer(e.b)
+    }
+}
+
+# editor.tamano(e, tam): el tamaño de la letra (13, 16 o 20).
+fn tamano(e: Editor, tam: i32) {
+    e.tam = tam
+}
+
+# ---- colores ---------------------------------------------------------------------------------------
+
+fn _luz(c: i32) -> i32 {
+    return ((c >> 16) & 255) * 299 + ((c >> 8) & 255) * 587 + (c & 255) * 114
+}
+
+fn _mezcla(a: i32, b: i32, t: i32) -> i32 {
+    let r = ((a >> 16) & 255) + ((((b >> 16) & 255) - ((a >> 16) & 255)) * t) / 100
+    let g = ((a >> 8) & 255) + ((((b >> 8) & 255) - ((a >> 8) & 255)) * t) / 100
+    let bl = (a & 255) + (((b & 255) - (a & 255)) * t) / 100
+    return (r << 16) | (g << 8) | bl
+}
+
+# El color de una clase de buffer.clases, con paleta clara u oscura según el fondo del tema.
+fn _color(ui: gui.Ui, oscuro: bool, clase: i32) -> i32 {
+    if oscuro {
+        if clase == 1 {
+            return 12961221
+        }
+        if clase == 2 {
+            return 5163440
+        }
+        if clase == 3 {
+            return 13582712
+        }
+        if clase == 4 {
+            return 11914920
+        }
+        if clase == 5 {
+            return 6989141
+        }
+        if clase == 6 {
+            return 14466474
+        }
+    } else {
+        if clase == 1 {
+            return 11468987
+        }
+        if clase == 2 {
+            return 2523033
+        }
+        if clase == 3 {
+            return 10682645
+        }
+        if clase == 4 {
+            return 624774
+        }
+        if clase == 5 {
+            return 32768
+        }
+        if clase == 6 {
+            return 7888422
+        }
+    }
+    return ui.c_texto
+}
+
+# ---- teclado ----------------------------------------------------------------------------------------
+
+fn _teclas(ui: gui.Ui, e: Editor) {
+    let m = scar_sdl_mods()
+    let mayus = (m & 1) != 0
+    let ctrl = (m & 2) != 0
+    let mut hizo = false
+    let rw = not e.solo_lectura
+    if ctrl {
+        if gui.tecla_pulsada(ui, 4) {
+            buffer.seleccionar_todo(e.b)
+            hizo = true
+        }
+        if gui.tecla_pulsada(ui, 6) and buffer.hay_sel(e.b) {
+            scar_sdl_copiar(buffer.sel_texto(e.b))
+            hizo = true
+        }
+        if rw and gui.tecla_pulsada(ui, 27) and buffer.hay_sel(e.b) {
+            scar_sdl_copiar(buffer.sel_texto(e.b))
+            buffer.borrar_sel(e.b)
+            hizo = true
+        }
+        if rw and gui.tecla_pulsada(ui, 25) {
+            buffer.pegar(e.b, scar_sdl_portapapeles())
+            hizo = true
+        }
+        if rw and gui.tecla_pulsada(ui, 29) {
+            if mayus {
+                buffer.rehacer(e.b)
+            } else {
+                buffer.deshacer(e.b)
+            }
+            hizo = true
+        }
+        if rw and gui.tecla_pulsada(ui, 28) {
+            buffer.rehacer(e.b)
+            hizo = true
+        }
+        # Ctrl+D duplica; Ctrl+/ comenta (la tecla de la / en un teclado de EE. UU.: en uno
+        # latinoamericano o español es la del guion, al lado del punto)
+        if rw and gui.tecla_pulsada(ui, 7) {
+            buffer.duplicar(e.b)
+            hizo = true
+        }
+        if rw and gui.tecla_pulsada(ui, 56) {
+            buffer.comentar(e.b)
+            hizo = true
+        }
+    }
+    if gui.tecla_pulsada(ui, 80) {
+        buffer.izquierda(e.b, mayus, ctrl)
+        hizo = true
+    }
+    if gui.tecla_pulsada(ui, 79) {
+        buffer.derecha(e.b, mayus, ctrl)
+        hizo = true
+    }
+    if gui.tecla_pulsada(ui, 82) {
+        buffer.arriba(e.b, mayus)
+        hizo = true
+    }
+    if gui.tecla_pulsada(ui, 81) {
+        buffer.abajo(e.b, mayus)
+        hizo = true
+    }
+    if gui.tecla_pulsada(ui, 74) {
+        buffer.inicio(e.b, mayus, ctrl)
+        hizo = true
+    }
+    if gui.tecla_pulsada(ui, 77) {
+        buffer.fin(e.b, mayus, ctrl)
+        hizo = true
+    }
+    if gui.tecla_pulsada(ui, 75) {
+        buffer.pagina(e.b, 0 - max(e.visibles - 1, 1), mayus)
+        hizo = true
+    }
+    if gui.tecla_pulsada(ui, 78) {
+        buffer.pagina(e.b, max(e.visibles - 1, 1), mayus)
+        hizo = true
+    }
+    if rw and gui.tecla_pulsada(ui, 42) {
+        buffer.borrar_atras(e.b, ctrl)
+        hizo = true
+    }
+    if rw and gui.tecla_pulsada(ui, 76) {
+        buffer.borrar_adelante(e.b, ctrl)
+        hizo = true
+    }
+    if rw and gui.tecla_pulsada(ui, 40) {
+        buffer.enter(e.b)
+        hizo = true
+    }
+    if rw and gui.tecla_pulsada(ui, 43) {
+        buffer.tab(e.b, mayus)
+        hizo = true
+    }
+    if not ctrl and rw {
+        let t = gui.escrito(ui)
+        if len(t) > 0 {
+            buffer.escribir(e.b, t)
+            hizo = true
+        }
+    }
+    if hizo {
+        e.toque = ui.cuadro
+    }
+}
+
+# ---- dibujo ---------------------------------------------------------------------------------------------
+
+# buffer de ancho de una letra
+fn _cw(e: Editor) -> i32 {
+    return scar_sdl_texto_mono_ancho("0", e.tam)
+}
+
+fn _lh(e: Editor) -> i32 {
+    return scar_sdl_texto_mono_alto(e.tam) + 2
+}
+
+fn _cifras(n: i32) -> i32 {
+    let mut k = 1
+    let mut v = n
+    while v >= 10 {
+        v = v / 10
+        k = k + 1
+    }
+    return k
+}
+
+# La fila y la columna del texto que están bajo el punto (mx, my) de la ventana.
+fn _fila_en(e: Editor, y0: i32, my: i32) -> i32 {
+    return e.desde + (my - y0) / _lh(e)
+}
+
+fn _col_en(e: Editor, x0: i32, mx: i32) -> i32 {
+    let cw = _cw(e)
+    return (mx - x0 + e.izq + cw / 2) / cw
+}
+
+# Las clases de color de la línea `s` que está en la fila `i` de la vista, como un texto de cifras (se
+# guardan: casi siempre la línea es la misma que en el cuadro anterior).
+fn _clases_de(e: Editor, i: i32, s: str) -> str {
+    let mut cacheado = false
+    let mut r = ""
+    if i < e.cache_t.len() {
+        let mut o = e.cache_t.get(i)
+        while let Some(t) = o {
+            if t == s {
+                cacheado = true
+            }
+            o = None
+        }
+        if cacheado {
+            let mut oc = e.cache_c.get(i)
+            while let Some(c) = oc {
+                r = c + ""
+                oc = None
+            }
+        }
+    }
+    if cacheado == false {
+        let cl = buffer.clases(s)
+        let n = cl.len()
+        for k in 0..n {
+            let mut o = cl.get(k)
+            while let Some(v) = o {
+                r = r + a_texto(v)
+                o = None
+            }
+        }
+        if i < e.cache_t.len() {
+            e.cache_t.set(i, s + "")
+            e.cache_c.set(i, r + "")
+        } else {
+            while e.cache_t.len() < i {
+                e.cache_t.push("\n")
+                e.cache_c.push("")
+            }
+            e.cache_t.push(s + "")
+            e.cache_c.push(r + "")
+        }
+    }
+    return r
+}
+
+# editor.dibujar(ui, e, ancho, alto) -> bool: dibuja el editor y atiende el teclado y el ratón.
+# ancho 0: todo el que queda. Devuelve true si el texto cambió en este cuadro.
+fn dibujar(ui: gui.Ui, e: Editor, ancho: i32, alto: i32) -> bool {
+    let cambios0 = e.b.cambios
+    let id = gui.pieza_id(ui)
+    e.id = id
+    let mut w = ancho
+    if w <= 0 {
+        w = gui.ancho_libre(ui)
+    }
+    let l = gui.reservar(ui, w, alto)
+    let cw = _cw(e)
+    let lh = _lh(e)
+    let n = buffer.n_lineas(e.b)
+    let mut gutter = (max(_cifras(n), 3) + 2) * cw
+    if e.numeros == false {
+        gutter = 10
+    }
+    let barra = 12
+    let x0 = l.x + gutter
+    let ancho_texto = w - gutter - barra
+    let vis = max(alto / lh, 1)
+    e.visibles = vis
+
+    # foco: un clic adentro lo toma, un clic afuera lo suelta
+    let dentro = gui.encima(ui, l.x, l.y, w - barra, alto)
+    if gui.apretado_en(ui, l.x, l.y, w, alto) {
+        if gui.encima(ui, l.x, l.y, w - barra, alto) {
+            ui.foco = id
+        } else {
+            e.arrastrando_barra = true
+        }
+    } else {
+        if gui.apretado_en(ui, 0, 0, ui.ancho, ui.alto) {
+            if ui.foco == id {
+                ui.foco = -1
+            }
+        }
+    }
+    # el foco pedido con editor.enfocar va después de mirar los clics: el clic que lo pidió (en una
+    # pestaña, en un problema) cae afuera del editor y si no lo soltaría en el mismo cuadro. Y en ese
+    # cuadro no se atiende el teclado: la tecla que hizo pedirlo (Enter en "ir a la línea") ya se usó.
+    let recien = e.pedir_foco
+    if e.pedir_foco {
+        ui.foco = id
+        e.pedir_foco = false
+    }
+    let foco = ui.foco == id
+
+    # el ratón
+    let mx = gui.raton_x(ui)
+    let my = gui.raton_y(ui)
+    if gui.apretado_en(ui, x0, l.y, ancho_texto, alto) {
+        let f = _fila_en(e, l.y, my)
+        let c = _col_en(e, x0, mx)
+        let mayus = (scar_sdl_mods() & 1) != 0
+        if ui.cuadro - e.clic_cuadro < 25 and f == e.clic_fila and abs(c - e.clic_col) <= 1 {
+            buffer.mover_a(e.b, f, c, false)
+            buffer.seleccionar_palabra(e.b)
+            e.arrastrando = false
+            e.clic_cuadro = -100
+        } else {
+            buffer.mover_a(e.b, f, c, mayus)
+            e.arrastrando = true
+            e.clic_cuadro = ui.cuadro
+            e.clic_fila = f
+            e.clic_col = c
+        }
+        e.toque = ui.cuadro
+    } else {
+        if e.arrastrando and gui.raton_abajo(ui) {
+            buffer.mover_a(e.b, _fila_en(e, l.y, my), _col_en(e, x0, mx), true)
+            e.toque = ui.cuadro
+        }
+    }
+    if gui.soltado(ui) {
+        e.arrastrando = false
+        e.arrastrando_barra = false
+    }
+    if e.arrastrando_barra and gui.raton_abajo(ui) and n > vis {
+        let frac = max(0, min(my - l.y, alto)) * 1000 / max(alto, 1)
+        e.desde = frac * (n - vis) / 1000
+    }
+    let rueda = gui.rueda(ui)
+    if rueda != 0 and gui.encima(ui, l.x, l.y, w, alto) {
+        if (scar_sdl_mods() & 1) != 0 {
+            e.izq = max(0, e.izq - rueda * 3 * cw)
+        } else {
+            e.desde = e.desde - rueda * 3
+        }
+    }
+
+    # el teclado
+    if foco and not recien {
+        _teclas(ui, e)
+    }
+
+    # que el cursor se vea
+    if e.centrar {
+        e.desde = e.b.fila - vis / 2
+        e.centrar = false
+        e.b.mover = true
+    }
+    if e.b.mover {
+        if e.b.fila < e.desde {
+            e.desde = e.b.fila
+        }
+        if e.b.fila >= e.desde + vis {
+            e.desde = e.b.fila - vis + 1
+        }
+        let cx = e.b.col * cw
+        if cx < e.izq {
+            e.izq = max(0, cx - 6 * cw)
+        }
+        if cx + cw > e.izq + ancho_texto - 8 {
+            e.izq = cx + cw - ancho_texto + 8 + 6 * cw
+        }
+        e.b.mover = false
+    }
+    let n2 = buffer.n_lineas(e.b)
+    e.desde = max(0, min(e.desde, n2 - 1))
+    if buffer.hay_sel(e.b) == false and e.b.col == 0 {
+        e.izq = 0
+    }
+
+    # la llave que hace pareja con la del cursor
+    let mut par = buffer.Pareja { hay: false, f0: 0, c0: 0, f1: 0, c1: 0 }
+    if e.parejas and foco and not buffer.hay_sel(e.b) {
+        par = buffer.pareja(e.b)
+    }
+    # el dibujo
+    let oscuro = _luz(ui.c_fondo) < 128000
+    let c_fondo = ui.c_panel
+    let c_gutter = _mezcla(ui.c_panel, ui.c_fondo, 50)
+    let c_linea = _mezcla(ui.c_panel, ui.c_texto, 7)
+    let c_sel = _mezcla(ui.c_panel, ui.c_acento, 45)
+    gui.pintar(ui, l.x, l.y, w, alto, c_fondo)
+    gui.pintar(ui, l.x, l.y, gutter - 4, alto, c_gutter)
+    gui.recortar(ui, l.x, l.y, w - barra, alto)
+    let sf1 = buffer.sel_f1(e.b)
+    let sc1 = buffer.sel_c1(e.b)
+    let sf2 = buffer.sel_f2(e.b)
+    let sc2 = buffer.sel_c2(e.b)
+    let hay = buffer.hay_sel(e.b)
+    for i in 0..vis {
+        let f = e.desde + i
+        if f < n2 {
+            let y = l.y + i * lh
+            let s = buffer.linea(e.b, f)
+            if f == e.b.fila and foco {
+                gui.pintar(ui, x0 - 4, y, w - gutter + 4, lh, c_linea)
+            }
+            if f == e.marca {
+                gui.pintar(ui, l.x, y, w, lh, _mezcla(c_fondo, ui.c_mal, 30))
+            }
+            # la selección
+            if hay and f >= sf1 and f <= sf2 {
+                let mut a = 0
+                if f == sf1 {
+                    a = sc1
+                }
+                let mut z = len(s)
+                if f == sf2 {
+                    z = sc2
+                }
+                let mut extra = 0
+                if f < sf2 {
+                    extra = cw / 2
+                }
+                gui.pintar(ui, x0 - e.izq + a * cw, y, (z - a) * cw + extra, lh, c_sel)
+            }
+            # un error en esta línea: un punto en el margen y una línea ondulada debajo del texto
+            if _tiene_error(e, f) {
+                gui.circulo(ui, l.x + 7, y + lh / 2, 4, ui.c_mal)
+                let mut zx = x0
+                let fin_x = min(x0 - e.izq + max(len(s), 1) * cw, l.x + w - barra)
+                while zx + 3 < fin_x {
+                    gui.trazo(ui, zx, y + lh - 2, zx + 3, y + lh - 4, ui.c_mal)
+                    gui.trazo(ui, zx + 3, y + lh - 4, zx + 6, y + lh - 2, ui.c_mal)
+                    zx = zx + 6
+                }
+            }
+            # el número de línea
+            let num = a_texto(f + 1)
+            if e.numeros {
+                let mut c_num = ui.c_tenue
+                if f == e.b.fila {
+                    c_num = ui.c_texto
+                }
+                scar_sdl_texto_mono(l.x + gutter - 4 - cw - len(num) * cw, y + 1, num, e.tam, (c_num >> 16) & 255, (c_num >> 8) & 255, c_num & 255, 255)
+            }
+            # el texto, de a tramos de la misma clase
+            let mut cs = ""
+            if e.colorear {
+                cs = _clases_de(e, i, s)
+            }
+            let ns = len(s)
+            let nc = len(cs)
+            let mut i0 = 0
+            while i0 < ns {
+                let mut c0 = 0
+                if i0 < nc {
+                    c0 = ord(cs[i0]) - 48
+                }
+                let mut i1 = i0 + 1
+                let mut seguir = true
+                while i1 < ns and seguir {
+                    let mut c1 = 0
+                    if i1 < nc {
+                        c1 = ord(cs[i1]) - 48
+                    }
+                    if c1 == c0 {
+                        i1 = i1 + 1
+                    } else {
+                        seguir = false
+                    }
+                }
+                let px = x0 - e.izq + i0 * cw
+                if px < l.x + w and px + (i1 - i0) * cw > x0 {
+                    let col = _color(ui, oscuro, c0)
+                    scar_sdl_texto_mono(px, y + 1, texto.subtexto(s, i0, i1), e.tam, (col >> 16) & 255, (col >> 8) & 255, col & 255, 255)
+                }
+                i0 = i1
+            }
+            # las dos llaves de la pareja, con un recuadro
+            if par.hay and f == par.f0 {
+                gui.marco(ui, x0 - e.izq + par.c0 * cw, y, cw, lh, 1, ui.c_acento)
+            }
+            if par.hay and f == par.f1 {
+                gui.marco(ui, x0 - e.izq + par.c1 * cw, y, cw, lh, 1, ui.c_acento)
+            }
+            # el cursor
+            if f == e.b.fila and foco {
+                if ((ui.cuadro - e.toque) / 30) % 2 == 0 {
+                    gui.pintar(ui, x0 - e.izq + e.b.col * cw, y, 2, lh, ui.c_texto)
+                }
+            }
+        }
+    }
+    gui.sin_recortar(ui)
+    # la barra de desplazamiento
+    gui.pintar(ui, l.x + w - barra, l.y, barra, alto, c_gutter)
+    if n2 > vis {
+        let alto_pulgar = max(alto * vis / n2, 24)
+        let y_pulgar = l.y + (alto - alto_pulgar) * e.desde / max(n2 - vis, 1)
+        gui.pintar(ui, l.x + w - barra + 2, y_pulgar, barra - 4, alto_pulgar, _mezcla(c_gutter, ui.c_texto, 30))
+    }
+    let mut c_borde = ui.c_borde
+    if foco {
+        c_borde = ui.c_acento
+    }
+    gui.marco(ui, l.x, l.y, w, alto, 1, c_borde)
+    return e.b.cambios != cambios0
+}

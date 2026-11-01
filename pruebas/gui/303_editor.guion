@@ -1,0 +1,18 @@
+# Un clic al final de "total = total + i", escribe, Enter con sangría, deshacer, selección con
+# Mayús, copiar y pegar con Ctrl, y una llave que se alinea sola.
+1 clic 400 160
+2 escribe  # listo
+4 tecla 40
+5 escribe if total > 3 {
+6 tecla 40
+7 escribe }
+9 tecla 29
+10 mods 1
+11 tecla 82
+12 tecla 82
+13 mods 0
+14 mods 2
+15 tecla 6
+16 tecla 25
+17 tecla 25
+18 mods 0

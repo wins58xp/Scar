@@ -1,0 +1,686 @@
+# lib/mate.scar: vectores, matrices 4x4, cuaterniones, trigonometría y
+# números al azar con semilla (use "mate").
+#
+#   use "mate"
+#   let p = mate.v3(1.0, 2.0, 3.0)
+#   let r = mate.m4_rotacion(mate.v3(0.0, 0.0, 1.0), mate.radianes(90.0))
+#   let q = mate.m4_punto(r, p)            # (-2, 1, 3)
+#
+# Convenciones (las de OpenGL y numpy, para comparar con cualquiera de los dos):
+#   - Mat4 guarda 16 f64 por filas: m.m[4*fila + columna]. Un punto es un vector
+#     columna y se multiplica a la derecha: m4_por_v4(M, v) = M·v. Componer
+#     "primero A, después B" es m4_producto(B, A).
+#   - m4_perspectiva y m4_mirar_a son las de gluPerspective y gluLookAt: mano
+#     derecha, la cámara mira hacia -z, z del recorte entre -1 y 1.
+#   - Cuat es w + xi + yj + zk, producto de Hamilton; los de rotación tienen
+#     largo 1.
+#   - Ángulos en radianes (radianes()/grados() convierten).
+#
+# Las funciones devuelven valores nuevos: ninguna cambia sus argumentos, salvo
+# m4_set y las de Azar, que avanzan su estado.
+#
+# El azar es xorshift32 (Marsaglia): solo desplazamientos y xor, así que no
+# desborda (en SCAR un desborde de i32 es un panic) y la misma semilla da la
+# misma secuencia en el intérprete, en el binario y en cualquier otro
+# lenguaje. No sirve para criptografía.
+#
+# Probada con propiedades (lib/prueba) y contra numpy y una implementación de
+# xorshift32 en Python.
+
+# ---------- escalares y trigonometría ----------
+
+fn pi() -> f64 {
+    return 3.141592653589793
+}
+
+fn radianes(grados: f64) -> f64 {
+    return grados * pi() / 180.0
+}
+
+fn grados(radianes: f64) -> f64 {
+    return radianes * 180.0 / pi()
+}
+
+# x dentro de [lo, hi].
+fn recortar(x: f64, lo: f64, hi: f64) -> f64 {
+    return if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+# a + (b - a)·t: t = 0 da a, t = 1 da b.
+fn interpolar(a: f64, b: f64, t: f64) -> f64 {
+    return a + (b - a) * t
+}
+
+# -1, 0 o 1.
+fn signo(x: f64) -> f64 {
+    return if x > 0.0 { 1.0 } else if x < 0.0 { 0.0 - 1.0 } else { 0.0 }
+}
+
+# El ángulo de (x, y) en (-pi, pi], como atan2 de C.
+fn atan2(y: f64, x: f64) -> f64 {
+    if x > 0.0 {
+        return atan(y / x)
+    }
+    if x < 0.0 {
+        if y >= 0.0 {
+            return atan(y / x) + pi()
+        }
+        return atan(y / x) - pi()
+    }
+    if y > 0.0 {
+        return pi() / 2.0
+    }
+    if y < 0.0 {
+        return 0.0 - pi() / 2.0
+    }
+    return 0.0
+}
+
+# asin y acos en [-1, 1] (fuera de ahí, nan, como en C).
+fn asin(x: f64) -> f64 {
+    if x > 1.0 or x < 0.0 - 1.0 {
+        return sqrt(0.0 - 1.0)
+    }
+    return atan2(x, sqrt(1.0 - x * x))
+}
+
+fn acos(x: f64) -> f64 {
+    if x > 1.0 or x < 0.0 - 1.0 {
+        return sqrt(0.0 - 1.0)
+    }
+    return atan2(sqrt(1.0 - x * x), x)
+}
+
+# ---------- Vec2 ----------
+
+struct Vec2 {
+    x: f64
+    y: f64
+}
+
+fn v2(x: f64, y: f64) -> Vec2 {
+    return Vec2 { x: x, y: y }
+}
+
+fn v2_suma(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn v2_resta(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x - b.x, y: a.y - b.y }
+}
+
+fn v2_escala(a: Vec2, k: f64) -> Vec2 {
+    return Vec2 { x: a.x * k, y: a.y * k }
+}
+
+fn v2_punto(a: Vec2, b: Vec2) -> f64 {
+    return a.x * b.x + a.y * b.y
+}
+
+# La z del producto cruz de (a, 0) y (b, 0): positiva si b está a la izquierda
+# de a.
+fn v2_cruz(a: Vec2, b: Vec2) -> f64 {
+    return a.x * b.y - a.y * b.x
+}
+
+fn v2_largo(a: Vec2) -> f64 {
+    return sqrt(a.x * a.x + a.y * a.y)
+}
+
+# Largo 1; el vector cero queda cero.
+fn v2_normalizar(a: Vec2) -> Vec2 {
+    let l = v2_largo(a)
+    if l == 0.0 {
+        return Vec2 { x: 0.0, y: 0.0 }
+    }
+    return Vec2 { x: a.x / l, y: a.y / l }
+}
+
+fn v2_interpolar(a: Vec2, b: Vec2, t: f64) -> Vec2 {
+    return Vec2 { x: interpolar(a.x, b.x, t), y: interpolar(a.y, b.y, t) }
+}
+
+# Girado `ang` radianes en sentido antihorario.
+fn v2_rotar(a: Vec2, ang: f64) -> Vec2 {
+    let c = cos(ang)
+    let s = sin(ang)
+    return Vec2 { x: a.x * c - a.y * s, y: a.x * s + a.y * c }
+}
+
+# ---------- Vec3 ----------
+
+struct Vec3 {
+    x: f64
+    y: f64
+    z: f64
+}
+
+fn v3(x: f64, y: f64, z: f64) -> Vec3 {
+    return Vec3 { x: x, y: y, z: z }
+}
+
+fn v3_suma(a: Vec3, b: Vec3) -> Vec3 {
+    return Vec3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }
+}
+
+fn v3_resta(a: Vec3, b: Vec3) -> Vec3 {
+    return Vec3 { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }
+}
+
+fn v3_escala(a: Vec3, k: f64) -> Vec3 {
+    return Vec3 { x: a.x * k, y: a.y * k, z: a.z * k }
+}
+
+fn v3_negar(a: Vec3) -> Vec3 {
+    return Vec3 { x: 0.0 - a.x, y: 0.0 - a.y, z: 0.0 - a.z }
+}
+
+fn v3_punto(a: Vec3, b: Vec3) -> f64 {
+    return a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+fn v3_cruz(a: Vec3, b: Vec3) -> Vec3 {
+    return Vec3 { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x }
+}
+
+fn v3_largo(a: Vec3) -> f64 {
+    return sqrt(a.x * a.x + a.y * a.y + a.z * a.z)
+}
+
+fn v3_distancia(a: Vec3, b: Vec3) -> f64 {
+    return v3_largo(v3_resta(a, b))
+}
+
+# Largo 1; el vector cero queda cero.
+fn v3_normalizar(a: Vec3) -> Vec3 {
+    let l = v3_largo(a)
+    if l == 0.0 {
+        return Vec3 { x: 0.0, y: 0.0, z: 0.0 }
+    }
+    return Vec3 { x: a.x / l, y: a.y / l, z: a.z / l }
+}
+
+fn v3_interpolar(a: Vec3, b: Vec3, t: f64) -> Vec3 {
+    return Vec3 { x: interpolar(a.x, b.x, t), y: interpolar(a.y, b.y, t), z: interpolar(a.z, b.z, t) }
+}
+
+# ---------- Vec4 ----------
+
+struct Vec4 {
+    x: f64
+    y: f64
+    z: f64
+    w: f64
+}
+
+fn v4(x: f64, y: f64, z: f64, w: f64) -> Vec4 {
+    return Vec4 { x: x, y: y, z: z, w: w }
+}
+
+# (p, 1): un punto, al que le afectan las traslaciones.
+fn v4_punto(p: Vec3) -> Vec4 {
+    return Vec4 { x: p.x, y: p.y, z: p.z, w: 1.0 }
+}
+
+# (d, 0): una dirección, a la que no le afectan las traslaciones.
+fn v4_direccion(d: Vec3) -> Vec4 {
+    return Vec4 { x: d.x, y: d.y, z: d.z, w: 0.0 }
+}
+
+fn v4_suma(a: Vec4, b: Vec4) -> Vec4 {
+    return Vec4 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z, w: a.w + b.w }
+}
+
+fn v4_resta(a: Vec4, b: Vec4) -> Vec4 {
+    return Vec4 { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z, w: a.w - b.w }
+}
+
+fn v4_escala(a: Vec4, k: f64) -> Vec4 {
+    return Vec4 { x: a.x * k, y: a.y * k, z: a.z * k, w: a.w * k }
+}
+
+fn v4_punto_prod(a: Vec4, b: Vec4) -> f64 {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
+}
+
+fn v4_largo(a: Vec4) -> f64 {
+    return sqrt(v4_punto_prod(a, a))
+}
+
+# (x/w, y/w, z/w): de vuelta a 3D después de una proyección.
+fn v4_a_v3(a: Vec4) -> Vec3 {
+    if a.w == 0.0 {
+        return Vec3 { x: a.x, y: a.y, z: a.z }
+    }
+    return Vec3 { x: a.x / a.w, y: a.y / a.w, z: a.z / a.w }
+}
+
+# ---------- Mat4 ----------
+
+struct Mat4 {
+    m: Vec<f64>
+}
+
+fn m4_ceros() -> Mat4 {
+    let mut v: Vec<f64> = vec_new()
+    for k in 0..16 {
+        v.push(0.0)
+    }
+    return Mat4 { m: v }
+}
+
+fn m4_identidad() -> Mat4 {
+    let r = m4_ceros()
+    for k in 0..4 {
+        r.m.set(5 * k, 1.0)
+    }
+    return r
+}
+
+# Una matriz escrita por filas: a b c d / e f g h / i j k l / m n o p.
+fn m4_de_filas(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64, j: f64, k: f64, l: f64, m: f64, n: f64, o: f64, p: f64) -> Mat4 {
+    return Mat4 { m: [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] }
+}
+
+fn m4_get(a: Mat4, fila: i32, columna: i32) -> f64 {
+    return a.m.get(4 * fila + columna).unwrap_or(0.0)
+}
+
+# Cambia un elemento (la única función que modifica su matriz).
+fn m4_set(a: Mat4, fila: i32, columna: i32, valor: f64) {
+    a.m.set(4 * fila + columna, valor)
+}
+
+fn m4_copia(a: Mat4) -> Mat4 {
+    let mut v: Vec<f64> = vec_new()
+    for k in 0..16 {
+        v.push(a.m.get(k).unwrap_or(0.0))
+    }
+    return Mat4 { m: v }
+}
+
+# a·b.
+fn m4_producto(a: Mat4, b: Mat4) -> Mat4 {
+    let r = m4_ceros()
+    for f in 0..4 {
+        for c in 0..4 {
+            let mut s = 0.0
+            for k in 0..4 {
+                s = s + m4_get(a, f, k) * m4_get(b, k, c)
+            }
+            r.m.set(4 * f + c, s)
+        }
+    }
+    return r
+}
+
+# a·v.
+fn m4_por_v4(a: Mat4, v: Vec4) -> Vec4 {
+    let mut out: Vec<f64> = vec_new()
+    for f in 0..4 {
+        out.push(m4_get(a, f, 0) * v.x + m4_get(a, f, 1) * v.y + m4_get(a, f, 2) * v.z + m4_get(a, f, 3) * v.w)
+    }
+    return Vec4 { x: out.get(0).unwrap_or(0.0), y: out.get(1).unwrap_or(0.0), z: out.get(2).unwrap_or(0.0), w: out.get(3).unwrap_or(0.0) }
+}
+
+# Un punto transformado (con w = 1, y dividido por la w que sale: sirve
+# también para una proyección).
+fn m4_punto(a: Mat4, p: Vec3) -> Vec3 {
+    return v4_a_v3(m4_por_v4(a, v4_punto(p)))
+}
+
+# Una dirección transformada (w = 0: sin traslación).
+fn m4_direccion(a: Mat4, d: Vec3) -> Vec3 {
+    let r = m4_por_v4(a, v4_direccion(d))
+    return Vec3 { x: r.x, y: r.y, z: r.z }
+}
+
+fn m4_transpuesta(a: Mat4) -> Mat4 {
+    let r = m4_ceros()
+    for f in 0..4 {
+        for c in 0..4 {
+            r.m.set(4 * c + f, m4_get(a, f, c))
+        }
+    }
+    return r
+}
+
+# (Interno.) Los 12 menores 2x2 que usan el determinante y la inversa (la forma de MESA
+# para gluInvertMatrix, escrita con los menores de las dos primeras y las dos
+# últimas filas).
+struct Menores4 {
+    s0: f64
+    s1: f64
+    s2: f64
+    s3: f64
+    s4: f64
+    s5: f64
+    c0: f64
+    c1: f64
+    c2: f64
+    c3: f64
+    c4: f64
+    c5: f64
+}
+
+fn _menores(a: Mat4) -> Menores4 {
+    let a00 = m4_get(a, 0, 0)
+    let a01 = m4_get(a, 0, 1)
+    let a02 = m4_get(a, 0, 2)
+    let a03 = m4_get(a, 0, 3)
+    let a10 = m4_get(a, 1, 0)
+    let a11 = m4_get(a, 1, 1)
+    let a12 = m4_get(a, 1, 2)
+    let a13 = m4_get(a, 1, 3)
+    let a20 = m4_get(a, 2, 0)
+    let a21 = m4_get(a, 2, 1)
+    let a22 = m4_get(a, 2, 2)
+    let a23 = m4_get(a, 2, 3)
+    let a30 = m4_get(a, 3, 0)
+    let a31 = m4_get(a, 3, 1)
+    let a32 = m4_get(a, 3, 2)
+    let a33 = m4_get(a, 3, 3)
+    return Menores4 {
+        s0: a00 * a11 - a10 * a01,
+        s1: a00 * a12 - a10 * a02,
+        s2: a00 * a13 - a10 * a03,
+        s3: a01 * a12 - a11 * a02,
+        s4: a01 * a13 - a11 * a03,
+        s5: a02 * a13 - a12 * a03,
+        c5: a22 * a33 - a32 * a23,
+        c4: a21 * a33 - a31 * a23,
+        c3: a21 * a32 - a31 * a22,
+        c2: a20 * a33 - a30 * a23,
+        c1: a20 * a32 - a30 * a22,
+        c0: a20 * a31 - a30 * a21
+    }
+}
+
+fn m4_determinante(a: Mat4) -> f64 {
+    let n = _menores(a)
+    return n.s0 * n.c5 - n.s1 * n.c4 + n.s2 * n.c3 + n.s3 * n.c2 - n.s4 * n.c1 + n.s5 * n.c0
+}
+
+# La inversa, o None si la matriz es singular (determinante 0).
+fn m4_inversa(a: Mat4) -> Option<Mat4> {
+    let n = _menores(a)
+    let det = n.s0 * n.c5 - n.s1 * n.c4 + n.s2 * n.c3 + n.s3 * n.c2 - n.s4 * n.c1 + n.s5 * n.c0
+    if det == 0.0 {
+        return None
+    }
+    let k = 1.0 / det
+    let a00 = m4_get(a, 0, 0)
+    let a01 = m4_get(a, 0, 1)
+    let a02 = m4_get(a, 0, 2)
+    let a03 = m4_get(a, 0, 3)
+    let a10 = m4_get(a, 1, 0)
+    let a11 = m4_get(a, 1, 1)
+    let a12 = m4_get(a, 1, 2)
+    let a13 = m4_get(a, 1, 3)
+    let a20 = m4_get(a, 2, 0)
+    let a21 = m4_get(a, 2, 1)
+    let a22 = m4_get(a, 2, 2)
+    let a23 = m4_get(a, 2, 3)
+    let a30 = m4_get(a, 3, 0)
+    let a31 = m4_get(a, 3, 1)
+    let a32 = m4_get(a, 3, 2)
+    let a33 = m4_get(a, 3, 3)
+    let r = m4_de_filas(
+        (a11 * n.c5 - a12 * n.c4 + a13 * n.c3) * k,
+        (0.0 - a01 * n.c5 + a02 * n.c4 - a03 * n.c3) * k,
+        (a31 * n.s5 - a32 * n.s4 + a33 * n.s3) * k,
+        (0.0 - a21 * n.s5 + a22 * n.s4 - a23 * n.s3) * k,
+        (0.0 - a10 * n.c5 + a12 * n.c2 - a13 * n.c1) * k,
+        (a00 * n.c5 - a02 * n.c2 + a03 * n.c1) * k,
+        (0.0 - a30 * n.s5 + a32 * n.s2 - a33 * n.s1) * k,
+        (a20 * n.s5 - a22 * n.s2 + a23 * n.s1) * k,
+        (a10 * n.c4 - a11 * n.c2 + a13 * n.c0) * k,
+        (0.0 - a00 * n.c4 + a01 * n.c2 - a03 * n.c0) * k,
+        (a30 * n.s4 - a31 * n.s2 + a33 * n.s0) * k,
+        (0.0 - a20 * n.s4 + a21 * n.s2 - a23 * n.s0) * k,
+        (0.0 - a10 * n.c3 + a11 * n.c1 - a12 * n.c0) * k,
+        (a00 * n.c3 - a01 * n.c1 + a02 * n.c0) * k,
+        (0.0 - a30 * n.s3 + a31 * n.s1 - a32 * n.s0) * k,
+        (a20 * n.s3 - a21 * n.s1 + a22 * n.s0) * k)
+    return Some(r)
+}
+
+fn m4_traslacion(x: f64, y: f64, z: f64) -> Mat4 {
+    return m4_de_filas(1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, y, 0.0, 0.0, 1.0, z, 0.0, 0.0, 0.0, 1.0)
+}
+
+fn m4_escala(x: f64, y: f64, z: f64) -> Mat4 {
+    return m4_de_filas(x, 0.0, 0.0, 0.0, 0.0, y, 0.0, 0.0, 0.0, 0.0, z, 0.0, 0.0, 0.0, 0.0, 1.0)
+}
+
+fn m4_rotacion_x(ang: f64) -> Mat4 {
+    let c = cos(ang)
+    let s = sin(ang)
+    return m4_de_filas(1.0, 0.0, 0.0, 0.0, 0.0, c, 0.0 - s, 0.0, 0.0, s, c, 0.0, 0.0, 0.0, 0.0, 1.0)
+}
+
+fn m4_rotacion_y(ang: f64) -> Mat4 {
+    let c = cos(ang)
+    let s = sin(ang)
+    return m4_de_filas(c, 0.0, s, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0 - s, 0.0, c, 0.0, 0.0, 0.0, 0.0, 1.0)
+}
+
+fn m4_rotacion_z(ang: f64) -> Mat4 {
+    let c = cos(ang)
+    let s = sin(ang)
+    return m4_de_filas(c, 0.0 - s, 0.0, 0.0, s, c, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+}
+
+# Rotación de `ang` radianes alrededor de `eje` (no hace falta que tenga
+# largo 1), regla de la mano derecha (fórmula de Rodrigues, la de glRotate).
+fn m4_rotacion(eje: Vec3, ang: f64) -> Mat4 {
+    let e = v3_normalizar(eje)
+    let c = cos(ang)
+    let s = sin(ang)
+    let t = 1.0 - c
+    return m4_de_filas(
+        t * e.x * e.x + c, t * e.x * e.y - s * e.z, t * e.x * e.z + s * e.y, 0.0,
+        t * e.x * e.y + s * e.z, t * e.y * e.y + c, t * e.y * e.z - s * e.x, 0.0,
+        t * e.x * e.z - s * e.y, t * e.y * e.z + s * e.x, t * e.z * e.z + c, 0.0,
+        0.0, 0.0, 0.0, 1.0)
+}
+
+# Proyección en perspectiva, como gluPerspective: `fovy` es el ángulo vertical
+# del campo de visión (radianes), `aspecto` ancho/alto, y `cerca`/`lejos` las
+# distancias (positivas) a los planos de recorte. Lleva z = -cerca a -1 y
+# z = -lejos a 1.
+fn m4_perspectiva(fovy: f64, aspecto: f64, cerca: f64, lejos: f64) -> Mat4 {
+    let f = 1.0 / tan(fovy / 2.0)
+    return m4_de_filas(
+        f / aspecto, 0.0, 0.0, 0.0,
+        0.0, f, 0.0, 0.0,
+        0.0, 0.0, (lejos + cerca) / (cerca - lejos), 2.0 * lejos * cerca / (cerca - lejos),
+        0.0, 0.0, 0.0 - 1.0, 0.0)
+}
+
+# Proyección ortográfica, como glOrtho.
+fn m4_ortografica(izq: f64, der: f64, abajo: f64, arriba: f64, cerca: f64, lejos: f64) -> Mat4 {
+    return m4_de_filas(
+        2.0 / (der - izq), 0.0, 0.0, 0.0 - (der + izq) / (der - izq),
+        0.0, 2.0 / (arriba - abajo), 0.0, 0.0 - (arriba + abajo) / (arriba - abajo),
+        0.0, 0.0, 0.0 - 2.0 / (lejos - cerca), 0.0 - (lejos + cerca) / (lejos - cerca),
+        0.0, 0.0, 0.0, 1.0)
+}
+
+# La matriz de vista de una cámara en `ojo` que mira a `centro`, con `arriba`
+# como la dirección de arriba, como gluLookAt: lleva `ojo` al origen y la
+# dirección de la mirada a -z.
+fn m4_mirar_a(ojo: Vec3, centro: Vec3, arriba: Vec3) -> Mat4 {
+    let f = v3_normalizar(v3_resta(centro, ojo))
+    let s = v3_normalizar(v3_cruz(f, arriba))
+    let u = v3_cruz(s, f)
+    return m4_de_filas(
+        s.x, s.y, s.z, 0.0 - v3_punto(s, ojo),
+        u.x, u.y, u.z, 0.0 - v3_punto(u, ojo),
+        0.0 - f.x, 0.0 - f.y, 0.0 - f.z, v3_punto(f, ojo),
+        0.0, 0.0, 0.0, 1.0)
+}
+
+# ---------- Cuat (cuaterniones) ----------
+
+struct Cuat {
+    w: f64
+    x: f64
+    y: f64
+    z: f64
+}
+
+fn cuat(w: f64, x: f64, y: f64, z: f64) -> Cuat {
+    return Cuat { w: w, x: x, y: y, z: z }
+}
+
+fn c_identidad() -> Cuat {
+    return Cuat { w: 1.0, x: 0.0, y: 0.0, z: 0.0 }
+}
+
+# La rotación de `ang` radianes alrededor de `eje` (no hace falta que tenga
+# largo 1).
+fn c_desde_eje_angulo(eje: Vec3, ang: f64) -> Cuat {
+    let e = v3_normalizar(eje)
+    let s = sin(ang / 2.0)
+    return Cuat { w: cos(ang / 2.0), x: e.x * s, y: e.y * s, z: e.z * s }
+}
+
+# a·b (producto de Hamilton): rotar con b y después con a.
+fn c_producto(a: Cuat, b: Cuat) -> Cuat {
+    return Cuat {
+        w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+        x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w
+    }
+}
+
+fn c_conjugado(a: Cuat) -> Cuat {
+    return Cuat { w: a.w, x: 0.0 - a.x, y: 0.0 - a.y, z: 0.0 - a.z }
+}
+
+fn c_punto(a: Cuat, b: Cuat) -> f64 {
+    return a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+fn c_largo(a: Cuat) -> f64 {
+    return sqrt(c_punto(a, a))
+}
+
+# Largo 1; el cero queda como la identidad.
+fn c_normalizar(a: Cuat) -> Cuat {
+    let l = c_largo(a)
+    if l == 0.0 {
+        return c_identidad()
+    }
+    return Cuat { w: a.w / l, x: a.x / l, y: a.y / l, z: a.z / l }
+}
+
+# La matriz de rotación de un cuaternión de largo 1.
+fn c_a_m4(q: Cuat) -> Mat4 {
+    let xx = q.x * q.x
+    let yy = q.y * q.y
+    let zz = q.z * q.z
+    let xy = q.x * q.y
+    let xz = q.x * q.z
+    let yz = q.y * q.z
+    let wx = q.w * q.x
+    let wy = q.w * q.y
+    let wz = q.w * q.z
+    return m4_de_filas(
+        1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy), 0.0,
+        2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx), 0.0,
+        2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy), 0.0,
+        0.0, 0.0, 0.0, 1.0)
+}
+
+# v rotado por q (de largo 1): q·v·q*.
+fn c_rotar_v3(q: Cuat, v: Vec3) -> Vec3 {
+    let p = Cuat { w: 0.0, x: v.x, y: v.y, z: v.z }
+    let r = c_producto(c_producto(q, p), c_conjugado(q))
+    return Vec3 { x: r.x, y: r.y, z: r.z }
+}
+
+# Interpolación esférica entre dos rotaciones (de largo 1), por el camino
+# corto: t = 0 da a, t = 1 da b (o -b, que es la misma rotación).
+fn c_slerp(a: Cuat, b: Cuat, t: f64) -> Cuat {
+    let mut d = c_punto(a, b)
+    let mut bw = b.w
+    let mut bx = b.x
+    let mut by = b.y
+    let mut bz = b.z
+    if d < 0.0 {
+        d = 0.0 - d
+        bw = 0.0 - bw
+        bx = 0.0 - bx
+        by = 0.0 - by
+        bz = 0.0 - bz
+    }
+    if d > 0.9995 {
+        # casi iguales: lineal y normalizado (el seno de abajo sería ~0)
+        return c_normalizar(Cuat { w: interpolar(a.w, bw, t), x: interpolar(a.x, bx, t), y: interpolar(a.y, by, t), z: interpolar(a.z, bz, t) })
+    }
+    let th = acos(d)
+    let s = sin(th)
+    let ka = sin((1.0 - t) * th) / s
+    let kb = sin(t * th) / s
+    return Cuat { w: ka * a.w + kb * bw, x: ka * a.x + kb * bx, y: ka * a.y + kb * by, z: ka * a.z + kb * bz }
+}
+
+# ---------- Azar: xorshift32 con semilla ----------
+
+struct Azar {
+    estado: i32
+}
+
+# Un generador con esa semilla (la semilla 0 se cambia por otra fija: con
+# estado 0, xorshift se queda en 0 para siempre).
+fn azar(semilla: i32) -> Azar {
+    if semilla == 0 {
+        return Azar { estado: 0 - 1831433054 }
+    }
+    return Azar { estado: semilla }
+}
+
+# El siguiente número, como i32 (todos los valores salvo el 0). Es el
+# xorshift32 de Marsaglia (13, 17, 5); el >> de SCAR es aritmético, así que el
+# desplazamiento lógico se hace con una máscara.
+fn azar_siguiente(a: Azar) -> i32 {
+    let mut x = a.estado
+    x = x ^ (x << 13)
+    x = x ^ ((x >> 17) & 32767)
+    x = x ^ (x << 5)
+    a.estado = x
+    return x
+}
+
+# Uniforme en (0, 1): nunca da 0 ni 1.
+fn azar_uniforme(a: Azar) -> f64 {
+    let mut u = to_f64(azar_siguiente(a))
+    if u < 0.0 {
+        u = u + 4294967296.0
+    }
+    return u / 4294967296.0
+}
+
+# Uniforme en (lo, hi).
+fn azar_entre(a: Azar, lo: f64, hi: f64) -> f64 {
+    return lo + (hi - lo) * azar_uniforme(a)
+}
+
+# Un entero en [lo, hi], los dos incluidos.
+fn azar_entero(a: Azar, lo: i32, hi: i32) -> i32 {
+    let n = to_f64(hi - lo + 1)
+    let k = to_i32(floor(azar_uniforme(a) * n))
+    return lo + min(k, hi - lo)
+}
+
+# Normal con esa media y desviación (Box-Muller; usa dos uniformes por
+# número).
+fn azar_normal(a: Azar, media: f64, desviacion: f64) -> f64 {
+    let u1 = azar_uniforme(a)
+    let u2 = azar_uniforme(a)
+    return media + desviacion * sqrt(0.0 - 2.0 * ln(u1)) * cos(2.0 * pi() * u2)
+}

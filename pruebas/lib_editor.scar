@@ -1,0 +1,24 @@
+# El editor de lib/editor: texto de varias líneas con colores, números de línea, cursor, selección y
+# deshacer. El guion (gui/303_editor.guion) escribe, mueve el cursor, selecciona, copia y pega, y al
+# final el programa imprime el texto. Sin guion es un editor de verdad: se puede escribir en él.
+# ci-env: SCAR_SDL_GUION=./gui/303_editor.guion
+# ci-env: SCAR_SDL_MAX_FRAMES=22
+
+use "gui"
+use "editor"
+use "buffer"
+
+fn main() -> i32 {
+    let ui = gui.ventana("Editor de prueba", 820, 480)
+    gui.oscuro(ui)
+    let ejemplo = "# Suma los números de 1 a n\nfn suma(n: i32) -> i32 {\n    let mut total = 0\n    for i in 1..(n + 1) {\n        total = total + i\n    }\n    return total\n}\n\nfn main() -> i32 {\n    print(\"suma = \" + a_texto(suma(10)))   # 55\n    return 0\n}\n"
+    let e = editor.nuevo(ejemplo)
+    editor.enfocar(e)
+    while gui.abierta(ui) {
+        gui.titulo(ui, "Editor")
+        editor.dibujar(ui, e, 0, 390)
+        gui.texto_tenue(ui, "Línea " + a_texto(e.b.fila + 1) + ", columna " + a_texto(e.b.col + 1))
+    }
+    print(buffer.contenido(e.b))
+    return 0
+}

@@ -1,0 +1,22 @@
+# Capítulo 10: módulos propios y la librería estándar.
+#
+#   scar run ejemplos/10_modulos/programa.scar
+
+use "geo"           # geo.scar, al lado de este archivo
+use "estadistica"   # de la librería estándar
+use "texto"
+
+fn main() {
+    let triangulo: Vec<geo.Punto> = vec_new()
+    triangulo.push(geo.punto(0.0, 0.0))
+    triangulo.push(geo.punto(3.0, 0.0))
+    triangulo.push(geo.punto(3.0, 4.0))
+    print("perímetro del triángulo:", geo.perimetro(triangulo))
+
+    # una Serie guarda la lista dentro de un struct: así se presta a cada
+    # función en vez de entregarse (capítulo 8)
+    let notas = estadistica.serie([5.5, 6.0, 4.8, 7.0, 6.3])
+    print("media:", texto.decimales(estadistica.media(notas), 2))
+    print("mediana:", estadistica.mediana(notas))
+    print("desviación:", texto.decimales(estadistica.desviacion(notas), 3))
+}

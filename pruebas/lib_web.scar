@@ -1,0 +1,207 @@
+# lib/web: URLs (analizar, armar, unir, consulta) y un cliente HTTP.
+# Las URLs se comprueban contra urllib.parse en pruebas/test_web_python.py, y el cliente contra
+# un servidor de Python. Acá el servidor es una task escrita en SCAR (http://127.0.0.1), así
+# el ejemplo corre solo y da lo mismo en el intérprete y en nativo.
+
+use "web"
+use "json"
+use "codigos"
+use "texto"
+
+# ---------- un servidor de prueba (una task) ----------
+
+fn leer_linea(s: Socket) -> Result<str> {
+    let mut r = ""
+    let mut seguir = true
+    while seguir {
+        let b = s.read_bytes(1)?
+        let mut c = 0
+        let mut o = b.get(0)
+        while let Some(x) = o {
+            c = x
+            o = None
+        }
+        if c == 10 {
+            seguir = false
+        } else {
+            if c != 13 {
+                r = r + chr(c)
+            }
+        }
+    }
+    return Ok(r)
+}
+
+fn responder(s: Socket, estado: str, extra: str, cuerpo: str) -> Result<i32> {
+    let n = codigos.de_texto(cuerpo).v.len()
+    s.write("HTTP/1.1 " + estado + "\r\n" + extra + "Content-Length: " + a_texto(n) + "\r\nConnection: close\r\n\r\n" + cuerpo)?
+    return Ok(0)
+}
+
+fn leer_cuerpo(s: Socket, largo: i32) -> Result<str> {
+    let d = codigos.vacio()
+    if largo > 0 {
+        let v = s.read_bytes(largo)?
+        let mut i = 0
+        while i < v.len() {
+            let mut o = v.get(i)
+            while let Some(x) = o {
+                d.v.push(x)
+                o = None
+            }
+            i = i + 1
+        }
+    }
+    return codigos.a_cadena(d)
+}
+
+fn numero(t: str) -> i32 {
+    let mut v = 0
+    for i in 0..len(t) {
+        v = v * 10 + ord(t[i]) - 48
+    }
+    return v
+}
+
+fn atender(l: Listener) -> Result<str> {
+    let s = l.accept()?
+    let primera = leer_linea(s)?
+    let mut largo = 0
+    let mut seguir = true
+    while seguir {
+        let linea = leer_linea(s)?
+        if len(linea) == 0 {
+            seguir = false
+        } else {
+            if texto.empieza(texto.minusculas(linea), "content-length:") {
+                largo = numero(texto.recortar(texto.subtexto(linea, 15, len(linea))))
+            }
+        }
+    }
+    let cuerpo = leer_cuerpo(s, largo)?
+    if primera == "GET /hola HTTP/1.1" {
+        responder(s, "200 OK", "Content-Type: text/plain\r\n", "hola desde SCAR")?
+    } else if primera == "POST /eco HTTP/1.1" {
+        responder(s, "200 OK", "Content-Type: application/json\r\n", cuerpo)?
+    } else if primera == "GET /viejo HTTP/1.1" {
+        responder(s, "302 Found", "Location: /hola\r\n", "")?
+    } else if primera == "GET /trozos HTTP/1.1" {
+        s.write("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n6\r\nHola, \r\n5\r\nmundo\r\n0\r\n\r\n")?
+    } else if primera == "GET /json HTTP/1.1" {
+        responder(s, "200 OK", "Content-Type: application/json\r\n", "{\"ok\":true,\"lista\":[1,2,3]}")?
+    } else {
+        responder(s, "404 Not Found", "Content-Type: text/plain\r\n", "no existe")?
+    }
+    s.close()
+    return Ok(primera)
+}
+
+fn servir(puerto: i32, pedidos: i32) -> Result<i32> {
+    let l = tcp_listen(puerto)?
+    let mut n = 0
+    for k in 0..pedidos {
+        let r = atender(l)
+        if r.is_ok() {
+            n = n + 1
+        } else {
+            print("servidor:", r.err())
+        }
+    }
+    l.close()
+    return Ok(n)
+}
+
+task servidor_http(puerto: i32, pedidos: i32) -> i32 {
+    let r = servir(puerto, pedidos)
+    return r.unwrap_or(-1)
+}
+
+# ---------- URLs ----------
+
+fn urls() {
+    match web.analizar("https://ana:clave@Ejemplo.CL:8443/a/b?x=1&y=hola+mundo#fin") {
+        Ok(u) => {
+            print("esquema:", u.esquema, " host:", web.host(u), " puerto:", web.puerto(u))
+            print("usuario:", web.usuario(u), " ruta:", u.ruta, " consulta:", u.consulta, " fragmento:", u.fragmento)
+            print("armada:", web.armar(u))
+        }
+        Err(e) => {
+            print("error:", e)
+        }
+    }
+    print(web.unir("http://a.cl/x/y.html", "../z"))
+    print(web.unir("http://a.cl/x/y.html", "?q=1"))
+    print(web.unir("http://a.cl/x/y.html", "//otro.cl/p"))
+    print(web.unir("http://a.cl/x/y.html", "https://b.cl"))
+    let q = web.consulta_leer("a=1&b=hola+mundo&c=%C3%B1&vacio=", true)
+    for i in 0..web.cantidad(q) {
+        print("  " + web.nombre_en(q, i) + " = " + web.valor_en(q, i))
+    }
+    let p = web.pares()
+    web.poner(p, "ciudad", "Viña del Mar")
+    web.poner(p, "x&y", "1+1")
+    print(web.consulta_armar(p))
+    match web.con_consulta("http://a.cl/buscar?k=1", p) {
+        Ok(u) => {
+            print(u)
+        }
+        Err(e) => {
+            print("error:", e)
+        }
+    }
+    match web.analizar("http://[::1") {
+        Ok(u) => {
+            print("???")
+        }
+        Err(e) => {
+            print("IPv6 mal escrita:", e)
+        }
+    }
+}
+
+# ---------- cliente ----------
+
+fn mostrar(nombre: str, x: web.Respuesta) -> Result<i32> {
+    let t = web.cuerpo_texto(x)
+    if t.is_err() {
+        print(nombre, "->", x.codigo, x.motivo, "| (binario)")
+        return Ok(0)
+    }
+    print(nombre, "->", x.codigo, x.motivo, "|", web.cabecera_de(x, "content-type"), "|", t?)
+    return Ok(0)
+}
+
+fn cliente(base: str) -> Result<i32> {
+    let o = web.opciones()
+    o.reintentos = 30
+    o.pausa = 0.01
+    mostrar("GET /hola", web.obtener_con(base + "/hola", o)?)?
+    let doc = json.nuevo_objeto()
+    json.poner_texto(doc, 0, "ciudad", "Calama")
+    json.poner_entero(doc, 0, "mag", 4)
+    mostrar("POST /eco", web.enviar_json(base + "/eco", doc, o)?)?
+    mostrar("GET /viejo (302)", web.obtener(base + "/viejo")?)?
+    mostrar("GET /trozos", web.obtener(base + "/trozos")?)?
+    let d = web.json_de(web.obtener(base + "/json")?)?
+    print("GET /json -> ok:", json.booleano(d, "ok"), " lista:", json.largo(d, "lista"), " tercer elemento:", json.entero(d, "lista.2"))
+    mostrar("GET /nada (404)", web.obtener(base + "/nada")?)?
+    return Ok(0)
+}
+
+fn error_de(nombre: str, url: str) {
+    let r = web.obtener(url)
+    if r.is_err() {
+        print(nombre, "-> error:", r.err())
+    } else {
+        print(nombre, "-> (sin error)")
+    }
+}
+
+fn main() {
+    urls()
+    let h = spawn servidor_http(41304, 7)
+    print(cliente("http://127.0.0.1:41304"))
+    print("el servidor atendió", h.join(), "pedidos")
+    error_de("https", "https://127.0.0.1/")
+    error_de("sin servidor", "http://127.0.0.1:41305/nadie")
+}

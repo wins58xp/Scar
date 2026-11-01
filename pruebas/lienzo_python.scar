@@ -1,0 +1,96 @@
+# lib/lienzo contra una referencia en Python: lo corre
+# pruebas/test_lienzo_python.py. Dibuja escenas al azar (líneas, rectángulos,
+# círculos, polígonos y copias, con colores opacos y a medias sobre fondos
+# opacos y transparentes) y escribe cada operación y el lienzo final, píxel por
+# píxel, para que Python lo dibuje de nuevo con su propia implementación.
+
+use "mate"
+use "lienzo"
+
+fn hex(p: i32) -> str {
+    let d = "0123456789abcdef"
+    let mut r = ""
+    for k in 0..8 {
+        let n = (p >> (28 - 4 * k)) & 15
+        r = r + d[n]
+    }
+    return r
+}
+
+fn color_al_azar(g: mate.Azar) -> i32 {
+    let tipo = mate.azar_entero(g, 0, 3)
+    let a = if tipo == 0 { 255 } else if tipo == 1 { 128 } else if tipo == 2 { mate.azar_entero(g, 1, 254) } else { 0 }
+    return lienzo.color_a(mate.azar_entero(g, 0, 255), mate.azar_entero(g, 0, 255), mate.azar_entero(g, 0, 255), a)
+}
+
+fn main() {
+    let g = mate.azar(4242)
+    for k in 0..60 {
+        let w = mate.azar_entero(g, 1, 40)
+        let h = mate.azar_entero(g, 1, 30)
+        let fondo = if mate.azar_entero(g, 0, 1) == 0 { lienzo.color(10, 20, 30) } else { color_al_azar(g) }
+        let l = lienzo.nuevo(w, h, fondo)
+        print("L", k, w, h, fondo)
+        for o in 0..10 {
+            let tipo = mate.azar_entero(g, 0, 8)
+            let c = color_al_azar(g)
+            let x0 = mate.azar_entero(g, 0 - 8, w + 8)
+            let y0 = mate.azar_entero(g, 0 - 8, h + 8)
+            let x1 = mate.azar_entero(g, 0 - 8, w + 8)
+            let y1 = mate.azar_entero(g, 0 - 8, h + 8)
+            let r = mate.azar_entero(g, 0 - 1, 15)
+            if tipo == 0 {
+                lienzo.linea(l, x0, y0, x1, y1, c)
+                print("OP", k, "linea", x0, y0, x1, y1, c)
+            } else if tipo == 1 {
+                lienzo.rect(l, x0, y0, r, x1 - x0, c)
+                print("OP", k, "rect", x0, y0, r, x1 - x0, c)
+            } else if tipo == 2 {
+                lienzo.rect_lleno(l, x0, y0, r, x1 - x0, c)
+                print("OP", k, "rect_lleno", x0, y0, r, x1 - x0, c)
+            } else if tipo == 3 {
+                lienzo.circulo(l, x0, y0, r, c)
+                print("OP", k, "circulo", x0, y0, r, c)
+            } else if tipo == 4 {
+                lienzo.circulo_lleno(l, x0, y0, r, c)
+                print("OP", k, "circulo_lleno", x0, y0, r, c)
+            } else if tipo == 5 or tipo == 6 {
+                let n = mate.azar_entero(g, 1, 6)
+                let mut xs: Vec<i32> = vec_new()
+                let mut ys: Vec<i32> = vec_new()
+                let mut txt = ""
+                for i in 0..n {
+                    let px = mate.azar_entero(g, 0 - 8, w + 8)
+                    let py = mate.azar_entero(g, 0 - 8, h + 8)
+                    xs.push(px)
+                    ys.push(py)
+                    txt = txt + " " + a_texto(px) + " " + a_texto(py)
+                }
+                if tipo == 5 {
+                    lienzo.poligono(l, xs, ys, c)
+                    print("OP", k, "poligono", c, n, txt)
+                } else {
+                    lienzo.poligono_lleno(l, xs, ys, c)
+                    print("OP", k, "poligono_lleno", c, n, txt)
+                }
+            } else if tipo == 7 {
+                lienzo.triangulo_lleno(l, x0, y0, x1, y1, r, r * 2, c)
+                print("OP", k, "poligono_lleno", c, 3, x0, y0, x1, y1, r, r * 2)
+            } else {
+                let sw = mate.azar_entero(g, 1, 6)
+                let sh = mate.azar_entero(g, 1, 6)
+                let s = lienzo.nuevo(sw, sh, c)
+                lienzo.poner(s, 0, 0, lienzo.transparente())
+                lienzo.copiar(l, s, x0, y0)
+                print("OP", k, "copiar", sw, sh, c, x0, y0)
+            }
+        }
+        let mut todo = ""
+        for y in 0..h {
+            for x in 0..w {
+                todo = todo + hex(lienzo.leer(l, x, y))
+            }
+        }
+        print("BUF", k, lienzo.suma(l), todo)
+    }
+}

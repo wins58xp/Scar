@@ -1,0 +1,338 @@
+# lib/ansi.scar: color y estilos en la terminal con secuencias ANSI (use "ansi").
+#
+#   use "ansi"
+#   use "colores"
+#
+#   print(ansi.pintar("error", colores.rgb(255, 80, 80)))       # texto de color (24 bits)
+#   print(ansi.negrita(ansi.pintar_fondo(" ok ", colores.rgb(0, 140, 60))))
+#   print(ansi.barra(0.6, 30, colores.rgb(0, 200, 100), colores.rgb(255, 60, 60)))
+#   print(ansi.degradado_texto("de punta a punta", colores.rgb(255, 0, 128), colores.rgb(0, 128, 255)))
+#   print(ansi.pintar_256("para terminales viejas", colores.rgb(255, 128, 0)))
+#   print(ansi.largo_visible(ansi.pintar("hola", colores.rgb(1, 2, 3))))   # 4
+#
+# Escrita entera en SCAR sobre lib/colores (los colores son
+# los mismos i32 de color y lienzo). Cada función devuelve un texto con las secuencias de
+# escape (ESC [ ... m) puestas y quitadas alrededor: el texto de antes y el de después
+# no se tiñen. Las terminales modernas entienden 24 bits (`fg`, `bg`, `pintar`); para las
+# viejas están la paleta de 256 colores (`a_256`, `pintar_256`) y la de 16 (`a_16`,
+# `pintar_16`). `quitar` deja el texto limpio, para guardarlo en un archivo o medirlo.
+# Probada contra una referencia aparte en Python.
+
+use "colores"
+use "texto"
+
+# ---------- secuencias sueltas ----------
+
+# El carácter de escape (27).
+fn esc() -> str {
+    return chr(27)
+}
+
+fn _csi(parametros: str, final: str) -> str {
+    return chr(27) + "[" + parametros + final
+}
+
+# Vuelve todo a lo normal.
+fn reiniciar() -> str {
+    return _csi("0", "m")
+}
+
+# El color del texto en 24 bits (rojo, verde y azul).
+fn fg(c: i32) -> str {
+    return _csi("38;2;" + a_texto(colores.canal_r(c)) + ";" + a_texto(colores.canal_g(c)) + ";" + a_texto(colores.canal_b(c)), "m")
+}
+
+# El color de fondo en 24 bits.
+fn bg(c: i32) -> str {
+    return _csi("48;2;" + a_texto(colores.canal_r(c)) + ";" + a_texto(colores.canal_g(c)) + ";" + a_texto(colores.canal_b(c)), "m")
+}
+
+# El color del texto de la paleta de 256 (0 a 255).
+fn fg_256(i: i32) -> str {
+    return _csi("38;5;" + a_texto(max(0, min(255, i))), "m")
+}
+
+fn bg_256(i: i32) -> str {
+    return _csi("48;5;" + a_texto(max(0, min(255, i))), "m")
+}
+
+# El color del texto de la paleta de 16 (0 a 7 normales, 8 a 15 brillantes).
+fn fg_16(i: i32) -> str {
+    let k = max(0, min(15, i))
+    return _csi(a_texto(if k < 8 { 30 + k } else { 90 + k - 8 }), "m")
+}
+
+fn bg_16(i: i32) -> str {
+    let k = max(0, min(15, i))
+    return _csi(a_texto(if k < 8 { 40 + k } else { 100 + k - 8 }), "m")
+}
+
+# ---------- paletas de 256 y de 16 ----------
+
+# Un color de la paleta de 16 de xterm (los valores por omisión; cada terminal puede
+# cambiarlos).
+fn rgb_de_16(i: i32) -> i32 {
+    let k = max(0, min(15, i))
+    if k == 0 {
+        return colores.rgb(0, 0, 0)
+    }
+    if k == 1 {
+        return colores.rgb(205, 0, 0)
+    }
+    if k == 2 {
+        return colores.rgb(0, 205, 0)
+    }
+    if k == 3 {
+        return colores.rgb(205, 205, 0)
+    }
+    if k == 4 {
+        return colores.rgb(0, 0, 238)
+    }
+    if k == 5 {
+        return colores.rgb(205, 0, 205)
+    }
+    if k == 6 {
+        return colores.rgb(0, 205, 205)
+    }
+    if k == 7 {
+        return colores.rgb(229, 229, 229)
+    }
+    if k == 8 {
+        return colores.rgb(127, 127, 127)
+    }
+    if k == 9 {
+        return colores.rgb(255, 0, 0)
+    }
+    if k == 10 {
+        return colores.rgb(0, 255, 0)
+    }
+    if k == 11 {
+        return colores.rgb(255, 255, 0)
+    }
+    if k == 12 {
+        return colores.rgb(92, 92, 255)
+    }
+    if k == 13 {
+        return colores.rgb(255, 0, 255)
+    }
+    if k == 14 {
+        return colores.rgb(0, 255, 255)
+    }
+    return colores.rgb(255, 255, 255)
+}
+
+fn _nivel(i: i32) -> i32 {
+    if i == 0 {
+        return 0
+    }
+    return 55 + 40 * i
+}
+
+# El color de la paleta de 256 (16 a 231: el cubo de 6 x 6 x 6; 232 a 255: grises; 0 a 15:
+# los de `rgb_de_16`).
+fn rgb_de_256(i: i32) -> i32 {
+    let k = max(0, min(255, i))
+    if k < 16 {
+        return rgb_de_16(k)
+    }
+    if k >= 232 {
+        let g = 8 + 10 * (k - 232)
+        return colores.rgb(g, g, g)
+    }
+    let c = k - 16
+    return colores.rgb(_nivel(c / 36), _nivel((c / 6) % 6), _nivel(c % 6))
+}
+
+fn _nivel_cercano(v: i32) -> i32 {
+    let mut mejor = 0
+    let mut dmin = 1000
+    for i in 0..6 {
+        let d = abs(v - _nivel(i))
+        if d < dmin {
+            dmin = d
+            mejor = i
+        }
+    }
+    return mejor
+}
+
+fn _dist2(a: i32, b: i32) -> i32 {
+    let dr = colores.canal_r(a) - colores.canal_r(b)
+    let dg = colores.canal_g(a) - colores.canal_g(b)
+    let db = colores.canal_b(a) - colores.canal_b(b)
+    return dr * dr + dg * dg + db * db
+}
+
+# El número (16 a 255) de la paleta de 256 que más se parece al color: el mejor entre
+# el cubo y la rampa de grises, por distancia en RGB (a igual distancia, el cubo).
+fn a_256(c: i32) -> i32 {
+    let r = _nivel_cercano(colores.canal_r(c))
+    let g = _nivel_cercano(colores.canal_g(c))
+    let b = _nivel_cercano(colores.canal_b(c))
+    let cubo = 16 + 36 * r + 6 * g + b
+    let mut gris = 232
+    let mut dg = 1000000
+    for i in 232..256 {
+        let d = _dist2(c, rgb_de_256(i))
+        if d < dg {
+            dg = d
+            gris = i
+        }
+    }
+    if _dist2(c, rgb_de_256(gris)) < _dist2(c, rgb_de_256(cubo)) {
+        return gris
+    }
+    return cubo
+}
+
+# El número (0 a 15) de la paleta de 16 que más se parece al color (a igual distancia,
+# el de número más bajo).
+fn a_16(c: i32) -> i32 {
+    let mut mejor = 0
+    let mut dmin = 1000000
+    for i in 0..16 {
+        let d = _dist2(c, rgb_de_16(i))
+        if d < dmin {
+            dmin = d
+            mejor = i
+        }
+    }
+    return mejor
+}
+
+# ---------- texto con color y estilo ----------
+
+# El texto con ese color (24 bits); al terminar se vuelve al color de antes.
+fn pintar(s: str, c: i32) -> str {
+    return fg(c) + s + _csi("39", "m")
+}
+
+# El texto con ese color de fondo.
+fn pintar_fondo(s: str, c: i32) -> str {
+    return bg(c) + s + _csi("49", "m")
+}
+
+# Lo mismo con la paleta de 256, para terminales que no entienden los 24 bits.
+fn pintar_256(s: str, c: i32) -> str {
+    return fg_256(a_256(c)) + s + _csi("39", "m")
+}
+
+# Lo mismo con la paleta de 16.
+fn pintar_16(s: str, c: i32) -> str {
+    return fg_16(a_16(c)) + s + _csi("39", "m")
+}
+
+fn negrita(s: str) -> str {
+    return _csi("1", "m") + s + _csi("22", "m")
+}
+
+fn tenue(s: str) -> str {
+    return _csi("2", "m") + s + _csi("22", "m")
+}
+
+fn cursiva(s: str) -> str {
+    return _csi("3", "m") + s + _csi("23", "m")
+}
+
+fn subrayado(s: str) -> str {
+    return _csi("4", "m") + s + _csi("24", "m")
+}
+
+# Intercambia el color del texto y el del fondo.
+fn invertido(s: str) -> str {
+    return _csi("7", "m") + s + _csi("27", "m")
+}
+
+fn tachado(s: str) -> str {
+    return _csi("9", "m") + s + _csi("29", "m")
+}
+
+# El texto con cada carácter de un color, de `a` (el primero) a `b` (el último), mezclados
+# en Oklab. Los espacios no llevan colores.
+fn degradado_texto(s: str, a: i32, b: i32) -> str {
+    let n = s.len()
+    let mut r = ""
+    for i in 0..n {
+        let t = if n > 1 { to_f64(i) / to_f64(n - 1) } else { 0.0 }
+        let ch = s[i]
+        if ch == " " {
+            r = r + ch
+        } else {
+            r = r + fg(colores.mezclar_oklab(a, b, t)) + ch
+        }
+    }
+    return r + _csi("39", "m")
+}
+
+# Una barra de progreso de `ancho` casillas llena hasta `fraccion` (0 a 1), con el color
+# pasando de `a` a `b` a lo largo de todo el ancho; lo que falta es una trama gris.
+fn barra(fraccion: f64, ancho: i32, a: i32, b: i32) -> str {
+    let w = max(1, ancho)
+    let llenas = to_i32(floor(max(0.0, min(1.0, fraccion)) * to_f64(w)))
+    let mut r = ""
+    for i in 0..llenas {
+        let t = if w > 1 { to_f64(i) / to_f64(w - 1) } else { 0.0 }
+        r = r + fg(colores.mezclar_oklab(a, b, t)) + chr(9608)
+    }
+    if llenas < w {
+        r = r + fg(colores.rgb(90, 90, 90))
+        for i in llenas..w {
+            r = r + chr(9617)
+        }
+    }
+    return r + _csi("39", "m")
+}
+
+# ---------- medir y limpiar ----------
+
+# El texto sin las secuencias de escape de color y estilo (ESC [ parámetros letra, como
+# define ECMA-48). Una secuencia que no termina bien se deja como está.
+fn quitar(s: str) -> str {
+    let n = s.len()
+    let mut r = ""
+    let mut i = 0
+    while i < n {
+        let ch = s[i]
+        if ord(ch) == 27 and i + 1 < n and s[i + 1] == "[" {
+            let mut j = i + 2
+            let mut fin = false
+            let mut valida = true
+            while j < n and fin == false and valida {
+                let k = ord(s[j])
+                if k >= 64 and k <= 126 {
+                    fin = true
+                } else {
+                    if k < 32 or k > 63 {
+                        valida = false
+                    }
+                }
+                j = j + 1
+            }
+            if fin {
+                i = j
+            } else {
+                r = r + ch
+                i = i + 1
+            }
+        } else {
+            r = r + ch
+            i = i + 1
+        }
+    }
+    return r
+}
+
+# Cuántos caracteres se ven (sin contar las secuencias de escape).
+fn largo_visible(s: str) -> i32 {
+    return quitar(s).len()
+}
+
+# Rellena con espacios a la derecha hasta `ancho` caracteres visibles (para alinear
+# columnas de texto con color).
+fn rellenar_der(s: str, ancho: i32) -> str {
+    let falta = ancho - largo_visible(s)
+    if falta <= 0 {
+        return s
+    }
+    return s + texto.repetir(" ", falta)
+}

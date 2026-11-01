@@ -1,0 +1,143 @@
+# lib/config, probado con lib/prueba.
+#
+# Lee INI (como configparser), TOML (como tomllib, sin fechas) y las líneas "clave valor"
+# del sismógrafo, y los escribe de vuelta. La comparación con configparser y tomllib de
+# Python, con miles de archivos al azar y estropeados, está en pruebas/test_config_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "json"
+use "config"
+
+fn error_toml(t: str) -> str {
+    let r = config.leer_toml(t)
+    if r.is_err() {
+        return "error"
+    }
+    return "ok"
+}
+
+fn error_ini(t: str) -> str {
+    let r = config.leer_ini(t)
+    if r.is_err() {
+        return "error"
+    }
+    return "ok"
+}
+
+fn correr(t: prueba.Prueba) -> Result<i32> {
+    prueba.seccion(t, "ini: secciones, claves y valores")
+    let ini = config.leer_ini("# configuración\n[DEFAULT]\nidioma = es\n\n[servidor]\nHost = geofon.gfz-potsdam.de\npuerto: 18000\nnota = una linea\n    y otra\n\n    y una tercera\n\n[ui]\noscuro = YES\nescala = 1.5\n; comentario\nidioma = en\n")?
+    prueba.afirmar_igual_str(t, json.texto(ini, "servidor.host"), "geofon.gfz-potsdam.de", "la clave se baja a minúsculas")
+    prueba.afirmar_igual_str(t, json.texto(ini, "servidor.nota"), "una linea\ny otra\n\ny una tercera", "valor en varias líneas")
+    prueba.afirmar_igual_i32(t, json.largo(ini, ""), 3, "DEFAULT y dos secciones")
+    prueba.afirmar_igual_str(t, config.ini_texto(ini, "servidor", "idioma", "?"), "es", "respaldo en DEFAULT")
+    prueba.afirmar_igual_str(t, config.ini_texto(ini, "ui", "idioma", "?"), "en", "la sección manda sobre DEFAULT")
+    prueba.afirmar_igual_str(t, config.ini_texto(ini, "ui", "nada", "?"), "?", "clave que no está")
+    prueba.afirmar_igual_str(t, config.ini_texto(ini, "otra", "idioma", "?"), "?", "sección que no está")
+    prueba.afirmar_igual_i64(t, config.ini_entero(ini, "servidor", "puerto", 80), 18000, "entero con :")
+    prueba.afirmar_igual_i64(t, config.ini_entero(ini, "servidor", "host", 80), 80, "no es un entero")
+    prueba.afirmar(t, config.ini_booleano(ini, "ui", "OSCURO", false), "booleano YES, clave en mayúsculas")
+    prueba.afirmar(t, config.ini_booleano(ini, "ui", "otro", true), "booleano que falta")
+    prueba.afirmar_cerca(t, config.ini_decimal(ini, "ui", "escala", 0.0), 1.5, 1e-12, "decimal")
+    prueba.afirmar(t, config.ini_tiene(ini, "ui", "idioma"), "ini_tiene")
+    prueba.afirmar(t, config.ini_tiene(ini, "ui", "puerto") == false, "ini_tiene que no")
+    let secs = config.ini_secciones(ini)
+    prueba.afirmar_igual_i32(t, secs.len(), 2, "secciones sin DEFAULT")
+
+    prueba.seccion(t, "ini: errores")
+    prueba.afirmar_igual_str(t, error_ini("k = v\n"), "error", "valor antes de una sección")
+    prueba.afirmar_igual_str(t, error_ini("[a]\nk\n"), "error", "línea sin = ni :")
+    prueba.afirmar_igual_str(t, error_ini("[a]\n= v\n"), "error", "clave vacía")
+    prueba.afirmar_igual_str(t, error_ini("[a]\n[a]\n"), "error", "sección repetida")
+    prueba.afirmar_igual_str(t, error_ini("[a]\nk=1\nK=2\n"), "error", "clave repetida (sin importar mayúsculas)")
+    prueba.afirmar_igual_str(t, error_ini("[a]\nk=1\n[b]\nk=2\n"), "ok", "la misma clave en otra sección")
+    prueba.afirmar_igual_str(t, error_ini(""), "ok", "texto vacío")
+
+    prueba.seccion(t, "ini: escribir")
+    let salida = config.escribir_ini(ini)?
+    prueba.afirmar_igual_str(t, salida, "[DEFAULT]\nidioma = es\n\n[servidor]\nhost = geofon.gfz-potsdam.de\npuerto = 18000\nnota = una linea\n\ty otra\n\t\n\ty una tercera\n\n[ui]\noscuro = YES\nescala = 1.5\nidioma = en\n\n", "escribir_ini")
+    let otra = config.leer_ini(salida)?
+    prueba.afirmar_igual_str(t, config.escribir_ini(otra)?, salida, "lo escrito se lee y se escribe igual")
+
+    prueba.seccion(t, "toml: valores")
+    let toml = config.leer_toml("# sismógrafo\ntitulo = \"Red \\\"CX\\\"\"\nactivo = true\npuerto = 18_000\nmascara = 0xFF\numbral = 2.5e-3\ninfinito = -inf\n\n[servidor]\nhost = 'geofon'\nsegundos = [1, 2, 3]\nmezcla = [ 1, 'dos', [3.5], { x = 4 } ]\n\n[servidor.opciones]\nreintentos = 3\nlargo = \"\"\"\nuna\ndos\"\"\"\n\n[[estacion]]\nnombre = \"PB06\"\ncanal.z = \"BHZ\"\n\n[[estacion]]\nnombre = \"PB03\"\n")?
+    prueba.afirmar_igual_str(t, json.texto(toml, "titulo"), "Red \"CX\"", "cadena con escape")
+    prueba.afirmar(t, json.booleano(toml, "activo"), "booleano")
+    prueba.afirmar_igual_str(t, json.texto(toml, "puerto"), "18000", "entero con guiones bajos")
+    prueba.afirmar_igual_str(t, json.texto(toml, "mascara"), "255", "entero hexadecimal")
+    prueba.afirmar_cerca(t, json.numero(toml, "umbral"), 0.0025, 1e-15, "flotante")
+    prueba.afirmar_igual_str(t, json.texto(toml, "infinito"), "-inf", "infinito")
+    prueba.afirmar_igual_str(t, json.texto(toml, "servidor.host"), "geofon", "cadena literal")
+    prueba.afirmar_igual_i32(t, json.largo(toml, "servidor.segundos"), 3, "arreglo")
+    prueba.afirmar_igual_i64(t, json.entero(toml, "servidor.mezcla.3.x"), 4, "tabla en línea dentro de un arreglo")
+    prueba.afirmar_cerca(t, json.numero(toml, "servidor.mezcla.2.0"), 3.5, 1e-12, "arreglo dentro de un arreglo")
+    prueba.afirmar_igual_str(t, json.texto(toml, "servidor.opciones.largo"), "una\ndos", "cadena de varias líneas")
+    prueba.afirmar_igual_i32(t, json.largo(toml, "estacion"), 2, "arreglo de tablas")
+    prueba.afirmar_igual_str(t, json.texto(toml, "estacion.0.canal.z"), "BHZ", "clave con puntos")
+    prueba.afirmar_igual_str(t, json.texto(toml, "estacion.1.nombre"), "PB03", "segundo elemento")
+
+    prueba.seccion(t, "toml: errores")
+    prueba.afirmar_igual_str(t, error_toml("a = 1\na = 2\n"), "error", "clave repetida")
+    prueba.afirmar_igual_str(t, error_toml("[a]\n[a]\n"), "error", "tabla repetida")
+    prueba.afirmar_igual_str(t, error_toml("[a.b]\n[a]\nc = 1\n"), "ok", "tabla de arriba después de la de abajo")
+    prueba.afirmar_igual_str(t, error_toml("a.b = 1\n[a]\n"), "error", "tabla ya definida con puntos")
+    prueba.afirmar_igual_str(t, error_toml("a = {b = 1}\na.c = 2\n"), "error", "tabla en línea no se toca")
+    prueba.afirmar_igual_str(t, error_toml("a = [1]\n[[a]]\n"), "error", "arreglo fijo no se extiende")
+    prueba.afirmar_igual_str(t, error_toml("a = 01\n"), "error", "ceros a la izquierda")
+    prueba.afirmar_igual_str(t, error_toml("a = [1 2]\n"), "error", "arreglo sin coma")
+    prueba.afirmar_igual_str(t, error_toml("a = {b = 1,}\n"), "error", "coma final en tabla en línea")
+    prueba.afirmar_igual_str(t, error_toml("a = \"sin cerrar\n"), "error", "cadena sin cerrar")
+    prueba.afirmar_igual_str(t, error_toml("a = \"\\q\"\n"), "error", "escape que no existe")
+    prueba.afirmar_igual_str(t, error_toml("a = 1979-05-27\n"), "error", "las fechas no están soportadas")
+    prueba.afirmar_igual_str(t, error_toml("a = [1,]\n"), "ok", "coma final en arreglo")
+    let dolor = config.leer_toml("a = 1979-05-27\n")
+    prueba.afirmar(t, dolor.is_err(), "error de fecha")
+
+    prueba.seccion(t, "toml: escribir")
+    let escrito = config.escribir_toml(toml)?
+    let de_nuevo = config.leer_toml(escrito)?
+    prueba.afirmar_igual_str(t, json.texto(de_nuevo, "estacion.0.canal.z"), "BHZ", "lo escrito se lee igual (tabla)")
+    prueba.afirmar_igual_str(t, json.texto(de_nuevo, "servidor.opciones.largo"), "una\ndos", "lo escrito se lee igual (texto)")
+    prueba.afirmar_igual_i64(t, json.entero(de_nuevo, "servidor.mezcla.3.x"), 4, "lo escrito se lee igual (arreglo)")
+    prueba.afirmar_igual_str(t, json.escribir(toml), json.escribir(de_nuevo), "el mismo árbol en JSON")
+    let chico = config.leer_toml("b = 1\n[t]\nx = \"a\\tb\"\n[[l]]\nk = 1\n[[l]]\nk = 2\n")?
+    prueba.afirmar_igual_str(t, config.escribir_toml(chico)?, "b = 1\n\n[t]\nx = \"a\\tb\"\n\n[[l]]\nk = 1\n\n[[l]]\nk = 2\n", "escribir_toml")
+
+    prueba.seccion(t, "líneas: el formato de sismografo_vivo.conf")
+    let lin = config.leer_lineas("# ajustes\nservidor geofon.gfz-potsdam.de 18000\nestacion PB06 CX BHZ\nestacion PB03 CX BHZ\n\nhora chile\nhora  utc  \n")
+    prueba.afirmar_igual_str(t, config.ultima(lin, "servidor", ""), "geofon.gfz-potsdam.de 18000", "una línea")
+    prueba.afirmar_igual_str(t, config.campo(config.ultima(lin, "servidor", ""), 1), "18000", "campo")
+    prueba.afirmar_igual_str(t, config.ultima(lin, "hora", "?"), "utc", "si se repite, manda la última")
+    prueba.afirmar_igual_str(t, config.ultima(lin, "nada", "?"), "?", "clave que no está")
+    let est = config.todas(lin, "estacion")
+    prueba.afirmar_igual_i32(t, est.len(), 2, "todas las líneas de una clave")
+    prueba.afirmar_igual_str(t, config.campo("PB06 CX BHZ", 2), "BHZ", "tercer campo")
+    prueba.afirmar_igual_str(t, config.campo("PB06 CX BHZ", 3), "", "campo que no hay")
+    prueba.afirmar_igual_str(t, config.escribir_lineas(lin)?, "servidor geofon.gfz-potsdam.de 18000\nestacion PB06 CX BHZ\nestacion PB03 CX BHZ\nhora chile\nhora utc\n", "escribir_lineas")
+
+    prueba.seccion(t, "convertir textos")
+    prueba.afirmar_igual_i64(t, config.entero_de(" 1_000 ", 0), 1000, "entero con guion bajo")
+    prueba.afirmar_igual_i64(t, config.entero_de("1__0", 7), 7, "dos guiones bajos")
+    prueba.afirmar_igual_i64(t, config.entero_de("-12", 7), 0 - 12, "negativo")
+    prueba.afirmar_igual_i64(t, config.entero_de("99999999999999999999", 7), 7, "más de 63 bits")
+    prueba.afirmar(t, config.booleano_de("Off", true) == false, "off")
+    prueba.afirmar(t, config.booleano_de("talvez", true), "no reconocido")
+    prueba.afirmar_cerca(t, config.decimal_de("2.75", 0.0), 2.75, 1e-12, "decimal_de")
+    return Ok(prueba.terminar(t))
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("lib/config")
+    let r = correr(t)
+    match r {
+        Ok(codigo) => {
+            return codigo
+        }
+        Err(e) => {
+            print("ERROR: " + e)
+            return 1
+        }
+    }
+    return 1
+}

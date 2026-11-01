@@ -1,0 +1,152 @@
+# lib/codigos, probada con lib/prueba.
+#
+# Hexadecimal, base64, SHA-256, SHA-1, MD5, HMAC, CRC-32, UUID versión 4 y escape de URL,
+# con los vectores de prueba de los estándares (FIPS 180, RFC 4231, RFC 4648, RFC 2202,
+# RFC 1321) y casos que se saben a mano. La comparación con hashlib, hmac, base64, zlib,
+# uuid y urllib, sobre 390 casos al azar, está en pruebas/test_codigos_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "codigos"
+
+fn t(s: str) -> codigos.Datos {
+    return codigos.de_texto(s)
+}
+
+fn ok_hex(r: Result<codigos.Datos>) -> str {
+    match r {
+        Ok(d) => {
+            return codigos.hex(d)
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn ok_txt(r: Result<str>) -> str {
+    match r {
+        Ok(s) => {
+            return s
+        }
+        Err(e) => {
+            return "ERR"
+        }
+    }
+    return "ERR"
+}
+
+fn correr(p: prueba.Prueba) -> Result<i32> {
+    prueba.seccion(p, "hexadecimal")
+    prueba.afirmar_igual_str(p, codigos.hex(t("hola")), "686f6c61", "hex de hola")
+    prueba.afirmar_igual_str(p, codigos.hex(codigos.vacio()), "", "hex de nada")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.a_cadena(codigos.de_hex("686F6c61")?)), "hola", "de_hex acepta mayúsculas y minúsculas")
+    prueba.afirmar_igual_str(p, ok_hex(codigos.de_hex("abc")), "ERR", "largo impar")
+    prueba.afirmar_igual_str(p, ok_hex(codigos.de_hex("zz")), "ERR", "no es hexadecimal")
+
+    prueba.seccion(p, "base64")
+    prueba.afirmar_igual_str(p, codigos.base64(t("")), "", "base64 de nada")
+    prueba.afirmar_igual_str(p, codigos.base64(t("f")), "Zg==", "RFC 4648: f")
+    prueba.afirmar_igual_str(p, codigos.base64(t("fo")), "Zm8=", "RFC 4648: fo")
+    prueba.afirmar_igual_str(p, codigos.base64(t("foo")), "Zm9v", "RFC 4648: foo")
+    prueba.afirmar_igual_str(p, codigos.base64(t("foobar")), "Zm9vYmFy", "RFC 4648: foobar")
+    let raro = codigos.de_hex("fbff")?
+    prueba.afirmar_igual_str(p, codigos.base64(raro), "+/8=", "alfabeto normal")
+    prueba.afirmar_igual_str(p, codigos.base64_url(raro, true), "-_8=", "alfabeto de URL con relleno")
+    prueba.afirmar_igual_str(p, codigos.base64_url(raro, false), "-_8", "alfabeto de URL sin relleno")
+    prueba.afirmar_igual_str(p, ok_hex(codigos.de_base64("+/8=")), "fbff", "decodifica el alfabeto normal")
+    prueba.afirmar_igual_str(p, ok_hex(codigos.de_base64_url("-_8")), "fbff", "decodifica el de URL sin relleno")
+    prueba.afirmar_igual_str(p, ok_hex(codigos.de_base64("Zm9vYg==")), "666f6f62", "decodifica con relleno")
+    prueba.afirmar_igual_str(p, ok_hex(codigos.de_base64("Zm9vYg")), "ERR", "falta el relleno")
+    prueba.afirmar_igual_str(p, ok_hex(codigos.de_base64("Zm9v Yg==")), "ERR", "un espacio adentro")
+    prueba.afirmar_igual_str(p, ok_hex(codigos.de_base64("Zh==")), "ERR", "bits de sobra distintos de cero")
+    prueba.afirmar_igual_str(p, ok_hex(codigos.de_base64("-_8=")), "ERR", "el alfabeto de URL no vale en el normal")
+
+    prueba.seccion(p, "SHA-256")
+    prueba.afirmar_igual_str(p, codigos.sha256_hex(t("")), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "FIPS 180: vacío")
+    prueba.afirmar_igual_str(p, codigos.sha256_hex(t("abc")), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "FIPS 180: abc")
+    prueba.afirmar_igual_str(p, codigos.sha256_hex(t("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", "FIPS 180: dos bloques")
+    let mut mil = ""
+    for i in 0..100 {
+        mil = mil + "aaaaaaaaaa"
+    }
+    prueba.afirmar_igual_str(p, codigos.sha256_hex(t(mil)), "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3", "cien veces diez a (varios bloques)")
+    prueba.afirmar_igual_i32(p, codigos.largo(codigos.sha256(t("x"))), 32, "32 bytes")
+
+    prueba.seccion(p, "SHA-1 y MD5")
+    prueba.afirmar_igual_str(p, codigos.sha1_hex(t("abc")), "a9993e364706816aba3e25717850c26c9cd0d89d", "SHA-1 de abc")
+    prueba.afirmar_igual_str(p, codigos.sha1_hex(t("")), "da39a3ee5e6b4b0d3255bfef95601890afd80709", "SHA-1 de nada")
+    prueba.afirmar_igual_str(p, codigos.md5_hex(t("")), "d41d8cd98f00b204e9800998ecf8427e", "RFC 1321: vacío")
+    prueba.afirmar_igual_str(p, codigos.md5_hex(t("abc")), "900150983cd24fb0d6963f7d28e17f72", "RFC 1321: abc")
+    prueba.afirmar_igual_str(p, codigos.md5_hex(t("message digest")), "f96b697d7cb7938d525a2f31aaf161d0", "RFC 1321: message digest")
+
+    prueba.seccion(p, "HMAC")
+    let clave = codigos.de_hex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b")?
+    prueba.afirmar_igual_str(p, ok_txt(codigos.hmac_hex("sha256", clave, t("Hi There"))), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7", "RFC 4231, caso 1")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.hmac_hex("sha256", t("Jefe"), t("what do ya want for nothing?"))), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", "RFC 4231, caso 2")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.hmac_hex("sha1", t("Jefe"), t("what do ya want for nothing?"))), "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79", "RFC 2202 con SHA-1")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.hmac_hex("md5", t("Jefe"), t("what do ya want for nothing?"))), "750c783e6ab0b503eaa86e310a5db738", "RFC 2202 con MD5")
+    let larga = codigos.vacio()
+    for i in 0..131 {
+        codigos.agregar(larga, 170)
+    }
+    prueba.afirmar_igual_str(p, ok_txt(codigos.hmac_hex("sha256", larga, t("Test Using Larger Than Block-Size Key - Hash Key First"))), "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54", "RFC 4231, clave más larga que el bloque")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.hmac_hex("sha512", clave, t("x"))), "ERR", "algoritmo desconocido")
+    prueba.afirmar(p, codigos.son_iguales(codigos.hmac_sha256(t("k"), t("m")), codigos.hmac("sha256", t("k"), t("m"))?), "hmac_sha256 es lo mismo que hmac")
+    prueba.afirmar(p, codigos.son_iguales(t("abc"), t("abd")) == false, "son_iguales distingue")
+
+    prueba.seccion(p, "CRC-32 y Adler-32")
+    prueba.afirmar_igual_i64(p, codigos.crc32(t("123456789")), 3421780262, "CRC-32 de 123456789")
+    prueba.afirmar_igual_i64(p, codigos.crc32(codigos.vacio()), 0, "CRC-32 de nada")
+    prueba.afirmar_igual_i64(p, codigos.adler32(t("Wikipedia")), 300286872, "Adler-32 de Wikipedia")
+
+    prueba.seccion(p, "UTF-8")
+    prueba.afirmar_igual_str(p, codigos.hex(t("ñ")), "c3b1", "ñ son dos bytes")
+    prueba.afirmar_igual_str(p, codigos.hex(t("日")), "e697a5", "日 son tres")
+    prueba.afirmar_igual_str(p, codigos.hex(t("😀")), "f09f9880", "un emoji son cuatro")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.a_cadena(t("año 日 😀"))), "año 日 😀", "ida y vuelta")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.a_cadena(codigos.de_hex("c328")?)), "ERR", "continuación inválida")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.a_cadena(codigos.de_hex("c0af")?)), "ERR", "forma larga de más")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.a_cadena(codigos.de_hex("eda080")?)), "ERR", "sustituto")
+
+    prueba.seccion(p, "UUID")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.uuid4_de(codigos.de_hex("00000000000000000000000000000000")?)), "00000000-0000-4000-8000-000000000000", "ceros con versión y variante")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.uuid4_de(codigos.de_hex("ffffffffffffffffffffffffffffffff")?)), "ffffffff-ffff-4fff-bfff-ffffffffffff", "unos con versión y variante")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.uuid4_de(codigos.de_hex("00")?)), "ERR", "tiene que ser de 16 bytes")
+    let u = ok_txt(codigos.uuid4())
+    prueba.afirmar_igual_i32(p, u.len(), 36, "un UUID al azar mide 36 caracteres")
+    prueba.afirmar_igual_str(p, u[14], "4", "versión 4")
+    prueba.afirmar(p, u != ok_txt(codigos.uuid4()), "dos UUID al azar son distintos")
+    prueba.afirmar_igual_i32(p, codigos.largo(codigos.aleatorios(10)?), 10, "10 bytes al azar")
+
+    prueba.seccion(p, "escape de URL")
+    prueba.afirmar_igual_str(p, codigos.url_codificar("a b&c=d", false), "a%20b%26c%3Dd", "espacio como %20")
+    prueba.afirmar_igual_str(p, codigos.url_codificar("a b&c=d", true), "a+b%26c%3Dd", "espacio como +")
+    prueba.afirmar_igual_str(p, codigos.url_codificar("año ¿qué?", false), "a%C3%B1o%20%C2%BFqu%C3%A9%3F", "UTF-8 en mayúsculas")
+    prueba.afirmar_igual_str(p, codigos.url_codificar("AZaz09-._~", false), "AZaz09-._~", "los no reservados quedan")
+    prueba.afirmar_igual_str(p, codigos.url_codificar("/?#", false), "%2F%3F%23", "los reservados se escapan")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.url_decodificar("a%20b%26c+d", false)), "a b&c+d", "decodifica, el + queda +")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.url_decodificar("a%20b%26c+d", true)), "a b&c d", "decodifica, el + es espacio")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.url_decodificar("a%C3%B1o", false)), "año", "decodifica UTF-8")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.url_decodificar("100%", false)), "ERR", "% sin cifras")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.url_decodificar("%zz", false)), "ERR", "% con cifras que no son")
+    prueba.afirmar_igual_str(p, ok_txt(codigos.url_decodificar("%ff", false)), "ERR", "no es UTF-8")
+
+    return Ok(prueba.terminar(p))
+}
+
+fn main() -> i32 {
+    let p = prueba.nueva("lib/codigos")
+    let r = correr(p)
+    match r {
+        Ok(codigo) => {
+            return codigo
+        }
+        Err(e) => {
+            print("ERROR:", e)
+            return 1
+        }
+    }
+    return 1
+}

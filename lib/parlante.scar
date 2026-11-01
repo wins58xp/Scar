@@ -1,0 +1,47 @@
+# lib/parlante.scar: hacer sonar un audio.Sonido en vivo (use "parlante").
+#
+#   use "audio"
+#   use "parlante"
+#
+#   let la = audio.seno(440.0, 0.3, 1.0, 44100)
+#   audio.adsr(la, 0.01, 0.1, 0.7, 0.2)
+#   parlante.sonar(la)          # vuelve enseguida: suena mientras el programa sigue
+#   parlante.esperar()          # hasta que termine
+#
+# sonar le pasa a C las muestras de una vez (un Vec<f64> en la firma de una
+# extern fn: puntero + largo) y C las pone en
+# la cola del parlante de SDL (native/scarsdl.c). Lo que se manda mientras algo
+# suena va detrás, sin cortes. Sin parlante (una máquina sin sonido, la CI),
+# sonar devuelve false y no pasa nada más; el resto del programa sigue igual.
+
+use "audio"
+
+extern "C" fn scar_sdl_sonar(muestras: Vec<f64>, canales: i32, tasa: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_sonando() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_callar() -> i32 from "scarsdl"
+
+# Pone el sonido en la cola del parlante. true si quedó sonando.
+fn sonar(s: audio.Sonido) -> bool {
+    return scar_sdl_sonar(s.datos, s.canales, s.tasa) == 0
+}
+
+# Cuántas muestras quedan por sonar (de todos los canales; 0 si terminó).
+fn pendientes() -> i32 {
+    return scar_sdl_sonando()
+}
+
+fn sonando() -> bool {
+    return scar_sdl_sonando() > 0
+}
+
+# Espera a que termine lo que está en la cola.
+fn esperar() {
+    while scar_sdl_sonando() > 0 {
+        sleep(0.01)
+    }
+}
+
+# Corta lo que está sonando.
+fn callar() {
+    scar_sdl_callar()
+}

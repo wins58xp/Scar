@@ -1,0 +1,247 @@
+# lib/buffer contra un modelo de referencia en Python: lo corre pruebas/test_buffer_python.py.
+# Lee "casos.json" (en la carpeta donde corre): "ops" es una lista de pasos (cada uno una lista
+# [nombre, argumentos...]) que se aplican, uno tras otro, a un buffer que empieza con "ini"; después
+# de cada paso se escribe una línea "E k estado". "clases" es una lista de líneas de código de las
+# que se escribe la clase de cada carácter ("C k 0,0,1,..."). Los textos van como puntos de código
+# separados por comas ("_" = vacío) para que no los toque ninguna codificación.
+
+use "json"
+use "buffer"
+
+fn cps(s: str) -> str {
+    let n = len(s)
+    if n == 0 {
+        return "_"
+    }
+    let mut r = ""
+    for i in 0..n {
+        if i > 0 {
+            r = r + ","
+        }
+        r = r + a_texto(ord(s[i]))
+    }
+    return r
+}
+
+fn de_cps(s: str) -> str {
+    let mut r = ""
+    let mut n = 0
+    let mut en_numero = false
+    for i in 0..len(s) {
+        let c = ord(s[i])
+        if c >= 48 and c <= 57 {
+            n = n * 10 + (c - 48)
+            en_numero = true
+        } else {
+            if en_numero {
+                r = r + chr(n)
+            }
+            n = 0
+            en_numero = false
+        }
+    }
+    if en_numero {
+        r = r + chr(n)
+    }
+    return r
+}
+
+fn estado(b: buffer.Buffer) -> str {
+    let mut s = cps(buffer.contenido(b)) + " " + a_texto(b.fila) + " " + a_texto(b.col) + " " + a_texto(b.af) + " " + a_texto(b.ac)
+    s = s + " " + a_texto(b.uf.len()) + " " + a_texto(b.rf.len())
+    if b.sucio {
+        s = s + " 1"
+    } else {
+        s = s + " 0"
+    }
+    return s
+}
+
+fn bandera(d: json.Doc, r: str, k: i32) -> bool {
+    return json.entero(d, r + "." + a_texto(k)) != 0
+}
+
+fn paso(d: json.Doc, b: buffer.Buffer, k: i32) -> str {
+    let r = "ops." + a_texto(k)
+    let nombre = json.texto(d, r + ".0")
+    let mut extra = ""
+    if nombre == "ins" {
+        buffer.insertar(b, de_cps(json.texto(d, r + ".1")))
+    }
+    if nombre == "esc" {
+        buffer.escribir(b, de_cps(json.texto(d, r + ".1")))
+    }
+    if nombre == "pegar" {
+        buffer.pegar(b, de_cps(json.texto(d, r + ".1")))
+    }
+    if nombre == "enter" {
+        buffer.enter(b)
+    }
+    if nombre == "tab" {
+        buffer.tab(b, bandera(d, r, 1))
+    }
+    if nombre == "bs" {
+        buffer.borrar_atras(b, bandera(d, r, 1))
+    }
+    if nombre == "del" {
+        buffer.borrar_adelante(b, bandera(d, r, 1))
+    }
+    if nombre == "izq" {
+        buffer.izquierda(b, bandera(d, r, 1), bandera(d, r, 2))
+    }
+    if nombre == "der" {
+        buffer.derecha(b, bandera(d, r, 1), bandera(d, r, 2))
+    }
+    if nombre == "arr" {
+        buffer.arriba(b, bandera(d, r, 1))
+    }
+    if nombre == "abj" {
+        buffer.abajo(b, bandera(d, r, 1))
+    }
+    if nombre == "ini" {
+        buffer.inicio(b, bandera(d, r, 1), bandera(d, r, 2))
+    }
+    if nombre == "fin" {
+        buffer.fin(b, bandera(d, r, 1), bandera(d, r, 2))
+    }
+    if nombre == "pag" {
+        buffer.pagina(b, to_i32(json.entero(d, r + ".1")), bandera(d, r, 2))
+    }
+    if nombre == "ir" {
+        buffer.mover_a(b, to_i32(json.entero(d, r + ".1")), to_i32(json.entero(d, r + ".2")), bandera(d, r, 3))
+    }
+    if nombre == "todo" {
+        buffer.seleccionar_todo(b)
+    }
+    if nombre == "aj" {
+        buffer.ajustar(b, to_i32(json.entero(d, r + ".1")))
+    }
+    if nombre == "pal" {
+        buffer.seleccionar_palabra(b)
+    }
+    if nombre == "undo" {
+        if buffer.deshacer(b) {
+            extra = " U1"
+        } else {
+            extra = " U0"
+        }
+    }
+    if nombre == "redo" {
+        if buffer.rehacer(b) {
+            extra = " U1"
+        } else {
+            extra = " U0"
+        }
+    }
+    if nombre == "buscar" {
+        if buffer.buscar(b, de_cps(json.texto(d, r + ".1")), bandera(d, r, 2), bandera(d, r, 3)) {
+            extra = " B1"
+        } else {
+            extra = " B0"
+        }
+    }
+    if nombre == "reemplazar" {
+        extra = " R" + a_texto(buffer.reemplazar_todo(b, de_cps(json.texto(d, r + ".1")), de_cps(json.texto(d, r + ".2"))))
+    }
+    if nombre == "pares" {
+        buffer.cerrar_pares(b, bandera(d, r, 1))
+    }
+    if nombre == "com" {
+        buffer.mover_a(b, to_i32(json.entero(d, r + ".1")), to_i32(json.entero(d, r + ".2")), false)
+        buffer.comentar(b)
+    }
+    if nombre == "ctx" {
+        buffer.cerrar_pares(b, true)
+        buffer.insertar(b, de_cps(json.texto(d, r + ".1")))
+        buffer.mover_a(b, b.fila, b.col - to_i32(json.entero(d, r + ".2")), false)
+        buffer.escribir(b, de_cps(json.texto(d, r + ".3")))
+    }
+    if nombre == "deshist" {
+        let x = buffer.deshacer(b)
+        let h = buffer.historial(b)
+        let t = buffer.contenido(b)
+        buffer.poner(b, "otra pestaña\n")
+        buffer.poner(b, t)
+        buffer.poner_historial(b, h)
+        if buffer.rehacer(b) {
+            extra = " U1"
+        } else {
+            extra = " U0"
+        }
+    }
+    if nombre == "dup" {
+        buffer.duplicar(b)
+    }
+    if nombre == "par" {
+        buffer.mover_a(b, to_i32(json.entero(d, r + ".1")), to_i32(json.entero(d, r + ".2")), false)
+        let p = buffer.pareja(b)
+        if p.hay {
+            extra = " P" + a_texto(p.f0) + "," + a_texto(p.c0) + "," + a_texto(p.f1) + "," + a_texto(p.c1)
+        } else {
+            extra = " P-"
+        }
+    }
+    if nombre == "hist" {
+        # como cambiar de pestaña y volver: el texto y el historial se guardan, el buffer recibe otro
+        # texto, y después vuelven los dos
+        let h = buffer.historial(b)
+        let t = buffer.contenido(b)
+        buffer.poner(b, "otra pestaña\n")
+        buffer.poner(b, t)
+        buffer.poner_historial(b, h)
+    }
+    if nombre == "sel" {
+        extra = " S" + cps(buffer.sel_texto(b))
+    }
+    return estado(b) + extra
+}
+
+fn correr() -> Result<i32> {
+    let d = json.leer_archivo("casos.json")?
+    let b = buffer.nuevo(de_cps(json.texto(d, "ini")))
+    for k in 0..json.largo(d, "ops") {
+        print("E " + a_texto(k) + " " + paso(d, b, k))
+    }
+    let bc = buffer.nuevo(de_cps(json.texto(d, "codigo")))
+    for k in 0..json.largo(d, "llaves") {
+        let r = "llaves." + a_texto(k)
+        buffer.mover_a(bc, to_i32(json.entero(d, r + ".0")), to_i32(json.entero(d, r + ".1")), false)
+        let p = buffer.pareja(bc)
+        if p.hay {
+            print("P " + a_texto(k) + " P" + a_texto(p.f0) + "," + a_texto(p.c0) + "," + a_texto(p.f1) + "," + a_texto(p.c1))
+        } else {
+            print("P " + a_texto(k) + " P-")
+        }
+    }
+    for k in 0..json.largo(d, "clases") {
+        let cl = buffer.clases(de_cps(json.texto(d, "clases." + a_texto(k))))
+        let mut s = ""
+        let n = cl.len()
+        for i in 0..n {
+            let mut o = cl.get(i)
+            while let Some(x) = o {
+                if i > 0 {
+                    s = s + ","
+                }
+                s = s + a_texto(x)
+                o = None
+            }
+        }
+        print("C " + a_texto(k) + " " + s)
+    }
+    return Ok(0)
+}
+
+fn main() -> i32 {
+    let r = correr()
+    match r {
+        Ok(x) => {
+            return 0
+        }
+        Err(e) => {
+            print("ERROR " + e)
+            return 1
+        }
+    }
+    return 1
+}

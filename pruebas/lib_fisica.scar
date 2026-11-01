@@ -1,0 +1,91 @@
+# lib/fisica, probada con
+# lib/prueba.
+#
+# Casos con resultado conocido: caída libre (la fórmula cerrada de Euler
+# semi-implícito), un choque elástico de dos masas iguales (se cambian las
+# velocidades), la energía que se conserva sin fricción en una caja, una
+# pelota sin restitución que se queda en el piso, la fricción que frena una
+# caja, y que lo fijo no se mueve. La comparación con una implementación
+# aparte en Python está en pruebas/test_fisica_python.py.
+# Termina con el código de salida de prueba.terminar: 0 si todo pasó.
+
+use "prueba"
+use "fisica"
+
+fn main() -> i32 {
+    let t = prueba.nueva("fisica")
+    let dt = 1.0 / 60.0
+
+    prueba.seccion(t, "caída libre")
+    let m = fisica.mundo(0.0, 0.0 - 9.8)
+    let p = fisica.circulo(m, 0.0, 100.0, 0.5, 1.0)
+    fisica.velocidad(m, p, 2.0, 3.0)
+    for i in 0..120 {
+        fisica.paso(m, dt)
+    }
+    # v_n = v0 + n·g·dt;  y_n = y0 + n·v0·dt + g·dt²·n(n+1)/2
+    let n = 120.0
+    prueba.afirmar_cerca(t, fisica.vy(m, p), 3.0 - 9.8 * n * dt, 1e-9, "velocidad")
+    prueba.afirmar_cerca(t, fisica.y(m, p), 100.0 + n * 3.0 * dt - 9.8 * dt * dt * n * (n + 1.0) / 2.0, 1e-9, "altura")
+    prueba.afirmar_cerca(t, fisica.x(m, p), n * 2.0 * dt, 1e-9, "x a velocidad constante")
+
+    prueba.seccion(t, "choque elástico")
+    let e = fisica.mundo(0.0, 0.0)
+    let a = fisica.circulo(e, 0.0, 0.0, 1.0, 2.0)
+    let b = fisica.circulo(e, 5.0, 0.0, 1.0, 2.0)
+    fisica.restitucion(e, a, 1.0)
+    fisica.restitucion(e, b, 1.0)
+    fisica.velocidad(e, a, 3.0, 0.0)
+    let antes = fisica.energia_cinetica(e)
+    for i in 0..200 {
+        fisica.paso(e, 0.01)
+    }
+    prueba.afirmar_cerca(t, fisica.vx(e, a), 0.0, 1e-12, "el que venía se para")
+    prueba.afirmar_cerca(t, fisica.vx(e, b), 3.0, 1e-12, "el otro sale con su velocidad")
+    prueba.afirmar_cerca(t, fisica.energia_cinetica(e), antes, 1e-9, "la energía se conserva")
+
+    prueba.seccion(t, "en una caja, sin fricción")
+    let c = fisica.mundo(0.0, 0.0)
+    let paredes = [0.0, 0.0 - 5.5, 12.0, 1.0, 0.0, 5.5, 12.0, 1.0, 0.0 - 5.5, 0.0, 1.0, 12.0, 5.5, 0.0, 1.0, 12.0]
+    for w in 0..4 {
+        let pared = fisica.caja(c, paredes.get(w * 4).unwrap_or(0.0), paredes.get(w * 4 + 1).unwrap_or(0.0),
+                                paredes.get(w * 4 + 2).unwrap_or(0.0), paredes.get(w * 4 + 3).unwrap_or(0.0), 0.0)
+        fisica.restitucion(c, pared, 1.0)
+    }
+    let bola = fisica.circulo(c, 0.0, 0.0, 0.5, 1.0)
+    fisica.restitucion(c, bola, 1.0)
+    fisica.velocidad(c, bola, 7.0, 4.0)
+    let e0 = fisica.energia_cinetica(c)
+    let mut choques = 0
+    let mut adentro = true
+    for i in 0..600 {
+        fisica.paso(c, dt)
+        choques = choques + c.choques
+        if abs(fisica.x(c, bola)) > 5.0 or abs(fisica.y(c, bola)) > 5.0 {
+            adentro = false
+        }
+    }
+    prueba.afirmar(t, choques > 10, "rebota (" + a_texto(choques) + " choques)")
+    prueba.afirmar(t, adentro, "y no se sale")
+    prueba.afirmar_cerca(t, fisica.energia_cinetica(c), e0, 1e-9, "la energía no cambia")
+    prueba.afirmar_igual_f64(t, fisica.x(c, 0), 0.0, "las paredes no se mueven")
+
+    prueba.seccion(t, "sin rebote y con fricción")
+    let s = fisica.mundo(0.0, 0.0 - 9.8)
+    let piso = fisica.caja(s, 0.0, 0.0 - 0.5, 40.0, 1.0, 0.0)
+    let pelota = fisica.circulo(s, 0.0 - 5.0, 3.0, 0.5, 1.0)
+    let bloque = fisica.caja(s, 5.0, 0.5, 1.0, 1.0, 1.0)
+    fisica.friccion(s, piso, 0.5)
+    fisica.friccion(s, bloque, 0.5)
+    fisica.velocidad(s, bloque, 4.0, 0.0)
+    for i in 0..300 {
+        fisica.paso(s, dt)
+    }
+    prueba.afirmar_cerca(t, fisica.y(s, pelota), 0.5, 0.02, "la pelota queda en el piso")
+    prueba.afirmar_cerca(t, fisica.vy(s, pelota), 0.0, 0.2, "quieta")
+    prueba.afirmar_cerca(t, fisica.vx(s, bloque), 0.0, 1e-9, "la fricción frena el bloque")
+    prueba.afirmar(t, fisica.x(s, bloque) > 5.5 and fisica.x(s, bloque) < 9.0, "después de deslizar un poco")
+    prueba.afirmar(t, fisica.se_tocan(s, piso, bloque) or fisica.y(s, bloque) < 0.52, "apoyado en el piso")
+
+    return prueba.terminar(t)
+}

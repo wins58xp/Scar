@@ -1,0 +1,107 @@
+# lib/grafos para pruebas/test_grafos_python.py: arma grafos y grillas al azar y escribe las aristas, las
+# preguntas y las respuestas, una por línea.
+use "mate"
+use "grafos"
+
+fn lista(v: Vec<i32>) -> str {
+    let mut s = ""
+    for i in 0..v.len() {
+        s = s + " " + a_texto(v.get(i).unwrap_or(0))
+    }
+    return s
+}
+
+fn topo(g: grafos.Grafo) -> Result<i32> {
+    let o = grafos.orden_topologico(g)?
+    print("TOPO" + lista(o))
+    return Ok(0)
+}
+
+fn main() {
+    let g0 = mate.azar(58)
+    for k in 0..32 {
+        let dirigido = k % 2 == 1
+        let dag = k % 4 == 1
+        let mut n = mate.azar_entero(g0, 1, 14)
+        if k >= 24 {
+            n = mate.azar_entero(g0, 60, 160)
+        }
+        let m = mate.azar_entero(g0, 0, n * 2)
+        let g = grafos.grafo(n, dirigido)
+        print("GRAFO", k, n, dirigido)
+        for e in 0..m {
+            let mut a = mate.azar_entero(g0, 0, n - 1)
+            let mut b = mate.azar_entero(g0, 0, n - 1)
+            if dag {
+                if a > b {
+                    let t = a
+                    a = b
+                    b = t
+                }
+                if a == b {
+                    b = n
+                }
+            }
+            if b < n {
+                # pesos enteros chicos (para que haya empates) o con decimales
+                let mut w = to_f64(mate.azar_entero(g0, 0, 6))
+                if mate.azar_entero(g0, 0, 1) == 0 {
+                    w = mate.azar_entre(g0, 0.0, 10.0)
+                }
+                grafos.arista(g, a, b, w)
+                print("ARISTA", a, b, w)
+            }
+        }
+        for v in 0..n {
+            print("VECINOS", v, lista(grafos.vecinos(g, v)))
+        }
+        let s = mate.azar_entero(g0, 0, n - 1)
+        print("BFS", s, lista(grafos.bfs(g, s)))
+        print("ANCHO", s, lista(grafos.recorrido_ancho(g, s)))
+        print("PROFUNDO", s, lista(grafos.recorrido_profundo(g, s)))
+        let c = grafos.dijkstra(g, s)
+        for v in 0..n {
+            print("DIJKSTRA", s, v, grafos.alcanza(c, v), grafos.distancia(c, v), "|", lista(grafos.camino(c, v)))
+        }
+        print("COMPONENTES", grafos.cantidad_componentes(g), "|", lista(grafos.componentes(g)))
+        let t = topo(g)
+        if t.is_err() {
+            print("TOPO ERR")
+        }
+        # (pasar un Vec a una función lo entrega: se pide dos veces, que da lo mismo)
+        let total = grafos.peso_total(g, grafos.arbol_minimo(g))
+        print("ARBOL", total, "|", lista(grafos.arbol_minimo(g)))
+    }
+    for k in 0..40 {
+        let mut w = mate.azar_entero(g0, 1, 18)
+        let mut h = mate.azar_entero(g0, 1, 14)
+        let mut dens = mate.azar_entre(g0, 0.0, 0.45)
+        if k >= 30 {
+            w = mate.azar_entero(g0, 30, 60)
+            h = mate.azar_entero(g0, 20, 40)
+            dens = mate.azar_entre(g0, 0.05, 0.3)
+        }
+        let gr = grafos.grilla(w, h)
+        let mut muros = ""
+        for y in 0..h {
+            for x in 0..w {
+                if mate.azar_uniforme(g0) < dens {
+                    grafos.pared(gr, x, y)
+                    muros = muros + "#"
+                } else {
+                    muros = muros + "."
+                }
+            }
+        }
+        print("GRILLA", w, h, muros)
+        for q in 0..6 {
+            let x0 = mate.azar_entero(g0, 0, w - 1)
+            let y0 = mate.azar_entero(g0, 0, h - 1)
+            let x1 = mate.azar_entero(g0, 0, w - 1)
+            let y1 = mate.azar_entero(g0, 0, h - 1)
+            let diag = q % 2 == 1
+            let cst = grafos.costo(gr, grafos.a_estrella(gr, x0, y0, x1, y1, diag))
+            print("ASTAR", x0, y0, x1, y1, diag, cst, "|", lista(grafos.a_estrella(gr, x0, y0, x1, y1, diag)))
+        }
+    }
+}

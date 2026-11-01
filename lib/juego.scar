@@ -1,0 +1,743 @@
+# lib/juego.scar: lo que hace falta para un juego 2D (use "juego").
+#
+#   use "juego"
+#
+#   let reloj = juego.reloj(60)                       # 60 pasos de lógica por segundo
+#   let teclas = juego.entrada([79, 80, 44])          # der, izq, espacio
+#   let hoja = juego.hoja(lienzo_con_los_dibujos, 16, 16)
+#   let mapa = juego.mapa_texto(16, "#....#\n#....#\n######")
+#   let yo = juego.cuerpo(24, 16, 12, 14)
+#   let cam = juego.camara(320, 180, 96, 48)
+#   while gui.abierta(ui) {
+#       let n = juego.pasos_ahora(reloj)              # cuántos pasos tocan en este cuadro
+#       for i in 0..n {
+#           juego.leer(teclas)
+#           if juego.sostenida(teclas, 79) { yo.vx = 1.5 }
+#           juego.mover(mapa, yo, yo.vx, yo.vy)
+#       }
+#       juego.centrar(cam, yo.x, yo.y)
+#       juego.dibujar_mapa(pantalla, mapa, hoja, cam)
+#   }
+#
+# Seis piezas independientes, todas con aritmética de enteros (o de f64 en el mismo
+# orden), así que dan lo mismo en el intérprete y en el binario:
+# - Reloj: el bucle a paso fijo. avanzar(r, dt_ms) dice cuántos pasos de 1/hz de
+#   segundo hay que dar; lo que sobra queda para el cuadro siguiente. Si la
+#   ventana se trabó, da como mucho `max` pasos y tira el resto (sin "espiral de la
+#   muerte"). pasos_ahora(r) usa el reloj de la ventana (scar_sdl_ticks).
+# - Entrada: "se apretó" (apretada), "se soltó" (soltada) y "está apretada"
+#   (sostenida) de las teclas que se le dicen, comparando este paso con el anterior.
+# - Hoja: una imagen cortada en cuadros iguales (de un PNG con hoja_png), que se
+#   dibujan por número, de izquierda a derecha y de arriba abajo, con espejo.
+# - Animación: qué cuadro de la hoja toca a los t milisegundos (una vez, repetir, o
+#   ida y vuelta).
+# - Mapa: una grilla de baldosas. 0 es aire, un número positivo es sólido y dibuja
+#   el cuadro n - 1 de la hoja, un número negativo es adorno (se dibuja el cuadro
+#   -n - 1, pero se atraviesa). Afuera del mapa vale `fuera` (1: pared).
+# - Cuerpo: una caja con posición entera en píxeles y resto fraccionario, que se
+#   mueve por el mapa un eje por vez y se frena contra lo sólido.
+# - Cámara: la ventana sobre un mundo más grande, que sigue a un punto sin salirse.
+#
+# Límites: la colisión es de cajas alineadas con los ejes contra la grilla (no
+# contra otros cuerpos: para eso, caja_toca); no hay rampas; y la cámara y el mapa
+# son enteros: nada de medios píxeles.
+
+use "lienzo"
+use "imagen"
+
+extern "C" fn scar_sdl_key_down(scancode: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_ticks() -> i32 from "scarsdl"
+
+# ---- reloj a paso fijo ----------------------------------------------------------
+
+# acum cuenta milisegundos * hz: un paso cuesta 1000 de eso, así que con 60 hz no hay
+# redondeos (16,67 ms por paso) y 60 pasos son exactamente un segundo.
+struct Reloj {
+    hz: i32
+    acum: i64
+    maximo: i32
+    ultimo: i32
+    empezo: bool
+    fijo: bool
+}
+
+# Un reloj de `hz` pasos por segundo (como mucho 5 pasos seguidos por cuadro).
+fn reloj(hz: i32) -> Reloj {
+    if hz <= 0 or hz > 1000 {
+        panic("juego.reloj: los pasos por segundo tienen que estar entre 1 y 1000")
+    }
+    return Reloj { hz: hz, acum: 0, maximo: 5, ultimo: 0, empezo: false, fijo: false }
+}
+
+# Un reloj determinista: pasos_ahora da siempre 1 paso por cuadro, sin mirar la hora
+# (para probar con un guion, o para un juego que no quiere depender de la máquina).
+fn reloj_fijo(hz: i32) -> Reloj {
+    let r = reloj(hz)
+    r.fijo = true
+    return r
+}
+
+# Cuántos pasos seguidos se permiten como máximo en un cuadro.
+fn reloj_maximo(r: Reloj, pasos: i32) {
+    r.maximo = max(1, pasos)
+}
+
+# Pasa dt_ms milisegundos (los negativos cuentan 0, y más de un segundo, un segundo):
+# devuelve cuántos pasos hay que dar ahora.
+fn avanzar(r: Reloj, dt_ms: i32) -> i32 {
+    let dt = min(1000, max(0, dt_ms))
+    r.acum = r.acum + to_i64(dt) * to_i64(r.hz)
+    let mut n = to_i32(r.acum / 1000)
+    if n > r.maximo {
+        n = r.maximo
+        r.acum = r.acum % 1000
+    } else {
+        r.acum = r.acum - to_i64(n) * 1000
+    }
+    return n
+}
+
+# Lo que falta del paso siguiente, de 0.0 a 1.0 (para dibujar entre dos pasos).
+fn alfa(r: Reloj) -> f64 {
+    return to_f64(r.acum) / 1000.0
+}
+
+# Milisegundos del reloj de la ventana (da la vuelta cada ~24 días).
+fn ahora() -> i32 {
+    return scar_sdl_ticks()
+}
+
+# Como avanzar, con la hora de `ahora_ms` (una lectura de ahora()). La primera vez da 0
+# pasos. La resta aguanta la vuelta del reloj.
+fn pasos(r: Reloj, ahora_ms: i32) -> i32 {
+    if r.fijo {
+        return 1
+    }
+    if not r.empezo {
+        r.empezo = true
+        r.ultimo = ahora_ms
+        return 0
+    }
+    let mut dt = ahora_ms - r.ultimo
+    if dt < 0 {
+        dt = dt + 2147483647 + 1
+    }
+    r.ultimo = ahora_ms
+    return avanzar(r, dt)
+}
+
+# pasos con la hora de la ventana.
+fn pasos_ahora(r: Reloj) -> i32 {
+    if r.fijo {
+        return 1
+    }
+    return pasos(r, ahora())
+}
+
+# ---- entrada: se apretó, se soltó, está apretada -------------------------------------
+
+struct Entrada {
+    codigos: Vec<i32>
+    ahora: Vec<bool>
+    antes: Vec<bool>
+}
+
+# Mira estas teclas (scancodes de SDL: der 79, izq 80, abajo 81, arriba 82, espacio 44,
+# Enter 40, Esc 41, A 4 ... Z 29).
+fn entrada(codigos: Vec<i32>) -> Entrada {
+    let n = codigos.len()
+    let e = Entrada { codigos: codigos, ahora: vec_new(n), antes: vec_new(n) }
+    for i in 0..n {
+        e.ahora.push(false)
+        e.antes.push(false)
+    }
+    return e
+}
+
+# Pasa al paso siguiente: lo de ahora queda como "antes". Hay que llamarla una vez por
+# paso de lógica, antes de fijar o leer.
+fn siguiente(e: Entrada) {
+    for i in 0..e.codigos.len() {
+        e.antes.set(i, e.ahora.get(i).unwrap_or(false))
+    }
+}
+
+fn _indice(e: Entrada, codigo: i32) -> i32 {
+    for i in 0..e.codigos.len() {
+        if e.codigos.get(i).unwrap_or(0 - 1) == codigo {
+            return i
+        }
+    }
+    return 0 - 1
+}
+
+# Dice a mano si la tecla está apretada en este paso (sin pasar a otro paso). Las que no
+# se miran se ignoran.
+fn fijar(e: Entrada, codigo: i32, abajo: bool) {
+    let i = _indice(e, codigo)
+    if i >= 0 {
+        e.ahora.set(i, abajo)
+    }
+}
+
+# siguiente(e) y después lee de la ventana el estado de cada tecla.
+fn leer(e: Entrada) {
+    siguiente(e)
+    for i in 0..e.codigos.len() {
+        e.ahora.set(i, scar_sdl_key_down(e.codigos.get(i).unwrap_or(0)) == 1)
+    }
+}
+
+# Está apretada en este paso.
+fn sostenida(e: Entrada, codigo: i32) -> bool {
+    let i = _indice(e, codigo)
+    if i < 0 {
+        return false
+    }
+    return e.ahora.get(i).unwrap_or(false)
+}
+
+# No estaba apretada en el paso anterior y ahora sí.
+fn apretada(e: Entrada, codigo: i32) -> bool {
+    let i = _indice(e, codigo)
+    if i < 0 {
+        return false
+    }
+    return e.ahora.get(i).unwrap_or(false) and not e.antes.get(i).unwrap_or(false)
+}
+
+# Estaba apretada en el paso anterior y ahora no.
+fn soltada(e: Entrada, codigo: i32) -> bool {
+    let i = _indice(e, codigo)
+    if i < 0 {
+        return false
+    }
+    return e.antes.get(i).unwrap_or(false) and not e.ahora.get(i).unwrap_or(false)
+}
+
+# -1 si está apretada la tecla `menos`, +1 si la de `mas`, 0 si las dos o ninguna
+# (para el eje horizontal: eje(e, 80, 79)).
+fn eje(e: Entrada, menos: i32, mas: i32) -> i32 {
+    let mut r = 0
+    if sostenida(e, mas) {
+        r = r + 1
+    }
+    if sostenida(e, menos) {
+        r = r - 1
+    }
+    return r
+}
+
+# ---- hojas de sprites -----------------------------------------------------------------
+
+struct Hoja {
+    img: lienzo.Lienzo
+    cw: i32
+    ch: i32
+    cols: i32
+    filas: i32
+}
+
+# La imagen cortada en cuadros de cw x ch (lo que sobra en el borde se ignora).
+fn hoja(img: lienzo.Lienzo, cw: i32, ch: i32) -> Hoja {
+    if cw <= 0 or ch <= 0 {
+        panic("juego.hoja: el ancho y el alto del cuadro tienen que ser positivos")
+    }
+    let cols = img.ancho / cw
+    let filas = img.alto / ch
+    return Hoja { img: img, cw: cw, ch: ch, cols: cols, filas: filas }
+}
+
+# Lee un PNG y lo corta en cuadros de cw x ch.
+fn hoja_png(ruta: str, cw: i32, ch: i32) -> Result<Hoja> {
+    let img = imagen.leer_png(ruta)?
+    return Ok(hoja(img, cw, ch))
+}
+
+# Cuántos cuadros tiene.
+fn cuadros(h: Hoja) -> i32 {
+    return h.cols * h.filas
+}
+
+# Pinta el cuadro i (0 es el de arriba a la izquierda) con su esquina en (x, y). Lo
+# transparente no tapa. Un número que no existe no dibuja nada.
+fn dibujar(destino: lienzo.Lienzo, h: Hoja, i: i32, x: i32, y: i32) {
+    _dibujar(destino, h, i, x, y, false)
+}
+
+# Lo mismo, dado vuelta de izquierda a derecha (para mirar para el otro lado).
+fn dibujar_espejo(destino: lienzo.Lienzo, h: Hoja, i: i32, x: i32, y: i32) {
+    _dibujar(destino, h, i, x, y, true)
+}
+
+fn _dibujar(destino: lienzo.Lienzo, h: Hoja, i: i32, x: i32, y: i32, espejo: bool) {
+    if i < 0 or i >= h.cols * h.filas {
+        return
+    }
+    let fx = (i % h.cols) * h.cw
+    let fy = (i / h.cols) * h.ch
+    for oy in 0..h.ch {
+        for ox in 0..h.cw {
+            let mut sx = fx + ox
+            if espejo {
+                sx = fx + h.cw - 1 - ox
+            }
+            let c = h.img.pixeles.get((fy + oy) * h.img.ancho + sx).unwrap_or(0)
+            lienzo.pintar(destino, x + ox, y + oy, c)
+        }
+    }
+}
+
+# ---- animación -----------------------------------------------------------------------
+
+struct Animacion {
+    primero: i32
+    cantidad: i32
+    ms: i32
+    modo: i32
+}
+
+fn una_vez() -> i32 {
+    return 0
+}
+
+fn repetir() -> i32 {
+    return 1
+}
+
+fn ida_y_vuelta() -> i32 {
+    return 2
+}
+
+# Los `cantidad` cuadros que empiezan en `primero`, cada uno `ms` milisegundos, con
+# el modo una_vez() (se queda en el último), repetir() o ida_y_vuelta().
+fn animacion(primero: i32, cantidad: i32, ms: i32, modo: i32) -> Animacion {
+    if cantidad <= 0 or ms <= 0 {
+        panic("juego.animacion: la cantidad de cuadros y los milisegundos tienen que ser positivos")
+    }
+    return Animacion { primero: primero, cantidad: cantidad, ms: ms, modo: modo }
+}
+
+# El número de cuadro de la hoja que toca a los t milisegundos de empezar (antes de
+# empezar, el primero).
+fn cuadro(a: Animacion, t: i32) -> i32 {
+    if t <= 0 or a.cantidad == 1 {
+        return a.primero
+    }
+    let k = t / a.ms
+    if a.modo == 0 {
+        return a.primero + min(k, a.cantidad - 1)
+    }
+    if a.modo == 1 {
+        return a.primero + k % a.cantidad
+    }
+    let vuelta = 2 * (a.cantidad - 1)
+    let j = k % vuelta
+    if j >= a.cantidad {
+        return a.primero + vuelta - j
+    }
+    return a.primero + j
+}
+
+# Una animación de una_vez() ya llegó al final (las otras nunca terminan).
+fn terminada(a: Animacion, t: i32) -> bool {
+    return a.modo == 0 and t >= a.cantidad * a.ms
+}
+
+# Lo que dura una pasada entera, en milisegundos.
+fn duracion(a: Animacion) -> i32 {
+    if a.modo == 2 and a.cantidad > 1 {
+        return 2 * (a.cantidad - 1) * a.ms
+    }
+    return a.cantidad * a.ms
+}
+
+# ---- mapa de baldosas ------------------------------------------------------------------
+
+struct Mapa {
+    cols: i32
+    filas: i32
+    tam: i32
+    fuera: i32
+    celdas: Vec<i32>
+}
+
+# Un mapa vacío de cols x filas baldosas cuadradas de `tam` píxeles.
+fn mapa(cols: i32, filas: i32, tam: i32) -> Mapa {
+    if cols <= 0 or filas <= 0 or tam <= 0 {
+        panic("juego.mapa: las columnas, las filas y el tamaño tienen que ser positivos")
+    }
+    let m = Mapa { cols: cols, filas: filas, tam: tam, fuera: 1, celdas: vec_new(cols * filas) }
+    for i in 0..cols * filas {
+        m.celdas.push(0)
+    }
+    return m
+}
+
+# Un mapa escrito en texto, una línea por fila: '.' o ' ' es aire, '#' es la baldosa 1,
+# '1'..'9' son esas baldosas, 'a'..'i' son adornos -1..-9 (cualquier otra cosa es aire).
+# Las filas cortas se completan con aire.
+fn mapa_texto(tam: i32, s: str) -> Mapa {
+    let n = len(s)
+    let mut filas = 0
+    let mut ancho = 0
+    let mut actual = 0
+    for i in 0..n {
+        if s[i] == "\n" {
+            filas = filas + 1
+            ancho = max(ancho, actual)
+            actual = 0
+        } else if s[i] != "\r" {
+            actual = actual + 1
+        }
+    }
+    if actual > 0 {
+        filas = filas + 1
+        ancho = max(ancho, actual)
+    }
+    let m = mapa(max(1, ancho), max(1, filas), tam)
+    let mut f = 0
+    let mut c = 0
+    for i in 0..n {
+        if s[i] == "\n" {
+            f = f + 1
+            c = 0
+        } else if s[i] != "\r" {
+            poner(m, c, f, _de_letra(s[i]))
+            c = c + 1
+        }
+    }
+    return m
+}
+
+fn _de_letra(ch: str) -> i32 {
+    if ch == "#" {
+        return 1
+    }
+    let digitos = "0123456789"
+    let letras = "abcdefghi"
+    for d in 1..10 {
+        if ch == digitos[d] {
+            return d
+        }
+    }
+    for d in 0..9 {
+        if ch == letras[d] {
+            return 0 - 1 - d
+        }
+    }
+    return 0
+}
+
+# Qué hay en la baldosa (c, f); afuera del mapa, `fuera`.
+fn celda(m: Mapa, c: i32, f: i32) -> i32 {
+    if c < 0 or f < 0 or c >= m.cols or f >= m.filas {
+        return m.fuera
+    }
+    return m.celdas.get(f * m.cols + c).unwrap_or(0)
+}
+
+# Pone v en la baldosa (c, f) (afuera del mapa no hace nada).
+fn poner(m: Mapa, c: i32, f: i32, v: i32) {
+    if c >= 0 and f >= 0 and c < m.cols and f < m.filas {
+        m.celdas.set(f * m.cols + c, v)
+    }
+}
+
+# Qué vale afuera del mapa: 1 (pared, el valor de siempre) o 0 (aire: se puede caer).
+fn mapa_fuera(m: Mapa, v: i32) {
+    m.fuera = v
+}
+
+# Se choca con la baldosa (c, f).
+fn solida(m: Mapa, c: i32, f: i32) -> bool {
+    return celda(m, c, f) > 0
+}
+
+fn ancho_mundo(m: Mapa) -> i32 {
+    return m.cols * m.tam
+}
+
+fn alto_mundo(m: Mapa) -> i32 {
+    return m.filas * m.tam
+}
+
+# División entera hacia abajo (la de / en C va hacia el cero).
+fn _piso(a: i32, b: i32) -> i32 {
+    let q = a / b
+    if a % b < 0 {
+        return q - 1
+    }
+    return q
+}
+
+# Hacia arriba.
+fn _techo(a: i32, b: i32) -> i32 {
+    return 0 - _piso(0 - a, b)
+}
+
+# Dibuja las baldosas que se ven por la cámara, en el lienzo (la esquina del mundo
+# que mira la cámara cae en (0, 0)). Solo las visibles: un mapa grande no cuesta más.
+fn dibujar_mapa(destino: lienzo.Lienzo, m: Mapa, h: Hoja, cam: Camara) {
+    let c0 = _piso(cam.x, m.tam)
+    let c1 = _techo(cam.x + cam.ancho, m.tam) - 1
+    let f0 = _piso(cam.y, m.tam)
+    let f1 = _techo(cam.y + cam.alto, m.tam) - 1
+    for f in max(0, f0)..min(m.filas - 1, f1) + 1 {
+        for c in max(0, c0)..min(m.cols - 1, c1) + 1 {
+            let v = m.celdas.get(f * m.cols + c).unwrap_or(0)
+            if v != 0 {
+                let mut k = v - 1
+                if v < 0 {
+                    k = 0 - v - 1
+                }
+                dibujar(destino, h, k, c * m.tam - cam.x, f * m.tam - cam.y)
+            }
+        }
+    }
+}
+
+# ---- choques -----------------------------------------------------------------------------
+
+# Las cajas (ax, ay, aw, ah) y (bx, by, bw, bh) se pisan (si solo se tocan en el borde, no).
+fn caja_toca(ax: i32, ay: i32, aw: i32, ah: i32, bx: i32, by: i32, bw: i32, bh: i32) -> bool {
+    return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+}
+
+# La caja (x, y, w, h) pisa alguna baldosa sólida.
+fn pisa(m: Mapa, x: i32, y: i32, w: i32, h: i32) -> bool {
+    let c0 = _piso(x, m.tam)
+    let c1 = _techo(x + w, m.tam) - 1
+    let f0 = _piso(y, m.tam)
+    let f1 = _techo(y + h, m.tam) - 1
+    for f in f0..f1 + 1 {
+        for c in c0..c1 + 1 {
+            if solida(m, c, f) {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+struct Cuerpo {
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    rx: f64
+    ry: f64
+    vx: f64
+    vy: f64
+    suelo: bool
+    techo: bool
+    pared: i32
+}
+
+# Una caja de w x h con la esquina de arriba a la izquierda en (x, y) píxeles, quieta.
+# La y crece hacia abajo.
+fn cuerpo(x: i32, y: i32, w: i32, h: i32) -> Cuerpo {
+    return Cuerpo { x: x, y: y, w: w, h: h, rx: 0.0, ry: 0.0, vx: 0.0, vy: 0.0, suelo: false, techo: false, pared: 0 }
+}
+
+# Mueve la caja n píxeles a lo ancho: se frena contra la primera baldosa sólida.
+# Devuelve true si chocó.
+fn _mover_x(m: Mapa, c: Cuerpo, n: i32) -> bool {
+    if n == 0 {
+        return false
+    }
+    let f0 = _piso(c.y, m.tam)
+    let f1 = _techo(c.y + c.h, m.tam) - 1
+    let destino = c.x + n
+    if n > 0 {
+        let primera = _techo(c.x + c.w, m.tam)
+        let ultima = _techo(destino + c.w, m.tam) - 1
+        for col in primera..ultima + 1 {
+            for f in f0..f1 + 1 {
+                if solida(m, col, f) {
+                    c.x = col * m.tam - c.w
+                    return true
+                }
+            }
+        }
+    } else {
+        let primera = _techo(c.x, m.tam) - 1
+        let ultima = _piso(destino, m.tam)
+        let mut col = primera
+        while col >= ultima {
+            for f in f0..f1 + 1 {
+                if solida(m, col, f) {
+                    c.x = (col + 1) * m.tam
+                    return true
+                }
+            }
+            col = col - 1
+        }
+    }
+    c.x = destino
+    return false
+}
+
+# Lo mismo a lo alto.
+fn _mover_y(m: Mapa, c: Cuerpo, n: i32) -> bool {
+    if n == 0 {
+        return false
+    }
+    let c0 = _piso(c.x, m.tam)
+    let c1 = _techo(c.x + c.w, m.tam) - 1
+    let destino = c.y + n
+    if n > 0 {
+        let primera = _techo(c.y + c.h, m.tam)
+        let ultima = _techo(destino + c.h, m.tam) - 1
+        for fila in primera..ultima + 1 {
+            for col in c0..c1 + 1 {
+                if solida(m, col, fila) {
+                    c.y = fila * m.tam - c.h
+                    return true
+                }
+            }
+        }
+    } else {
+        let primera = _techo(c.y, m.tam) - 1
+        let ultima = _piso(destino, m.tam)
+        let mut fila = primera
+        while fila >= ultima {
+            for col in c0..c1 + 1 {
+                if solida(m, col, fila) {
+                    c.y = (fila + 1) * m.tam
+                    return true
+                }
+            }
+            fila = fila - 1
+        }
+    }
+    c.y = destino
+    return false
+}
+
+# Mueve el cuerpo (dx, dy) píxeles (con decimales: lo que no llega a un píxel entero
+# se guarda en rx / ry para el paso siguiente; se redondea al más cercano, y los
+# medios hacia arriba). Primero a lo ancho y después a lo alto. Si choca, el cuerpo
+# queda pegado a la baldosa, y se pone en 0 el resto y la velocidad de ese eje.
+# Después de mover: c.suelo (chocó yendo hacia abajo), c.techo (hacia arriba) y
+# c.pared (-1 chocó a la izquierda, 1 a la derecha, 0 no chocó a lo ancho).
+# Un cuerpo que ya empieza metido en una baldosa sólida no se saca solo.
+fn mover(m: Mapa, c: Cuerpo, dx: f64, dy: f64) {
+    c.suelo = false
+    c.techo = false
+    c.pared = 0
+    c.rx = c.rx + dx
+    let nx = to_i32(floor(c.rx + 0.5))
+    c.rx = c.rx - to_f64(nx)
+    if _mover_x(m, c, nx) {
+        c.rx = 0.0
+        c.vx = 0.0
+        if nx > 0 {
+            c.pared = 1
+        } else {
+            c.pared = 0 - 1
+        }
+    }
+    c.ry = c.ry + dy
+    let ny = to_i32(floor(c.ry + 0.5))
+    c.ry = c.ry - to_f64(ny)
+    if _mover_y(m, c, ny) {
+        c.ry = 0.0
+        c.vy = 0.0
+        if ny > 0 {
+            c.suelo = true
+        } else {
+            c.techo = true
+        }
+    }
+}
+
+# Hay suelo justo debajo del cuerpo (para saltar sin esperar al choque).
+fn sobre_suelo(m: Mapa, c: Cuerpo) -> bool {
+    return pisa(m, c.x, c.y + 1, c.w, c.h)
+}
+
+# ---- cámara -----------------------------------------------------------------------------------
+
+struct Camara {
+    x: i32
+    y: i32
+    ancho: i32
+    alto: i32
+    mundo_w: i32
+    mundo_h: i32
+}
+
+# Una vista de ancho x alto píxeles sobre un mundo de mundo_w x mundo_h.
+fn camara(ancho: i32, alto: i32, mundo_w: i32, mundo_h: i32) -> Camara {
+    return Camara { x: 0, y: 0, ancho: ancho, alto: alto, mundo_w: mundo_w, mundo_h: mundo_h }
+}
+
+# Que la vista no se salga del mundo; si el mundo es más chico que la vista, queda centrado.
+fn _dentro(v: i32, vista: i32, mundo: i32) -> i32 {
+    if mundo <= vista {
+        return 0 - (vista - mundo) / 2
+    }
+    return max(0, min(v, mundo - vista))
+}
+
+# Pone la esquina de la cámara de golpe, sin salirse del mundo.
+fn mirar(c: Camara, x: i32, y: i32) {
+    c.x = _dentro(x, c.ancho, c.mundo_w)
+    c.y = _dentro(y, c.alto, c.mundo_h)
+}
+
+# Centra la cámara en el punto (px, py) del mundo.
+fn centrar(c: Camara, px: i32, py: i32) {
+    mirar(c, px - c.ancho / 2, py - c.alto / 2)
+}
+
+fn _hacia(actual: i32, meta: i32, num: i32, den: i32) -> i32 {
+    let d = meta - actual
+    if d == 0 {
+        return actual
+    }
+    let mut paso = d * num / den
+    if paso == 0 {
+        if d > 0 {
+            paso = 1
+        } else {
+            paso = 0 - 1
+        }
+    }
+    if (d > 0 and paso > d) or (d < 0 and paso < d) {
+        paso = d
+    }
+    return actual + paso
+}
+
+# Va hacia el punto (px, py) una parte num/den de lo que falta en cada paso (siempre
+# al menos un píxel, y sin pasarse): una cámara que sigue con suavidad.
+fn suavizar(c: Camara, px: i32, py: i32, num: i32, den: i32) {
+    let metax = _dentro(px - c.ancho / 2, c.ancho, c.mundo_w)
+    let metay = _dentro(py - c.alto / 2, c.alto, c.mundo_h)
+    c.x = _hacia(c.x, metax, num, den)
+    c.y = _hacia(c.y, metay, num, den)
+}
+
+# De coordenadas del mundo a coordenadas de la vista, y al revés.
+fn pantalla_x(c: Camara, x: i32) -> i32 {
+    return x - c.x
+}
+
+fn pantalla_y(c: Camara, y: i32) -> i32 {
+    return y - c.y
+}
+
+fn mundo_x(c: Camara, x: i32) -> i32 {
+    return x + c.x
+}
+
+fn mundo_y(c: Camara, y: i32) -> i32 {
+    return y + c.y
+}
+
+# La caja (x, y, w, h) del mundo se ve (aunque sea un pedazo).
+fn visible(c: Camara, x: i32, y: i32, w: i32, h: i32) -> bool {
+    return caja_toca(x, y, w, h, c.x, c.y, c.ancho, c.alto)
+}

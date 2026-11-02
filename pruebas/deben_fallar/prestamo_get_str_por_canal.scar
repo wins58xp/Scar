@@ -1,0 +1,9 @@
+# espera: no se puede mover 's': es un préstamo de
+fn main() {
+    let a: Vec<str> = ["x"]
+    let ch: Chan<str> = chan_new(4)
+    match a.get(0) {
+        Some(s) => ch.send(s)
+        None => {}
+    }
+}

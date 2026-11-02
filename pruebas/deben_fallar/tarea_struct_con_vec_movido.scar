@@ -1,0 +1,15 @@
+# espera: uso de 'c' después de haber sido
+# Mover un struct mueve también el Vec que lleva adentro.
+struct Caja {
+    items: Vec<i32>
+}
+task t(c: Caja) -> i32 {
+    c.items.push(1)
+    return c.items.len()
+}
+fn main() {
+    let c = Caja { items: vec_new() }
+    let h = spawn t(c)
+    c.items.push(2)
+    print(h.join())
+}

@@ -1,0 +1,15 @@
+# espera: uso de 'c' después de haber sido
+# Ni siquiera leer: la tarea puede estar escribiéndolo.
+struct C {
+    n: i32
+}
+task t(c: C) -> i32 {
+    c.n = 9
+    return c.n
+}
+fn main() {
+    let c = C { n: 0 }
+    let h = spawn t(c)
+    print(c.n)
+    print(h.join())
+}

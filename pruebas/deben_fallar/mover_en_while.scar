@@ -1,0 +1,13 @@
+# espera: se mueve acá, adentro del loop
+struct P {
+    n: i32
+}
+fn main() {
+    let p = P { n: 1 }
+    let lista: Vec<P> = vec_new()
+    let mut i = 0
+    while i < 3 {
+        lista.push(p)
+        i = i + 1
+    }
+}

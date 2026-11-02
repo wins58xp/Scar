@@ -1,0 +1,5 @@
+# espera: '+' requiere operandos numéricos, se dio Option<i32> y
+fn main() {
+    let v = [1, 2]
+    print(v.get(0) + 1)
+}

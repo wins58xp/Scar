@@ -1,0 +1,15 @@
+# espera: uso de 'c' después de haber sido
+# Pasar un struct a spawn lo mueve: main ya no puede tocarlo.
+struct C {
+    n: i32
+}
+task t(c: C) -> i32 {
+    c.n = c.n + 1
+    return c.n
+}
+fn main() {
+    let c = C { n: 0 }
+    let h = spawn t(c)
+    c.n = 5
+    print(h.join())
+}

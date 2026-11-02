@@ -1,0 +1,15 @@
+# espera: no se puede mover 's': es un préstamo de
+# Mandar a otra tarea algo que sigue siendo de la lista sería compartir memoria.
+task t(s: str) -> i32 {
+    return len(s)
+}
+fn main() {
+    let a: Vec<str> = ["x"]
+    match a.get(0) {
+        Some(s) => {
+            let h = spawn t(s)
+            print(h.join())
+        }
+        None => {}
+    }
+}

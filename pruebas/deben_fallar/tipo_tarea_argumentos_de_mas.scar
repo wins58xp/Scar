@@ -1,0 +1,8 @@
+# espera: 't' espera 1
+task t(x: i32) -> i32 {
+    return x
+}
+fn main() {
+    let h = spawn t(1, 2)
+    print(h.join())
+}

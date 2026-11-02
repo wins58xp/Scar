@@ -1,0 +1,8 @@
+# espera: 'f' argumento
+fn f(x: i32) -> i32 {
+    return x
+}
+fn main() {
+    let grande: i64 = 9000000000
+    print(f(grande))
+}

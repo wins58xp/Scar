@@ -1,0 +1,4 @@
+# espera: 'break' fuera de un loop: solo se puede usar dentro de un while,
+fn main() {
+    break
+}

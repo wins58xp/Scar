@@ -1,0 +1,6 @@
+# espera: tipo desconocido: 'NoExiste'
+# Un tipo que nadie declaró: antes pasaba el check y fallaba recién al compilar.
+fn main() {
+    let x: Vec<NoExiste> = vec_new()
+    print(x.len())
+}

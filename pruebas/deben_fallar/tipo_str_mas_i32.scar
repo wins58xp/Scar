@@ -1,0 +1,4 @@
+# espera: '+' requiere operandos numéricos, se dio str y
+fn main() {
+    print("a" + 1)
+}

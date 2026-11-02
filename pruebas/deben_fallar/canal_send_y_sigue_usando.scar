@@ -1,0 +1,22 @@
+# espera: uso de 'm' después de haber sido
+# Lo que se manda por un canal ya no es de quien lo mandó.
+struct M {
+    n: i32
+}
+task leer(ch: Chan<M>) -> i32 {
+    let mut s = 0
+    while let Some(m) = ch.recv() {
+        m.n = m.n + 1
+        s = s + m.n
+    }
+    return s
+}
+fn main() {
+    let ch: Chan<M> = chan_new(4)
+    let h = spawn leer(ch)
+    let m = M { n: 1 }
+    ch.send(m)
+    m.n = 100
+    ch.close()
+    print(h.join())
+}

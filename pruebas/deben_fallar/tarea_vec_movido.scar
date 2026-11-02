@@ -1,0 +1,12 @@
+# espera: uso de 'v' después de haber sido
+# Un Vec que se le pasa a una tarea es de la tarea.
+task t(v: Vec<i32>) -> i32 {
+    v.push(1)
+    return v.len()
+}
+fn main() {
+    let v: Vec<i32> = vec_new()
+    let h = spawn t(v)
+    v.push(2)
+    print(h.join())
+}

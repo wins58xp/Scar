@@ -1,0 +1,8 @@
+# espera: tipo desconocido: 'Optoin'
+# espera: ¿quisiste decir 'Option'?
+fn buscar() -> Option<Optoin<i32>> {
+    return None
+}
+fn main() {
+    print(buscar().is_none())
+}

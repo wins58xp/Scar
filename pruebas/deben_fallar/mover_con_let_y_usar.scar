@@ -1,0 +1,9 @@
+# espera: uso de 'a' después de haber sido
+struct P {
+    n: i32
+}
+fn main() {
+    let a = P { n: 1 }
+    let b = a
+    print(a.n)
+}

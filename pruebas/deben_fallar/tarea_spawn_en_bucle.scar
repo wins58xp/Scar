@@ -1,0 +1,15 @@
+# espera: se mueve acá, adentro del loop
+# Un spawn adentro de un for movería el mismo valor en cada vuelta.
+struct C {
+    n: i32
+}
+task t(c: C) -> i32 {
+    return c.n
+}
+fn main() {
+    let c = C { n: 0 }
+    for i in 0..3 {
+        let h = spawn t(c)
+        print(h.join())
+    }
+}

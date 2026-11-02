@@ -1,0 +1,10 @@
+# espera: 'f' ya está
+fn f() -> i32 {
+    return 1
+}
+fn f() -> i32 {
+    return 2
+}
+fn main() {
+    print(f())
+}

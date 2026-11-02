@@ -1,0 +1,8 @@
+# espera: 'P' no tiene campo
+struct P {
+    n: i32
+}
+fn main() {
+    let p = P { n: 1 }
+    print(p.m)
+}

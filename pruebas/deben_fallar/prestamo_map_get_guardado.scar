@@ -1,0 +1,10 @@
+# espera: no se puede mover 's': es un préstamo de
+fn main() {
+    let m: Map<str, str> = map_new()
+    m.set("a", "uno")
+    let v: Vec<str> = vec_new()
+    match m.get("a") {
+        Some(s) => v.push(s)
+        None => {}
+    }
+}

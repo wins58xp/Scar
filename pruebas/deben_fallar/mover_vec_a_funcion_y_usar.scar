@@ -1,0 +1,9 @@
+# espera: uso de 'w' después de haber sido
+fn quedarse(v: Vec<i32>) -> i32 {
+    return v.len()
+}
+fn main() {
+    let w = [1, 2, 3]
+    print(quedarse(w))
+    print(w.len())
+}

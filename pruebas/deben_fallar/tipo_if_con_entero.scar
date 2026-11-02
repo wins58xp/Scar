@@ -1,0 +1,7 @@
+# espera: la condición de 'if' debe ser bool, no
+fn main() {
+    let x = 5
+    if x {
+        print("sí")
+    }
+}

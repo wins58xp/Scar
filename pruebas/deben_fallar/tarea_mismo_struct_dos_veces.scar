@@ -1,0 +1,15 @@
+# espera: uso de 'c' después de haber sido
+# Dos tareas no pueden recibir el mismo dato.
+struct C {
+    n: i32
+}
+task t(c: C) -> i32 {
+    c.n = c.n + 1
+    return c.n
+}
+fn main() {
+    let c = C { n: 0 }
+    let a = spawn t(c)
+    let b = spawn t(c)
+    print(a.join() + b.join())
+}

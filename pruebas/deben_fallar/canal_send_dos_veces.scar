@@ -1,0 +1,11 @@
+# espera: uso de 'm' después de haber sido
+struct M {
+    n: i32
+}
+fn main() {
+    let ch: Chan<M> = chan_new(4)
+    let m = M { n: 1 }
+    ch.send(m)
+    ch.send(m)
+    ch.close()
+}

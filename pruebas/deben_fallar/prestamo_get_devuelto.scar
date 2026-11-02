@@ -1,0 +1,15 @@
+# espera: no se puede mover 's': es un préstamo de
+# Una función no puede devolver lo que sigue siendo de una lista.
+fn primero(v: Vec<str>) -> str {
+    match v.get(0) {
+        Some(s) => {
+            return s
+        }
+        None => {
+            return ""
+        }
+    }
+}
+fn main() {
+    print(primero(["a"]))
+}

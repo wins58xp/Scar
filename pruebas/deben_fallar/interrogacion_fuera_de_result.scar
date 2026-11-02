@@ -1,0 +1,8 @@
+# espera: '?' usado dentro de 'leer', que no devuelve
+fn leer() -> i32 {
+    let n = int("42")?
+    return n
+}
+fn main() {
+    print(leer())
+}

@@ -936,6 +936,7 @@ class Programa:
             preamble += "#include <setjmp.h>\n"
         if self.has_tasks:
             preamble += "#include <errno.h>\n"  # ETIMEDOUT de pthread_cond_timedwait en join()
+            preamble += "#include <unistd.h>\n"  # sysconf: los núcleos, para el giro de los canales
         if self.extern_sigs:
             preamble += "#include <signal.h>\n"
         if self.has_tasks or self.uses_chan:

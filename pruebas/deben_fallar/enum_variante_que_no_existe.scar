@@ -1,0 +1,8 @@
+# espera: variable no declarada:
+enum Color {
+    Rojo
+    Verde
+}
+fn main() {
+    let c = Color.Azul
+}

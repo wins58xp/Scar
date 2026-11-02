@@ -276,6 +276,88 @@ static inline void scar_safepoint(void) {
 // _EsperaCanal en interpreter.py.
 static _Atomic int scar_hilos_vivos = 1;
 static _Atomic int scar_hilos_esperando = 0;
+// Giro antes de dormir en un canal: antes de dormirse de verdad, la tarea
+// prueba un rato si llegó un mensaje (o se liberó lugar). El rato se mide en
+// tiempo, no en vueltas: una pausa de CPU dura muy distinto según el
+// procesador (medido: en un Ryzen el presupuesto en pausas se agotaba casi al
+// instante y el giro dejaba de servir). SCAR_GIRO es el máximo, en
+// microsegundos (0 = no girar, el comportamiento de antes); se lee una vez.
+// Cada canal ajusta su propio presupuesto dentro de ese máximo (ver
+// scar_giro_ajustar). Medirlo con scripts/medir_canales.py.
+#ifndef SCAR_GIRO_DEFECTO_US
+#define SCAR_GIRO_DEFECTO_US 20
+#endif
+static int scar_giro_us(void) {
+    static _Atomic int us = -1;
+    int v = atomic_load_explicit(&us, memory_order_relaxed);
+    if (v < 0) {
+        const char *e = getenv("SCAR_GIRO");
+        v = e ? atoi(e) : SCAR_GIRO_DEFECTO_US;
+        if (v < 0) v = 0;
+        if (v > 1000000) v = 1000000;   // a lo más 1 s
+        atomic_store_explicit(&us, v, memory_order_relaxed);
+    }
+    return v;
+}
+static inline long long scar_ahora_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+// Girar solo sirve si hay un núcleo libre para quien va a mandar el mensaje:
+// con más hilos vivos que núcleos, el que gira le roba el procesador justo a
+// ese hilo (medido: muchos_a_uno y pool empeoraban en una máquina de 2).
+static int scar_nucleos(void) {
+    static _Atomic int n = 0;
+    int v = atomic_load_explicit(&n, memory_order_relaxed);
+    if (v <= 0) {
+        long c = sysconf(_SC_NPROCESSORS_ONLN);
+        v = c > 0 ? (int)c : 1;
+        atomic_store_explicit(&n, v, memory_order_relaxed);
+    }
+    return v;
+}
+static inline int scar_conviene_girar(void) {
+    return scar_giro_us() > 0
+        && atomic_load_explicit(&scar_hilos_vivos, memory_order_relaxed) <= scar_nucleos();
+}
+// El presupuesto de giro de un canal (en nanosegundos) aprende de lo que pasó:
+// si el giro sirvió (llegó algo mientras giraba) se duplica, hasta SCAR_GIRO;
+// si no sirvió (igual hubo que dormir) baja a la mitad, hasta un mínimo de
+// 10 µs. El mínimo tiene que ser mayor que lo que tarda en despertar un hilo
+// dormido: con 1 µs, una ida y vuelta que caía una vez a «los dos duermen»
+// quedaba ahí para siempre (cada respuesta tardaba lo que tarda despertar al
+// otro, más que el giro, así que el giro fallaba y el presupuesto no subía:
+// medido en 12 núcleos, corridas de 0.3 µs y de 1-4 µs según cómo empezara).
+// Con 10 µs, el que espera alcanza a ver la respuesta del que despertó y la
+// ida y vuelta vuelve sola al modo rápido. Lo escriben solo los que esperan,
+// y solo si cambia: el que manda no paga nada, y en el modo rápido (presupuesto
+// al máximo) nadie escribe esa línea de caché.
+//
+// Lo de los dos estados estables pasa solo al esperar un mensaje (recv). Al
+// esperar lugar en un canal lleno (send) el mínimo es 1 µs, con un presupuesto
+// aparte: con 10 µs, ocho productores girando sobre un canal lleno le quitaban
+// procesador al consumidor (medido: muchos_a_uno un 8.7 % más lento).
+#define SCAR_GIRO_MINIMO_NS 10000
+#define SCAR_GIRO_MINIMO_ENVIO_NS 1000
+static inline void scar_giro_ajustar(_Atomic int32_t *presupuesto, int sirvio, long long minimo_ns) {
+    int32_t v = atomic_load_explicit(presupuesto, memory_order_relaxed);
+    long long maximo = (long long)scar_giro_us() * 1000;
+    if (maximo > 2000000000LL) maximo = 2000000000LL;
+    long long minimo = maximo < minimo_ns ? maximo : minimo_ns;
+    long long nuevo = sirvio ? (long long)v * 2 : v / 2;
+    if (nuevo > maximo) nuevo = maximo;
+    if (nuevo < minimo) nuevo = minimo;
+    if (nuevo != v) atomic_store_explicit(presupuesto, (int32_t)nuevo, memory_order_relaxed);
+}
+static inline void scar_pausa_cpu(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
 typedef struct { unsigned long visto; int quietas; } ScarEspera;
 static int scar_esperar_cond(pthread_cond_t *cv, pthread_mutex_t *mu, ScarEspera *e) {
     atomic_fetch_add(&scar_hilos_esperando, 1);

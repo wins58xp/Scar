@@ -1,0 +1,4 @@
+# espera: en SCAR no se usa
+fn main() {
+    let a = 1;
+}

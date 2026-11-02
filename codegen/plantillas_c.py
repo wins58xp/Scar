@@ -22,6 +22,13 @@ class Plantillas:
             f"    c->closed = 0;\n"
             f"    c->cap = cap;\n"
             f"    c->count = 0;\n"
+            f"    atomic_init(&c->giro, 10000);  // presupuesto de giro de recv(): 10 µs\n"
+            f"    atomic_init(&c->giro_envio, 4000);  // el de send() a un canal lleno: 4 µs\n"
+            f"    c->libres = NULL;\n"
+            f"    c->n_libres = 0;\n"
+            f"    atomic_init(&c->hay_libres, 0);\n"
+            f"    atomic_init(&c->hay_mensajes, 0);\n"
+            f"    atomic_init(&c->lleno, 0);\n"
             f"    pthread_mutex_init(&c->mu, NULL);\n"
             f"    pthread_cond_init(&c->not_empty, NULL);\n"
             f"    pthread_cond_init(&c->not_full, NULL);\n"
@@ -44,11 +51,22 @@ class Plantillas:
             "    /*SCAR_STRC*/\n"
             + (f"    {node_name} *node = scar_blk_heap(sizeof({node_name}));\n"
                if inner_is_struct else
-               f"    {node_name} *node = malloc(sizeof({node_name}));\n")
+               # Canal de valores: el valor se arma en un nodo local y el nodo de
+               # verdad se toma recién bajo el candado, de la lista de libres si
+               # hay uno (el que dejó un recv anterior) o con malloc si no. Un
+               # malloc y un free por mensaje costaban ~40 % del rendimiento de un
+               # flujo (bench/canales/prototipos/envio.c).
+               f"    {node_name} __scar_local;\n"
+               f"    {node_name} *node = &__scar_local;\n"
+               # sin nodos guardados (lo normal en una ida y vuelta): malloc acá,
+               # fuera del candado, como siempre; con nodos guardados, se toma
+               # uno bajo el candado
+               f"    {node_name} *__scar_nodo = atomic_load_explicit(&c->hay_libres, memory_order_relaxed)\n"
+               f"        ? NULL : malloc(sizeof({node_name}));\n")
             + ""
             f"{node_value_stmt}"
             f"    node->next = NULL;\n"
-            + ("    ScarEspera __scar_espera = {~0UL, 0};\n" if self.has_tasks else "")
+            + ("    ScarEspera __scar_espera = {~0UL, 0};\n    int __scar_giro = 0;\n" if self.has_tasks else "")
             + f"    for (;;) {{\n"
             f"{send_cancel_line}"
             f"        pthread_mutex_lock(&c->mu);\n"
@@ -57,9 +75,29 @@ class Plantillas:
             f"            pthread_mutex_unlock(&c->mu);\n"
             f"            continue;\n"
             f"        }}\n"
-            f"        if (c->tail) {{ c->tail->next = node; }} else {{ c->head = node; }}\n"
+            + ("" if inner_is_struct else
+               f"        if (!__scar_nodo) {{\n"
+               f"            if (c->libres) {{\n"
+               f"                __scar_nodo = c->libres;\n"
+               f"                c->libres = __scar_nodo->next;\n"
+               f"                if (--c->n_libres == 0)\n"
+               f"                    atomic_store_explicit(&c->hay_libres, 0, memory_order_relaxed);\n"
+               f"            }} else {{\n"
+               # sin nodos libres: malloc fuera del candado, y otra vuelta (mientras
+               # tanto el canal puede haberse llenado)
+               f"                pthread_mutex_unlock(&c->mu);\n"
+               f"                __scar_nodo = malloc(sizeof({node_name}));\n"
+               f"                continue;\n"
+               f"            }}\n"
+               f"        }}\n"
+               f"        *__scar_nodo = __scar_local;\n"
+               f"        node = __scar_nodo;\n")
+            + f"        if (c->tail) {{ c->tail->next = node; }} else {{ c->head = node; }}\n"
             f"        c->tail = node;\n"
             f"        c->count++;\n"
+            # los avisos para el que gira, solo cuando cambian
+            f"        if (c->head == node) atomic_store_explicit(&c->hay_mensajes, 1, memory_order_relaxed);\n"
+            f"        if (c->cap > 0 && c->count == c->cap) atomic_store_explicit(&c->lleno, 1, memory_order_relaxed);\n"
             + ("        scar_avance();  // pasar un mensaje es progreso\n" if self.has_tasks else "")
             + f""
             f"        pthread_mutex_unlock(&c->mu);\n"
@@ -79,6 +117,9 @@ class Plantillas:
             f"static void scar_chan_close_{suf}({c_name} c) {{\n"
             f"    pthread_mutex_lock(&c->mu);\n"
             f"    c->closed = 1;\n"
+            # que el que gira pruebe el candado y vea `closed`
+            f"    atomic_store_explicit(&c->hay_mensajes, 1, memory_order_relaxed);\n"
+            f"    atomic_store_explicit(&c->lleno, 0, memory_order_relaxed);\n"
             f"    pthread_mutex_unlock(&c->mu);\n"
             f"    pthread_cond_broadcast(&c->not_empty);\n"
             f"    pthread_cond_broadcast(&c->not_full);\n"
@@ -99,7 +140,7 @@ class Plantillas:
             f"// de un pool que comparten el canal se despertarian TODOS en cada\n"
             f"// mensaje aunque solo uno lo fuera a consumir.\n"
             f"static {opt_c_name} scar_chan_recv_{suf}({c_name} c) {{\n"
-            + ("    ScarEspera __scar_espera = {~0UL, 0};\n" if self.has_tasks else "")
+            + ("    ScarEspera __scar_espera = {~0UL, 0};\n    int __scar_giro = 0;\n" if self.has_tasks else "")
             + f"    for (;;) {{\n"
             f"{cancel_line}"
             f"        pthread_mutex_lock(&c->mu);\n"
@@ -108,9 +149,28 @@ class Plantillas:
             f"            c->head = node->next;\n"
             f"            if (!c->head) c->tail = NULL;\n"
             f"            c->count--;\n"
+            f"            if (!c->head && !c->closed) atomic_store_explicit(&c->hay_mensajes, 0, memory_order_relaxed);\n"
+            f"            if (c->cap > 0 && c->count == c->cap - 1) atomic_store_explicit(&c->lleno, 0, memory_order_relaxed);\n"
             + ("            scar_avance();\n" if self.has_tasks else "")
-            + f""
-            f"            pthread_mutex_unlock(&c->mu);\n"
+            + ("" if inner_is_struct else
+               # Canal de valores: el valor sale del nodo y el nodo vacío queda
+               # para el próximo send() (hasta 256; los demás se liberan). Un
+               # canal de structs no reusa: ahí el nodo ES el struct que recibe
+               # el receptor, y pasa a ser suyo.
+               f"            {inner_c} v = node->value;\n"
+               # solo con cola: en una ida y vuelta la cola queda vacía, el nodo
+               # se libera y el próximo send() pide uno con malloc, que le da
+               # al hilo un nodo que acaba de tocar él (en su caché). Reusar ahí
+               # traía el nodo del otro núcleo en cada mensaje (medido: la ida
+               # y vuelta pasó de 0.30 a 0.40 us en 12 núcleos).
+               f"            if (c->head != NULL && c->n_libres < 256) {{\n"
+               f"                node->next = c->libres;\n"
+               f"                c->libres = node;\n"
+               f"                if (c->n_libres++ == 0)\n"
+               f"                    atomic_store_explicit(&c->hay_libres, 1, memory_order_relaxed);\n"
+               f"                node = NULL;\n"
+               f"            }}\n")
+            + f"            pthread_mutex_unlock(&c->mu);\n"
             f"            pthread_cond_signal(&c->not_full);\n"
             + (
                 # Struct: no se libera el nodo acá. node->value es su primer miembro, así
@@ -118,8 +178,7 @@ class Plantillas:
                 # {Struct}_free (misma dirección).
                 f"            return {opt_c_name}_Some(({suf}*)node);\n"
                 if inner_is_struct else
-                f"            {inner_c} v = node->value;\n"
-                f"            free(node);\n"
+                f"            free(node);  // NULL si quedó para reusar\n"
                 f"            return {opt_c_name}_Some(v);\n"
             )
             + f"        }}\n"
@@ -147,14 +206,30 @@ class Plantillas:
             f"        c->head = node->next;\n"
             f"        if (!c->head) c->tail = NULL;\n"
             f"        c->count--;\n"
+            f"        if (!c->head && !c->closed) atomic_store_explicit(&c->hay_mensajes, 0, memory_order_relaxed);\n"
+            f"        if (c->cap > 0 && c->count == c->cap - 1) atomic_store_explicit(&c->lleno, 0, memory_order_relaxed);\n"
             + ("        scar_avance();\n" if self.has_tasks else "")
+            + ("" if inner_is_struct else
+               # como en recv: el nodo vacío queda para reusar
+               f"        {inner_c} v = node->value;\n"
+               # solo con cola: en una ida y vuelta la cola queda vacía, el nodo
+               # se libera y el próximo send() pide uno con malloc, que le da
+               # al hilo un nodo que acaba de tocar él (en su caché). Reusar ahí
+               # traía el nodo del otro núcleo en cada mensaje (medido: la ida
+               # y vuelta pasó de 0.30 a 0.40 us en 12 núcleos).
+               f"        if (c->head != NULL && c->n_libres < 256) {{\n"
+               f"            node->next = c->libres;\n"
+               f"            c->libres = node;\n"
+               f"            if (c->n_libres++ == 0)\n"
+               f"                atomic_store_explicit(&c->hay_libres, 1, memory_order_relaxed);\n"
+               f"            node = NULL;\n"
+               f"        }}\n")
             + f"        pthread_mutex_unlock(&c->mu);\n"
             f"        pthread_cond_signal(&c->not_full);\n"
             + (
                 f"        return {opt_c_name}_Some(({suf}*)node);\n"
                 if inner_is_struct else
-                f"        {inner_c} v = node->value;\n"
-                f"        free(node);\n"
+                f"        free(node);  // NULL si quedó para reusar\n"
                 f"        return {opt_c_name}_Some(v);\n"
             )
             + f"    }}\n"

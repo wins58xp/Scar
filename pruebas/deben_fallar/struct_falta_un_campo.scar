@@ -1,0 +1,9 @@
+# espera: falta el campo 'm' al construir
+struct P {
+    n: i32
+    m: i32
+}
+fn main() {
+    let p = P { n: 1 }
+    print(p.n)
+}

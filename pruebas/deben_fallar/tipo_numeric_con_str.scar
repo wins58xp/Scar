@@ -1,0 +1,7 @@
+# espera: 'suma': 'T' requiere el bound 'Numeric', se dio
+fn suma<T: Numeric>(a: T, b: T) -> T {
+    return a + b
+}
+fn main() {
+    print(suma("a", "b"))
+}

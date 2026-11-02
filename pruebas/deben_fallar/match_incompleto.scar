@@ -1,0 +1,13 @@
+# espera: el match no cubre todas las variantes de 'Color': falta
+enum Color {
+    Rojo
+    Verde
+    Azul
+}
+fn main() {
+    let c = Color.Rojo
+    match c {
+        Rojo => print("rojo")
+        Verde => print("verde")
+    }
+}

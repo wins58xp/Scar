@@ -11,8 +11,9 @@ nada queda corriendo suelto (concurrencia estructurada).
 Cada programa corre de dos maneras, con la misma salida: con un intérprete
 (`scar run`) o compilado a C y a un binario nativo (`scar build`).
 
-> **Esto es un alfa (0.1.0).** El lenguaje funciona y está probado, pero
-> todavía puede cambiar. Qué trae y qué no: [`SCAR_0.1.0.md`](SCAR_0.1.0.md).
+> **Esto es un alfa (0.1.1).** El lenguaje funciona y está probado, pero
+> todavía puede cambiar. Qué trae y qué no: [`SCAR_0.1.0.md`](SCAR_0.1.0.md);
+> lo que cambió después: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Instalar
 

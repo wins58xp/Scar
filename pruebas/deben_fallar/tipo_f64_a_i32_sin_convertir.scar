@@ -1,0 +1,6 @@
+# espera: 'x': se anotó i32 pero el valor es de tipo
+# f64 a i32 pierde decimales: hay que decirlo con to_i32.
+fn main() {
+    let x: i32 = 2.5
+    print(x)
+}

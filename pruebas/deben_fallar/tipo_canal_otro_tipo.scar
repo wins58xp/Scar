@@ -1,0 +1,5 @@
+# espera: chan.send espera i32, se dio
+fn main() {
+    let ch: Chan<i32> = chan_new(1)
+    ch.send("x")
+}

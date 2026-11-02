@@ -536,6 +536,22 @@ class TiposC:
                 f"struct {impl_name} {{\n"
                 f"    {node_name} *head;\n"
                 f"    {node_name} *tail;\n"
+                # aviso para send() sin el candado: ¿hay nodos para reusar? Va
+                # junto a la cola y al candado, que send() toca igual: al final,
+                # compartía línea de caché con `giro`, que el otro hilo
+                # reescribía en cada espera (medido: la ida y vuelta, ~12 %
+                # más lenta). Cambia solo cuando la lista de libres pasa de
+                # vacía a no vacía o al revés.
+                f"    _Atomic int32_t hay_libres;\n"
+                # avisos para el que gira (sin el candado): ¿hay mensajes?, ¿está
+                # lleno? Los escriben send() y recv() bajo el candado, solo cuando
+                # cambian (la cola pasa de vacía a no vacía, o se llena o deja de
+                # estarlo). El que gira prueba el candado solo si el aviso dice
+                # que vale la pena: probarlo todo el rato hacía que el que manda
+                # lo encontrara tomado y se durmiera (medido en 12 núcleos:
+                # mensajes_grandes, -4 % contra 0.1.0).
+                f"    _Atomic int32_t hay_mensajes;\n"
+                f"    _Atomic int32_t lleno;\n"
                 f"    int closed;\n"
                 f"    pthread_mutex_t mu;\n"
                 # Dos condvars, una por dirección: recv() espera en not_empty y send(), en
@@ -548,6 +564,16 @@ class TiposC:
                 f"    _Atomic int refcount;\n"
                 f"    int32_t cap;\n"
                 f"    int32_t count;\n"
+                # presupuesto de giro antes de dormir (scar_giro_ajustar en
+                # task_context.c): lo tocan solo los que esperan, nunca send()
+                f"    _Atomic int32_t giro;\n"
+                # el de send() a un canal lleno: va aparte (ver
+                # SCAR_GIRO_MINIMO_ENVIO_NS en task_context.c)
+                f"    _Atomic int32_t giro_envio;\n"
+                # nodos para reusar (solo canales de valores, no de structs: ver
+                # scar_chan_recv); bajo `mu`
+                f"    {node_name} *libres;\n"
+                f"    int32_t n_libres;\n"
                 f"}};"
             )
         else:
@@ -562,6 +588,22 @@ class TiposC:
                 f"typedef struct {{\n"
                 f"    {node_name} *head;\n"
                 f"    {node_name} *tail;\n"
+                # aviso para send() sin el candado: ¿hay nodos para reusar? Va
+                # junto a la cola y al candado, que send() toca igual: al final,
+                # compartía línea de caché con `giro`, que el otro hilo
+                # reescribía en cada espera (medido: la ida y vuelta, ~12 %
+                # más lenta). Cambia solo cuando la lista de libres pasa de
+                # vacía a no vacía o al revés.
+                f"    _Atomic int32_t hay_libres;\n"
+                # avisos para el que gira (sin el candado): ¿hay mensajes?, ¿está
+                # lleno? Los escriben send() y recv() bajo el candado, solo cuando
+                # cambian (la cola pasa de vacía a no vacía, o se llena o deja de
+                # estarlo). El que gira prueba el candado solo si el aviso dice
+                # que vale la pena: probarlo todo el rato hacía que el que manda
+                # lo encontrara tomado y se durmiera (medido en 12 núcleos:
+                # mensajes_grandes, -4 % contra 0.1.0).
+                f"    _Atomic int32_t hay_mensajes;\n"
+                f"    _Atomic int32_t lleno;\n"
                 f"    int closed;\n"
                 f"    pthread_mutex_t mu;\n"
                 # Contador de referencias atómico: incref ocurre en el hilo que hace
@@ -575,6 +617,10 @@ class TiposC:
                 # dos condvars, ver la rama de struct de arriba
                 f"    pthread_cond_t not_empty;\n"
                 f"    pthread_cond_t not_full;\n"
+                f"    _Atomic int32_t giro;  // presupuesto de giro, ver la rama de struct\n"
+                f"    _Atomic int32_t giro_envio;  // el de send(), ver la rama de struct\n"
+                f"    {node_name} *libres;   // nodos para reusar, ver scar_chan_recv\n"
+                f"    int32_t n_libres;\n"
                 f"}} {impl_name};\n"
                 f"\n"
                 f"typedef {impl_name}* {c_name};"
@@ -593,13 +639,17 @@ class TiposC:
         # en scar_chan_free_*: {T}_free para un struct (que lleva el encabezado de
         # B12 y los campos movidos), el str copiado y el nodo para str,
         # free(node) para el resto.
+        # En un canal de valores (no de structs), send() arma el valor en un nodo
+        # local, en la pila, y recién bajo el candado toma el nodo de verdad
+        # (__scar_nodo: uno reusado o uno nuevo, ver scar_chan_send). Soltar es
+        # liberar lo que tiene el valor y, si ya lo había, ese nodo.
         node_drop = (
             f"{suf}_free(({suf}*)node);" if inner_is_struct
             else ("".join(l.strip() + " " for l in self._lineas_liberar_dueno(inner, "node->value", ""))
-                  + "free(node);") if inner_es_valor
-            else f"{cont_free}(node->value); free(node);" if inner_is_cont
-            else "scar_free((char*)node->value); free(node);" if inner.name == "str"
-            else "free(node);"
+                  + "free(__scar_nodo);") if inner_es_valor
+            else f"{cont_free}(node->value); free(__scar_nodo);" if inner_is_cont
+            else "scar_free((char*)node->value); free(__scar_nodo);" if inner.name == "str"
+            else "free(__scar_nodo);"
         )
         send_cancel_line = (
             "        if (__scar_ctx && atomic_load(&__scar_ctx->cancelled)) { " + node_drop + " scar_cancel_unwind(); }\n"
@@ -612,6 +662,29 @@ class TiposC:
         # principio del bucle y el wait se perdería, nadie volvería a señalizar.
         # Solo con tasks: sin ellas no hay TaskContext.
         send_wait_block = (
+            "            if (__scar_giro == 0 && scar_conviene_girar()) {\n"
+            "                // Antes de dormir, probar un rato si se libera lugar: dormir y despertar\n"
+            "                // un hilo cuesta mucho más. Se mira el aviso `lleno` con pausas\n"
+            "                // cada vez más largas, y el candado se prueba (trylock) solo\n"
+            "                // cuando el aviso dice que hay lugar. Una vez por llamada.\n"
+            "                __scar_giro = 1;\n"
+            "                pthread_mutex_unlock(&c->mu);\n"
+            "                // el presupuesto es tiempo (ns): igual en cualquier procesador\n"
+            "                long long __scar_fin = scar_ahora_ns() + atomic_load_explicit(&c->giro_envio, memory_order_relaxed);\n"
+            "                int __scar_listo = 0;\n"
+            "                for (int __scar_paso = 1; ; __scar_paso = __scar_paso < 64 ? __scar_paso * 2 : 64) {\n"
+            "                    for (int __k = 0; __k < __scar_paso; __k++) scar_pausa_cpu();\n"
+            "                    if (!atomic_load_explicit(&c->lleno, memory_order_relaxed)\n"
+            "                        && pthread_mutex_trylock(&c->mu) == 0) {\n"
+            "                        __scar_listo = c->count < c->cap || c->closed;\n"
+            "                        pthread_mutex_unlock(&c->mu);\n"
+            "                        if (__scar_listo) break;\n"
+            "                    }\n"
+            "                    if (scar_ahora_ns() >= __scar_fin) break;\n"
+            "                }\n"
+            "                scar_giro_ajustar(&c->giro_envio, __scar_listo, SCAR_GIRO_MINIMO_ENVIO_NS);\n"
+            "                continue;\n"
+            "            }\n"
             "            if (__scar_ctx && atomic_load(&__scar_ctx->cancelled)) {\n"
             "                pthread_mutex_unlock(&c->mu);\n"
             "                " + node_drop + "\n"
@@ -643,6 +716,29 @@ class TiposC:
             "            scar_panic_main(\"%s\", SCAR_DEADLOCK_MSG);\n"
         )
         recv_wait_block = (
+            "        if (__scar_giro == 0 && scar_conviene_girar()) {\n"
+            "            // Antes de dormir, probar un rato si llega un mensaje: dormir y despertar\n"
+            "            // un hilo cuesta mucho más. Se mira el aviso `hay_mensajes` con\n"
+            "            // pausas cada vez más largas, y el candado se prueba (trylock)\n"
+            "            // solo cuando el aviso dice que hay algo. Una vez por llamada.\n"
+            "            __scar_giro = 1;\n"
+            "            pthread_mutex_unlock(&c->mu);\n"
+            "            // el presupuesto es tiempo (ns): igual en cualquier procesador\n"
+            "            long long __scar_fin = scar_ahora_ns() + atomic_load_explicit(&c->giro, memory_order_relaxed);\n"
+            "            int __scar_listo = 0;\n"
+            "            for (int __scar_paso = 1; ; __scar_paso = __scar_paso < 64 ? __scar_paso * 2 : 64) {\n"
+            "                for (int __k = 0; __k < __scar_paso; __k++) scar_pausa_cpu();\n"
+            "                if (atomic_load_explicit(&c->hay_mensajes, memory_order_relaxed)\n"
+            "                    && pthread_mutex_trylock(&c->mu) == 0) {\n"
+            "                    __scar_listo = c->head != NULL || c->closed;\n"
+            "                    pthread_mutex_unlock(&c->mu);\n"
+            "                    if (__scar_listo) break;\n"
+            "                }\n"
+            "                if (scar_ahora_ns() >= __scar_fin) break;\n"
+            "            }\n"
+            "            scar_giro_ajustar(&c->giro, __scar_listo, SCAR_GIRO_MINIMO_NS);\n"
+            "            continue;\n"
+            "        }\n"
             "        if (__scar_ctx && atomic_load(&__scar_ctx->cancelled)) {\n"
             "            pthread_mutex_unlock(&c->mu);\n"
             "            scar_cancel_unwind();\n"
@@ -726,6 +822,12 @@ class TiposC:
                 f"        free(node);\n"
             )
             + f"        node = next;\n"
+            f"    }}\n"
+            # los nodos guardados para reusar: vacíos (su valor ya se entregó)
+            f"    while (c->libres) {{\n"
+            f"        {node_name} *next = c->libres->next;\n"
+            f"        free(c->libres);\n"
+            f"        c->libres = next;\n"
             f"    }}\n"
             f"    pthread_mutex_destroy(&c->mu);\n"
             f"    pthread_cond_destroy(&c->not_empty);\n"

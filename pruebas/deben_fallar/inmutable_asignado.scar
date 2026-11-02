@@ -1,0 +1,5 @@
+# espera: no se puede asignar a 'n': 'n' no es mut: declárala con 'let mut n =
+fn main() {
+    let n = 1
+    n = 2
+}

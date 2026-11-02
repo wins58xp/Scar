@@ -1,0 +1,4 @@
+# espera: '+' requiere operandos numéricos, se dio bool y
+fn main() {
+    print(true + 1)
+}

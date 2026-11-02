@@ -1,0 +1,5 @@
+# espera: vec.push espera i32, se dio
+fn main() {
+    let v: Vec<i32> = vec_new()
+    v.push("tres")
+}

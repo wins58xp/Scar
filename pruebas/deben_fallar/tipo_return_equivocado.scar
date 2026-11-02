@@ -1,0 +1,7 @@
+# espera: 'f' declara retorno i32 pero hace return de tipo
+fn f() -> i32 {
+    return "hola"
+}
+fn main() {
+    print(f())
+}

@@ -1,0 +1,17 @@
+# espera: uso de 'v' después de haber sido
+task leer(ch: Chan<Vec<i32>>) -> i32 {
+    let mut s = 0
+    while let Some(v) = ch.recv() {
+        s = s + v.len()
+    }
+    return s
+}
+fn main() {
+    let ch: Chan<Vec<i32>> = chan_new(4)
+    let h = spawn leer(ch)
+    let v: Vec<i32> = vec_new()
+    ch.send(v)
+    v.push(1)
+    ch.close()
+    print(h.join())
+}

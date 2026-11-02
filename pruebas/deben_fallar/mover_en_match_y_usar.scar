@@ -1,0 +1,16 @@
+# espera: uso de 'p' después de haber sido
+struct P {
+    n: i32
+}
+fn main() {
+    let p = P { n: 1 }
+    let lista: Vec<P> = vec_new()
+    let o: Option<i32> = Some(1)
+    match o {
+        Some(x) => {
+            lista.push(p)
+        }
+        None => {}
+    }
+    print(p.n)
+}

@@ -440,6 +440,7 @@ class Checker:
                 self.extern_functions[item.name] = item
             elif isinstance(item, ExternTypeDecl):
                 self._register_extern_type(item)
+        self._check_nombres_de_tipos(program)
         self._check_extern_libs(program)
         self._check_handles_no_escapan(program)
 
@@ -573,6 +574,64 @@ class Checker:
                 f"puede llamarse así (elige otro nombre)",
                 node,
             )
+
+    # Los nombres de tipo que existen sin declararlos.
+    TIPOS_DEL_LENGUAJE = types_.PRIMITIVE_NAMES | {
+        RESULT, OPTION_MARK, TASK_MARK, CHAN_MARK, VEC_MARK, MAP_MARK, PIPE_MARK,
+        FILE_MARK, SOCKET_MARK, LISTENER_MARK, FN_MARK}
+
+    def _check_nombres_de_tipos(self, program):
+        """Cada nombre usado como tipo tiene que existir: uno del lenguaje, un
+        struct o enum, un `extern type`, o un parámetro de tipo de la fn o
+        struct donde aparece. Antes un tipo mal escrito (`Vec<Pnto>`,
+        `Option<Optoin<i32>>`) pasaba el check: el intérprete lo corría como
+        un tipo opaco y el backend de C recién fallaba al generar el código.
+        Lo encontró scripts/fuzz_robustez.py."""
+        conocidos = self.TIPOS_DEL_LENGUAJE | set(self.structs) | set(self.extern_types)
+        for item in program.items:
+            alcance = conocidos | set(getattr(item, "type_params", None) or ())
+            avisados = set()
+            self._buscar_tipos(item, alcance, item, avisados, set())
+
+    def _buscar_tipos(self, obj, conocidos, nodo, avisados, vistos):
+        if isinstance(obj, TypeAnn):
+            self._revisar_tipo(obj, conocidos, nodo, avisados)
+            return
+        if isinstance(obj, (str, int, float, bool)) or obj is None or id(obj) in vistos:
+            return
+        vistos.add(id(obj))
+        if isinstance(obj, (list, tuple, set)):
+            for x in obj:
+                self._buscar_tipos(x, conocidos, nodo, avisados, vistos)
+        elif isinstance(obj, dict):
+            for x in obj.values():
+                self._buscar_tipos(x, conocidos, nodo, avisados, vistos)
+        elif isinstance(obj, Node):
+            if getattr(obj, "line", None) is not None:
+                nodo = obj
+            # una fn genérica anidada (un valor función) suma sus parámetros
+            extra = getattr(obj, "type_params", None)
+            if extra and obj is not nodo:
+                conocidos = conocidos | set(extra)
+            for x in vars(obj).values():
+                self._buscar_tipos(x, conocidos, nodo, avisados, vistos)
+
+    def _revisar_tipo(self, ty, conocidos, nodo, avisados):
+        args = list(ty.args)
+        if ty.name == TASK_MARK and len(args) >= 2 and not args[1].args \
+                and args[1].name in self.functions:
+            args = args[:1]          # Task<T, nombre_de_la_task>: el 2º es una task
+        if isinstance(ty.name, str) and ty.name not in conocidos and ty.name not in avisados:
+            avisados.add(ty.name)
+            import difflib
+            parecido = difflib.get_close_matches(
+                ty.name, sorted(n for n in conocidos if n != FN_MARK), n=1, cutoff=0.6)
+            pista = f": ¿quisiste decir '{parecido[0]}'?" if parecido else (
+                ": declara un struct o enum con ese nombre, o usa un tipo del lenguaje "
+                "(i32, i64, f64, bool, str, Vec, Map, Option, Result, Chan...)")
+            self._fail(f"tipo desconocido: '{ty.name}'{pista}", nodo)
+        for a in args:
+            self._revisar_tipo(a, conocidos, nodo, avisados)
 
     def _fail(self, msg, node=None):
         """Registra un error de tipo. `node` es el nodo AST más específico

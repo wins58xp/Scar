@@ -1,0 +1,13 @@
+# espera: uso de 'p' después de haber sido
+# Si se movió en alguna rama, después ya no se puede usar.
+struct P {
+    n: i32
+}
+fn main() {
+    let p = P { n: 1 }
+    let lista: Vec<P> = vec_new()
+    if 2 > 1 {
+        lista.push(p)
+    }
+    print(p.n)
+}

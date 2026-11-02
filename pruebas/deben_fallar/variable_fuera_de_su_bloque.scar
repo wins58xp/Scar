@@ -1,0 +1,7 @@
+# espera: variable no declarada:
+fn main() {
+    if true {
+        let x = 1
+    }
+    print(x)
+}

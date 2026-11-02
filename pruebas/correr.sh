@@ -4,12 +4,15 @@
 #   ./pruebas/correr.sh            # todas
 #   ./pruebas/correr.sh json       # solo las de una librería
 #
-# Hay dos clases:
+# Hay tres clases:
 #   - pruebas/lib_<nombre>.scar: la librería se prueba a sí misma, en SCAR, con
 #     la librería `prueba`;
 #   - pruebas/test_<nombre>_python.py: compara sus resultados con los de Python
 #     (y a veces numpy, scipy, matplotlib o Pillow). Si falta un paquete, esa
-#     prueba se salta con un aviso.
+#     prueba se salta con un aviso;
+#   - pruebas/deben_fallar/*.scar: programas que rompen una regla del lenguaje;
+#     `scar check` tiene que rechazarlos con el mensaje de sus líneas
+#     `# espera:` (./pruebas/correr.sh deben_fallar corre solo esos).
 # Las de interfaces gráficas necesitan libscarsdl (SDL2); corren sin ventana.
 
 set -u
@@ -55,6 +58,36 @@ for f in pruebas/test_*.py; do
         bien=$((bien + 1))
     fi
 done
+
+rechazos=0
+for f in pruebas/deben_fallar/*.scar; do
+    case "$f" in *"$filtro"*) ;; *) continue ;; esac
+    rechazos=$((rechazos + 1))
+    python3 cli.py check "$f" > "$tmp" 2>&1
+    rc=$?
+    falta=""
+    if [ $rc -eq 0 ]; then
+        falta="scar check lo acepta, y no debería"
+    elif grep -q "Traceback (most recent call last)" "$tmp"; then
+        falta="scar check se cae (Traceback)"
+    else
+        espera=$(sed -n 's/^# espera: *//p' "$f")
+        [ -n "$espera" ] || falta="le falta la línea '# espera: ...'"
+        # una línea # espera: por renglón; cada una tiene que estar en el mensaje
+        while IFS= read -r e; do
+            [ -z "$e" ] || grep -qF -- "$e" "$tmp" || { falta="lo rechaza con otro mensaje (esperaba: $e)"; break; }
+        done <<EOF2
+$espera
+EOF2
+    fi
+    if [ -z "$falta" ]; then
+        bien=$((bien + 1))
+    else
+        echo "  ✗ $f: $falta"; tail -8 "$tmp" | sed 's/^/      /'
+        mal=$((mal + 1))
+    fi
+done
+[ $rechazos -eq 0 ] || echo "  · pruebas/deben_fallar: $rechazos programas que rompen reglas, revisados"
 
 echo
 echo "$bien pasaron, $mal fallaron, $saltadas saltadas"

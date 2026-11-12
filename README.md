@@ -78,7 +78,7 @@ hola, SCAR
 
 - **wins58xp**: el lenguaje, el compilador, el runtime, la librería estándar
   y el libro.
-- **Enrique Palacios**: el motor raycaster de `juegos/` y la compilación en
+- **[ManiacPC](https://github.com/ManiacPC)**: el motor raycaster de `juegos/` y la compilación en
   Windows con MinGW-w64.
 
 ## Licencia

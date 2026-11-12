@@ -1693,7 +1693,11 @@ class Sentencias:
                     if self._block_always_returns(decl.body)
                     else _raiz_fin_c() + "    return 0;\n"
                 )
+                # Con tareas, main de C solo elige el modo (SCAR_TAREAS) y corre
+                # el main de verdad: tal cual con hilos, como la primera fibra con
+                # tareas livianas (scar_correr_main, planificador.c).
                 return (
+                    f"static int scar_main_real(int argc, char** argv);\n"
                     f"{self._main_sig()} {{\n"
                     # scar_ffi_worker_start_all() va antes que todo, incluso
                     # SCAR_MALLOPT_PROLOGUE: su fork() tiene que ver el proceso todavía
@@ -1701,6 +1705,10 @@ class Sentencias:
                     f"{'    scar_ffi_worker_start_all();' + chr(10) if self.pipe_isolated_libs else ''}"
                     f"{SCAR_MALLOPT_PROLOGUE}"
                     f"{self._main_arg_init()}"
+                    f"    return scar_correr_main(scar_main_real, {'argc, argv' if self.usa_arg else '0, NULL'});\n"
+                    f"}}\n"
+                    f"static int scar_main_real(int argc, char** argv) {{\n"
+                    f"    (void)argc; (void)argv;\n"
                     f"{SCAR_RAND_SEED_LINE if self.needs_rand else ''}"
                     f"{'    scar_extern_install_guard();' + chr(10) if self.extern_sigs else ''}"
                     f"{'    scar_pila_iniciar();' + chr(10) if self._fns_recursivas else ''}"

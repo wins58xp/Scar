@@ -14,6 +14,11 @@
 // módulo. Para varias, el handle opaco tendría que apuntar a un struct propio
 // {SDL_Window*, SDL_Renderer*} en vez de ser el SDL_Window* mismo.
 
+#ifdef _WIN32
+// En Windows el `main` lo pone el C generado por SCAR, no la SDL2main: sin esto
+// SDL redefine `main` a `SDL_main` y pide enlazar -lSDL2main.
+#define SDL_MAIN_HANDLED
+#endif
 #include <SDL2/SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,6 +106,9 @@ static void soltar_audio(void) {
 // scar_sdl_init() -> i32 (0 = ok, !=0 = error; el detalle de SDL_GetError()
 // va a stderr).
 int scar_sdl_init(void) {
+#ifdef _WIN32
+    SDL_SetMainReady();   // con SDL_MAIN_HANDLED: avisamos que el main ya corre
+#endif
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "scar_sdl_init: %s\n", SDL_GetError());
         return 1;
@@ -126,7 +134,9 @@ void *scar_sdl_create_window(int w, int h) {
         return NULL;
     }
     SDL_StartTextInput();  // lo que se escribe llega como texto (scar_sdl_escrito)
-    g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED);
+    Uint32 flags_ren = SDL_RENDERER_ACCELERATED;
+    if (getenv("SCAR_SDL_VSYNC")) flags_ren |= SDL_RENDERER_PRESENTVSYNC;  // opt-in: evita tearing
+    g_ren = SDL_CreateRenderer(g_win, -1, flags_ren);
     if (!g_ren) {
         // sin aceleración (SDL_VIDEODRIVER=dummy, escritorio remoto...):
         // el renderer de software dibuja exactamente lo mismo
@@ -718,6 +728,50 @@ int scar_sdl_raton_dy(void) { return g_dy; }
 int scar_sdl_raton_atrapar(int si) {
     return SDL_SetRelativeMouseMode(si ? SDL_TRUE : SDL_FALSE);
 }
+
+// ---- mouse-look manual y robusto (sirve donde el modo relativo "crudo" falla) ---
+// El modo relativo de SDL es poco fiable en WSLg / escritorios remotos: o el cursor
+// se frena en el borde (xrel deja de llegar) o el recentrado por warp mete un delta
+// residual y la vista gira sola. Este camino no usa modo relativo: oculta el cursor,
+// confina la ventana y centra el puntero; cada cuadro scar_sdl_mirar_dx() devuelve
+// el desplazamiento en X desde el centro y vuelve a centrar. Si el ratón no se mueve,
+// el delta es 0: no hay giro espurio.
+//
+// scar_sdl_mirar_on(si) -> i32: 1 activa (oculta cursor, confina, centra); 0 libera.
+int scar_sdl_mirar_on(int si) {
+    if (!g_win) return 1;
+    SDL_ShowCursor(si ? SDL_DISABLE : SDL_ENABLE);
+    SDL_SetWindowGrab(g_win, si ? SDL_TRUE : SDL_FALSE);
+    if (si) {
+        int w = 0, h = 0;
+        SDL_GetWindowSize(g_win, &w, &h);
+        SDL_WarpMouseInWindow(g_win, w / 2, h / 2);
+    }
+    return 0;
+}
+
+// scar_sdl_mirar_dx() -> i32: píxeles que se movió el cursor en X desde el centro de
+// la ventana en este cuadro; además lo recentra. (Con scar_sdl_mirar_on(1) activo.)
+static int g_mirar_dy = 0;
+int scar_sdl_mirar_dx(void) {
+    if (!g_win) return 0;
+    int w = 0, h = 0;
+    SDL_GetWindowSize(g_win, &w, &h);
+    int mx = 0, my = 0;
+    SDL_GetMouseState(&mx, &my);
+    int dx = mx - w / 2;
+    g_mirar_dy = my - h / 2;
+    SDL_WarpMouseInWindow(g_win, w / 2, h / 2);
+    return dx;
+}
+
+// scar_sdl_mirar_dy() -> i32: lo mismo en Y (negativo = hacia arriba), medido en la
+// última llamada a scar_sdl_mirar_dx(), que es la que recentra: se llama después de ella.
+int scar_sdl_mirar_dy(void) {
+    int dy = g_mirar_dy;
+    g_mirar_dy = 0;
+    return dy;
+}
 int scar_sdl_tecla(int scancode) {                        // se pulsó en este cuadro
     return (scancode >= 0 && scancode < SDL_NUM_SCANCODES) ? g_pulsadas[scancode] : 0;
 }
@@ -808,7 +862,7 @@ int scar_sdl_pixeles(const int32_t *datos, int64_t n, int ancho, int alto, int x
         if (g_tex_px) SDL_DestroyTexture(g_tex_px);
         g_tex_px = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, ancho, alto);
         if (!g_tex_px) return 1;
-        SDL_SetTextureBlendMode(g_tex_px, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureBlendMode(g_tex_px, getenv("SCAR_SDL_NOBLEND") ? SDL_BLENDMODE_NONE : SDL_BLENDMODE_BLEND);
         g_tex_w = ancho;
         g_tex_h = alto;
     }
@@ -827,7 +881,7 @@ int scar_sdl_pixeles_ajustado(const int32_t *datos, int64_t n, int ancho, int al
         if (g_tex_px) SDL_DestroyTexture(g_tex_px);
         g_tex_px = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, ancho, alto);
         if (!g_tex_px) return 1;
-        SDL_SetTextureBlendMode(g_tex_px, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureBlendMode(g_tex_px, getenv("SCAR_SDL_NOBLEND") ? SDL_BLENDMODE_NONE : SDL_BLENDMODE_BLEND);
         g_tex_w = ancho;
         g_tex_h = alto;
     }

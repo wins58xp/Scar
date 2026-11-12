@@ -1,0 +1,718 @@
+# Paso 5: raycaster texturado por el camino RÁPIDO y sin arrastre.
+#
+#   scar build juegos/paso5_mundo.scar -o paso5 && ./paso5
+#
+# Igual que lost_world (que NO arrastra): buffer de píxeles (lib/lienzo) +
+# `while gui.abierta(ui)` + `pantalla.mostrar_en`. El lienzo se repinta entero y
+# se sube a la ventana en UNA sola llamada de dibujo por cuadro (no miles de
+# rects). Así las texturas por píxel salen baratas y queda listo para crecer a
+# mundo abierto.
+#
+# Mover: W/S = adelante/atrás, A/D = strafe, Q/E = girar (opcional). ESC o X = salir.
+# Ratón: clic dentro atrapa el cursor; mover = girar y mirar arriba/abajo; Tab o ESC lo sueltan.
+# F11 = pantalla completa. La ventana se puede maximizar/redimensionar (con el
+# cursor suelto): la resolución interna se adapta sola.
+#
+# Ciclo día/noche (60 s: 30 de día + 30 de noche): el sol cruza el cielo e
+# ilumina las paredes según de dónde viene (sol direccional). Amanecer, mediodía,
+# atardecer, anochecer y una franja corta de noche cerrada. Cielo y piso siguen
+# la hora; las antorchas pesan de noche. La fase actual se muestra arriba a la izq.
+
+use "lienzo"
+use "gui"
+use "pantalla"
+
+extern "C" fn scar_sdl_key_down(scancode: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_ticks() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_mirar_on(si: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_mirar_dx() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_mirar_dy() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_raton_clic() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_tecla(scancode: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_pantalla_completa(si: i32) -> i32 from "scarsdl"
+
+fn texto_mapa() -> str {
+    return "################\n" +
+           "#..............#\n" +
+           "#......22......#\n" +
+           "#......22......#\n" +
+           "#..............#\n" +
+           "#..2........2..#\n" +
+           "#..............#\n" +
+           "#..###....###..#\n" +
+           "#..............#\n" +
+           "#..............#\n" +
+           "################"
+}
+
+struct Mundo {
+    ancho: i32
+    alto: i32
+    celdas: Vec<i32>
+}
+
+fn cargar_mundo(s: str) -> Mundo {
+    let n = len(s)
+    let mut ancho = 0
+    let mut actual = 0
+    let mut alto = 0
+    for i in 0..n {
+        if s[i] == "\n" {
+            if actual > ancho { ancho = actual }
+            actual = 0
+            alto = alto + 1
+        } else {
+            actual = actual + 1
+        }
+    }
+    if actual > 0 {
+        if actual > ancho { ancho = actual }
+        alto = alto + 1
+    }
+    let celdas: Vec<i32> = vec_new()
+    for i in 0..(ancho * alto) { celdas.push(0) }
+    let mut f = 0
+    let mut c = 0
+    for i in 0..n {
+        if s[i] == "\n" {
+            f = f + 1
+            c = 0
+        } else {
+            if s[i] == "2" {
+                celdas.set(f * ancho + c, 2)
+            } else {
+                if s[i] == "#" or s[i] == "1" { celdas.set(f * ancho + c, 1) }
+            }
+            c = c + 1
+        }
+    }
+    return Mundo { ancho: ancho, alto: alto, celdas: celdas }
+}
+
+fn celda(m: Mundo, mx: i32, my: i32) -> i32 {
+    if mx < 0 or my < 0 or mx >= m.ancho or my >= m.alto { return 1 }
+    return m.celdas.get(my * m.ancho + mx).unwrap_or(1)
+}
+
+fn absf(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn rgb(r: i32, g: i32, b: i32) -> i32 {
+    return ((r & 255) << 16) | ((g & 255) << 8) | (b & 255)
+}
+
+fn clamp255(v: i32) -> i32 {
+    if v < 0 { return 0 }
+    if v > 255 { return 255 }
+    return v
+}
+
+fn mezcla(a: f64, b: f64, t: f64) -> f64 {
+    return a + (b - a) * t
+}
+
+fn clamp01(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 }
+    if x > 1.0 { return 1.0 }
+    return x
+}
+
+# Cielo panorámico 256 x 180: degradado + nubes. Se envuelve en horizontal.
+# Las 100 filas de abajo son lo que se ve con la vista derecha (fila 80 arriba
+# de la pantalla, fila 179 en el horizonte); las 80 de arriba son el cielo que
+# aparece al mirar hacia arriba (el mismo degradado y las mismas nubes, seguidos).
+fn textura_cielo() -> Vec<i32> {
+    let SKYW = 256
+    let SKYH = 180
+    let SKYX = 80
+    let t: Vec<i32> = vec_new()
+    for fila in 0..SKYH {
+        let v = fila - SKYX
+        let frac = to_f64(v) / 100.0                     # 0 arriba de la pantalla (vista derecha), 1 horizonte
+        let br = 92.0 + 112.0 * frac                     # cielo de día: azul claro -> pálido
+        let bg = 146.0 + 82.0 * frac
+        let bb = 220.0 + 28.0 * frac
+        for u in 0..SKYW {
+            let fu = to_f64(u)
+            # nubes: suma de senos -> manchas puffy
+            let mut cl = 0.5 * sin(fu * 0.10) + 0.3 * sin(fu * 0.23 + 2.0) + 0.2 * sin(fu * 0.37 + 4.0)
+            cl = cl * (0.6 + 0.4 * sin(to_f64(v) * 0.18))
+            let mut amt = (cl - 0.25) * 1.8
+            if amt < 0.0 { amt = 0.0 }
+            if amt > 1.0 { amt = 1.0 }
+            amt = amt * (1.0 - 0.5 * frac)               # menos nubes hacia el horizonte
+            if amt > 1.0 { amt = 1.0 }
+            let r = to_i32(br + (248.0 - br) * amt)
+            let g = to_i32(bg + (248.0 - bg) * amt)
+            let b = to_i32(bb + (250.0 - bb) * amt)
+            t.push(lienzo.color(r, g, b))         # OPACO (alfa 255): se escribe directo al buffer
+        }
+    }
+    return t
+}
+
+fn textura_ladrillo() -> Vec<i32> {
+    let t: Vec<i32> = vec_new()
+    for y in 0..64 {
+        let fila = y / 16
+        let desf = (fila % 2) * 16
+        for x in 0..64 {
+            let xx = (x + desf) % 64
+            let junta = (y % 16 < 3) or (xx % 32 < 3)
+            if junta {
+                t.push(rgb(48, 44, 42))
+            } else {
+                let pieza = (fila + xx / 32) % 2
+                let v = ((x * 5 + y * 3) % 14) - 7
+                if pieza == 0 { t.push(rgb(176 + v, 72, 52)) } else { t.push(rgb(150 + v, 58, 44)) }
+            }
+        }
+    }
+    return t
+}
+
+fn textura_piedra() -> Vec<i32> {
+    let t: Vec<i32> = vec_new()
+    for y in 0..64 {
+        let fila = y / 21
+        let desf = (fila % 2) * 12
+        for x in 0..64 {
+            let xx = (x + desf) % 64
+            let junta = (y % 21 < 3) or (xx % 24 < 3)
+            let mut c = 0
+            if junta {
+                c = rgb(58, 60, 56)
+            } else {
+                let bloque = (fila + xx / 24) % 2
+                let v = ((x * 3 + y * 5) % 12) - 6
+                if bloque == 0 { c = rgb(116 + v, 120 + v, 112 + v) } else { c = rgb(100 + v, 104 + v, 98 + v) }
+            }
+            if (x * 13) % 9 < 3 and y > 30 and junta == false { c = rgb(58, 104, 52) }
+            if (x * 7) % 11 < 2 and y > 44 and junta == false { c = rgb(74, 120, 58) }
+            t.push(c)
+        }
+    }
+    return t
+}
+
+# Antorcha completa 16x40: llama (filas 0..24) + soporte (24..40).
+# 0 = transparente; los colores nunca son 0.
+fn textura_antorcha() -> Vec<i32> {
+    let TW = 16
+    let TFLAMA = 24
+    let TH = 40
+    let t: Vec<i32> = vec_new()
+    let cx = to_f64(TW - 1) / 2.0
+    for y in 0..TH {
+        for x in 0..TW {
+            let d = absf(to_f64(x) - cx)
+            if y < TFLAMA {
+                # --- llama (gota) ---
+                let up = to_f64(TFLAMA - 1 - y) / to_f64(TFLAMA - 1)
+                let halfw = (1.0 - up) * to_f64(TW) / 2.0 + 1.0
+                if d > halfw {
+                    t.push(0)
+                } else {
+                    let borde = d / halfw
+                    let calor = (1.0 - up) * (1.0 - borde)
+                    if calor > 0.66 {
+                        t.push(rgb(255, 246, 200))
+                    } else {
+                        if calor > 0.40 {
+                            t.push(rgb(255, 184, 44))
+                        } else {
+                            if calor > 0.18 {
+                                t.push(rgb(232, 92, 20))
+                            } else {
+                                t.push(rgb(150, 34, 12))
+                            }
+                        }
+                    }
+                }
+            } else {
+                # --- soporte ---
+                let yy = y - TFLAMA                        # 0..16
+                if yy < 5 {
+                    # cuenco metálico (trapecio) que recibe la llama
+                    let halfw = 4.2 - to_f64(yy) * 0.35
+                    if d <= halfw {
+                        if yy == 0 { t.push(rgb(170, 172, 182)) } else { t.push(rgb(118, 120, 132)) }
+                    } else {
+                        t.push(0)
+                    }
+                } else {
+                    # palo de madera, angosto
+                    if d <= 1.6 {
+                        if x < to_i32(cx) { t.push(rgb(104, 70, 40)) } else { t.push(rgb(84, 54, 30)) }
+                    } else {
+                        t.push(0)
+                    }
+                }
+            }
+        }
+    }
+    return t
+}
+
+# Piso de losas 64x64: juntas oscuras + losas de dos tonos con grano.
+fn textura_piso() -> Vec<i32> {
+    let t: Vec<i32> = vec_new()
+    for y in 0..64 {
+        for x in 0..64 {
+            let junta = (x % 32 < 2) or (y % 32 < 2)
+            if junta {
+                t.push(rgb(38, 38, 42))
+            } else {
+                let losa = (x / 32 + y / 32) % 2
+                let v = ((x * 7 + y * 11) % 18) - 9
+                if losa == 0 { t.push(rgb(92 + v, 88 + v, 82 + v)) } else { t.push(rgb(78 + v, 74 + v, 70 + v)) }
+            }
+        }
+    }
+    return t
+}
+
+fn sombrear(c: i32, f: f64) -> i32 {
+    let r = to_i32(to_f64((c >> 16) & 255) * f)
+    let g = to_i32(to_f64((c >> 8) & 255) * f)
+    let b = to_i32(to_f64(c & 255) * f)
+    return lienzo.color(r, g, b)
+}
+
+fn main() {
+    # Resolución interna: se deriva del tamaño de la ventana cada cuadro.
+    # esc = ceil(ancho/WOBJ) -> el ancho interno queda ~WOBJ (costo acotado),
+    # llena la ventana y respeta el aspecto. WOBJ=360 => 960px de ventana da 320.
+    let WOBJ = 360
+    let mut W = 320
+    let mut H = 200
+    let mut esc = 3
+
+    let ui = gui.ventana("SCAR motor — paso 5 (mundo)", W * esc, H * esc)
+    ui.c_fondo = 0
+    let mut buf = lienzo.nuevo(W, H, lienzo.negro())
+
+    let mundo = cargar_mundo(texto_mapa())
+    let tex_l = textura_ladrillo()
+    let tex_p = textura_piedra()
+
+    # Antorchas fijas (en celdas abiertas): posición x, y en coordenadas de mapa.
+    let tx: Vec<f64> = vec_new()
+    let ty: Vec<f64> = vec_new()
+    # Pegadas a un muro (a ~0.22 de la cara), no flotando en el medio.
+    tx.push(1.22)   ty.push(3.5)     # pared izquierda (muro en x=1.0)
+    tx.push(14.78)  ty.push(3.5)     # pared derecha (muro en x=15.0)
+    tx.push(8.0)    ty.push(4.22)    # cara sur del pilar de piedra central
+    let NT = 3
+
+    let flama = textura_antorcha()
+    let FW = 16
+    let FH = 40
+
+    let cielo = textura_cielo()
+    let SKYW = 256
+    let SKYH = 180
+    let SKYX = 80               # filas de cielo extra, para mirar hacia arriba
+    let piso = textura_piso()
+    let FT = 64
+    # z-buffer: la distancia de la pared en cada columna (para tapar sprites).
+    let mut zbuf: Vec<f64> = vec_new()
+    for i in 0..W { zbuf.push(0.0) }
+
+    let mut px = 2.5
+    let mut py = 2.5
+    let mut ang = 0.35
+    let plano = 0.66
+    let vel = 0.06
+    let giro = 0.045
+
+    # ratón estilo FPS: arranca SUELTO (para poder mover/maximizar la ventana).
+    # Clic dentro lo atrapa; Tab o ESC lo sueltan. dx gira; dy inclina (pitch).
+    let mut atrapado = false
+    let sens = 0.0012
+    let mut incl = 0.0          # inclinación: cuánto baja el horizonte, en altos de pantalla
+    let INCL_MAX = 0.4
+    let mut completa = false
+    let mut saltar = false      # ignora el delta del cuadro en que se atrapa (evita el salto)
+
+    let mut fps = 0
+    let mut cuadros = 0
+    let mut ultimo_ms = scar_sdl_ticks()
+
+    while gui.abierta(ui) {
+        if scar_sdl_tecla(41) == 1 {
+            if atrapado { atrapado = false  scar_sdl_mirar_on(0) } else { gui.cerrar(ui) }
+        }
+
+        # --- la ventana pudo cambiar de tamaño: recalcular la resolución interna ---
+        esc = (ui.ancho + WOBJ - 1) / WOBJ
+        if esc < 1 { esc = 1 }
+        let nW = max(ui.ancho / esc, 80)
+        let nH = max(ui.alto / esc, 50)
+        if nW != W or nH != H {
+            W = nW
+            H = nH
+            buf = lienzo.nuevo(W, H, lienzo.negro())
+            zbuf = vec_new()
+            for i in 0..W { zbuf.push(0.0) }
+        }
+
+        let tsec = to_f64(scar_sdl_ticks()) / 1000.0     # para el parpadeo
+
+        # --- ciclo día/noche: 30 s de día + 30 s de noche = 60 s ---
+        # fase 0..1 -> sol = fase*2pi. sh = altura del sol: +1 mediodía, -1 medianoche.
+        # Amanecer en fase 0, mediodía 0.25, atardecer 0.5, lo más oscuro 0.75.
+        let CICLO = 60.0
+        let fase = tsec / CICLO - to_f64(to_i32(tsec / CICLO))
+        let sol = fase * 6.2831853
+        let sh = sin(sol)
+        let solx = cos(sol)                              # azimut: de dónde viene la luz (gira)
+        let soly = sin(sol)
+
+        let dia = clamp01((sh + 0.2) / 0.5)              # 1 pleno día, 0 noche
+        let crep = clamp01(1.0 - absf(sh) / 0.22)        # 1 en el horizonte (amanecer/atardecer)
+        let solint = clamp01(sh)                         # luz directa del sol (0 bajo el horizonte)
+        let noche = 1.0 - dia * 0.75                     # 1 de noche, 0.25 de día (peso de antorchas)
+
+        # color del sol: blanco al mediodía, cálido al ras del horizonte
+        let hh = clamp01(sh / 0.6)
+        let sunr = 1.0
+        let sung = mezcla(0.55, 0.96, hh)
+        let sunb = mezcla(0.28, 0.88, hh)
+
+        # ambiente del mundo: noche azul oscuro -> día neutro claro, + cálido en crepúsculo
+        let ar = mezcla(0.10, 0.52, dia) + crep * 0.30
+        let ag = mezcla(0.12, 0.55, dia) + crep * 0.14
+        let ab = mezcla(0.22, 0.60, dia) + crep * 0.05
+        let amb_s = (ar + ag + ab) / 3.0
+
+        # tinte del cielo (el cielo base es azul de día; se modula por hora)
+        let cielo_b = mezcla(0.16, 1.0, dia)
+        let kr = cielo_b + crep * 0.45
+        let kg = cielo_b + crep * 0.12
+        let kb = cielo_b + (1.0 - dia) * 0.12
+
+        # --- ratón: clic atrapa; Tab suelta/atrapa; F11 pantalla completa ---
+        if scar_sdl_raton_clic() == 1 and not atrapado {
+            atrapado = true
+            scar_sdl_mirar_on(1)
+            saltar = true
+        }
+        if scar_sdl_tecla(43) == 1 {
+            atrapado = not atrapado
+            if atrapado { scar_sdl_mirar_on(1)  saltar = true } else { scar_sdl_mirar_on(0) }
+        }
+        if scar_sdl_tecla(68) == 1 {
+            completa = not completa
+            if completa { scar_sdl_pantalla_completa(1) } else { scar_sdl_pantalla_completa(0) }
+        }
+        if atrapado {
+            let dx = scar_sdl_mirar_dx()                      # píxeles desde el centro (y recentra)
+            let dy = scar_sdl_mirar_dy()                      # va después de mirar_dx, que recentra
+            if saltar { saltar = false } else {
+                ang = ang + to_f64(dx) * sens                 # derecha = girar a la derecha
+                incl = incl - to_f64(dy) * sens * 1.2         # ratón arriba = mirar arriba
+                if incl > INCL_MAX { incl = INCL_MAX }
+                if incl < 0.0 - INCL_MAX { incl = 0.0 - INCL_MAX }
+            }
+        }
+        # mirar arriba/abajo corre el horizonte (sin deformar las paredes); el tope
+        # INCL_MAX lo deja siempre dentro de la pantalla
+        let horiz = H / 2 + to_i32(incl * to_f64(H))
+        let sun_y = to_f64(horiz) - sh * (to_f64(H) * 0.46)   # altura del disco del sol
+
+        let dirx = cos(ang)
+        let diry = sin(ang)
+
+        # girar con el teclado (opcional; lo normal es con el ratón)
+        if scar_sdl_key_down(20) == 1 { ang = ang - giro }   # Q: girar a la izquierda
+        if scar_sdl_key_down(8) == 1 { ang = ang + giro }    # E: girar a la derecha
+
+        let mut mx = 0.0
+        let mut my = 0.0
+        if scar_sdl_key_down(26) == 1 { mx = mx + dirx * vel  my = my + diry * vel }   # W: adelante
+        if scar_sdl_key_down(22) == 1 { mx = mx - dirx * vel  my = my - diry * vel }   # S: atrás
+        if scar_sdl_key_down(4) == 1 { mx = mx + diry * vel  my = my - dirx * vel }    # A: strafe izquierda
+        if scar_sdl_key_down(7) == 1 { mx = mx - diry * vel  my = my + dirx * vel }    # D: strafe derecha
+
+        if celda(mundo, to_i32(px + mx), to_i32(py)) == 0 { px = px + mx }
+        if celda(mundo, to_i32(px), to_i32(py + my)) == 0 { py = py + my }
+
+        let plano_x = 0.0 - diry * plano
+        let plano_y = dirx * plano
+
+        for col in 0..W {
+            let camx = 2.0 * to_f64(col) / to_f64(W) - 1.0
+            let mut rx = dirx + plano_x * camx
+            let mut ry = diry + plano_y * camx
+            if rx == 0.0 { rx = 0.000001 }
+            if ry == 0.0 { ry = 0.000001 }
+
+            let mut celx = to_i32(px)
+            let mut cely = to_i32(py)
+            let ddx = absf(1.0 / rx)
+            let ddy = absf(1.0 / ry)
+
+            let mut pasox = 1
+            let mut pasoy = 1
+            let mut sdx = (to_f64(celx) + 1.0 - px) * ddx
+            let mut sdy = (to_f64(cely) + 1.0 - py) * ddy
+            if rx < 0.0 { pasox = 0 - 1  sdx = (px - to_f64(celx)) * ddx }
+            if ry < 0.0 { pasoy = 0 - 1  sdy = (py - to_f64(cely)) * ddy }
+
+            let mut lado = 0
+            let mut mat_id = 1
+            let mut pasos = 0
+            while pasos < 64 {
+                if sdx < sdy {
+                    sdx = sdx + ddx
+                    celx = celx + pasox
+                    lado = 0
+                } else {
+                    sdy = sdy + ddy
+                    cely = cely + pasoy
+                    lado = 1
+                }
+                let cc = celda(mundo, celx, cely)
+                if cc > 0 { mat_id = cc  pasos = 999 }
+                pasos = pasos + 1
+            }
+
+            let mut dist = 0.0
+            if lado == 0 {
+                dist = (to_f64(celx) - px + to_f64(1 - pasox) / 2.0) / rx
+            } else {
+                dist = (to_f64(cely) - py + to_f64(1 - pasoy) / 2.0) / ry
+            }
+            dist = absf(dist)
+            if dist < 0.0001 { dist = 0.0001 }
+            zbuf.set(col, dist)                           # para la prueba de profundidad de sprites
+
+            let mut wallx = 0.0
+            if lado == 0 { wallx = py + dist * ry } else { wallx = px + dist * rx }
+            wallx = wallx - to_f64(to_i32(wallx))
+            let mut texx = to_i32(wallx * 64.0)
+            if lado == 0 and rx > 0.0 { texx = 63 - texx }
+            if lado == 1 and ry < 0.0 { texx = 63 - texx }
+            if texx < 0 { texx = 0 }
+            if texx > 63 { texx = 63 }
+
+            let h = to_i32(to_f64(H) / dist)
+            let y0 = horiz - h / 2
+            let mut ya = y0
+            if ya < 0 { ya = 0 }
+            let mut yb = y0 + h
+            if yb > H { yb = H }
+
+            # --- luz de esta columna (depende de la celda golpeada, no del píxel) ---
+            let hx = to_f64(celx) + 0.5                   # centro de la celda de pared
+            let hy = to_f64(cely) + 0.5
+            # ambiente del mundo, según la hora del día
+            let mut lr = ar
+            let mut lg = ag
+            let mut lb = ab
+            # sol direccional: normal de la cara golpeada vs. dirección del sol
+            let mut nx = 0.0
+            let mut ny = 0.0
+            if lado == 0 {
+                if rx > 0.0 { nx = 0.0 - 1.0 } else { nx = 1.0 }
+            } else {
+                if ry > 0.0 { ny = 0.0 - 1.0 } else { ny = 1.0 }
+            }
+            let mut lamb = nx * solx + ny * soly
+            if lamb < 0.0 { lamb = 0.0 }
+            let sfac = solint * lamb * 1.05
+            lr = lr + sfac * sunr
+            lg = lg + sfac * sung
+            lb = lb + sfac * sunb
+            # antorcha del jugador: halo cálido (sobre todo de noche)
+            let pt = (1.25 / (1.0 + dist * 0.55)) * noche
+            lr = lr + pt
+            lg = lg + pt * 0.8
+            lb = lb + pt * 0.5
+            # antorchas fijas: luz naranja con caída y parpadeo (moduladas por noche)
+            for ti in 0..NT {
+                let dx = hx - tx.get(ti).unwrap_or(0.0)
+                let dy = hy - ty.get(ti).unwrap_or(0.0)
+                let d2 = dx * dx + dy * dy
+                let fl = 0.82 + 0.18 * sin(tsec * 7.0 + to_f64(ti) * 2.1)
+                let cc = 2.4 * fl / (1.0 + d2 * 0.7) * noche
+                lr = lr + cc
+                lg = lg + cc * 0.72
+                lb = lb + cc * 0.42
+            }
+            # caras norte/sur un poco más oscuras (volumen)
+            if lado == 1 { lr = lr * 0.85  lg = lg * 0.85  lb = lb * 0.85 }
+
+            # cielo panorámico encima de la pared (pan al girar + deriva de nubes)
+            let colang = ang + camx * 0.6
+            let ub = colang * to_f64(SKYW) / 6.2831853 + tsec * 3.0
+            let mut uu = to_i32(ub) % SKYW
+            if uu < 0 { uu = uu + SKYW }
+            # cercanía angular del sol a esta columna (para el disco/halo)
+            let rl = sqrt(rx * rx + ry * ry)
+            let gx = rx / rl
+            let gy = ry / rl
+            let azp = gx * solx + gy * soly               # ~1 si el sol está en esta dirección
+            # el cielo va desde arriba (ys=0) hasta el horizonte: mapear la fila de
+            # pantalla al alto de la textura para que no quede negro al mirar arriba
+            # ni al agrandar la ventana.
+            # Al inclinar la vista el cielo se desplaza con el horizonte (no se estira).
+            let mut medio = H / 2
+            if medio < 1 { medio = 1 }
+            let corr = horiz - H / 2                      # cuánto bajó el horizonte
+            let mut ys = 0
+            while ys < ya {
+                let mut srow = SKYX + (ys - corr) * 100 / medio
+                if srow < 0 { srow = 0 }
+                if srow > SKYH - 1 { srow = SKYH - 1 }
+                let base = cielo.get(srow * SKYW + uu).unwrap_or(0)
+                let mut cr = to_f64((base >> 16) & 255) * kr
+                let mut cg = to_f64((base >> 8) & 255) * kg
+                let mut cb = to_f64(base & 255) * kb
+                # disco del sol + halo, solo si está sobre el horizonte
+                if sh > 0.0 - 0.12 and azp > 0.80 {
+                    let dc = (1.0 - azp) * 55.0
+                    let dr = (to_f64(ys) - sun_y) / 9.0
+                    let glow = 1.7 / (1.0 + dc * dc + dr * dr)
+                    cr = cr + glow * 255.0 * sunr
+                    cg = cg + glow * 255.0 * sung
+                    cb = cb + glow * 255.0 * sunb
+                }
+                buf.pixeles.set(ys * W + col, lienzo.color(clamp255(to_i32(cr)), clamp255(to_i32(cg)), clamp255(to_i32(cb))))
+                ys = ys + 1
+            }
+
+            let mut y = ya
+            while y < yb {
+                let mut tyy = to_i32(to_f64(y - y0) * 64.0 / to_f64(h))
+                if tyy < 0 { tyy = 0 }
+                if tyy > 63 { tyy = 63 }
+                let mut c = 0
+                if mat_id == 2 {
+                    c = tex_p.get(tyy * 64 + texx).unwrap_or(0)
+                } else {
+                    c = tex_l.get(tyy * 64 + texx).unwrap_or(0)
+                }
+                let r = clamp255(to_i32(to_f64((c >> 16) & 255) * lr))
+                let g = clamp255(to_i32(to_f64((c >> 8) & 255) * lg))
+                let b = clamp255(to_i32(to_f64(c & 255) * lb))
+                buf.pixeles.set(y * W + col, lienzo.color(r, g, b))
+                y = y + 1
+            }
+
+            # piso texturado (floor casting): cada fila está a una distancia fija
+            let mut yf = yb
+            while yf < H {
+                let mut p = to_f64(yf) - to_f64(horiz)
+                if p < 1.0 { p = 1.0 }
+                let rowdist = to_f64(H) * 0.5 / p          # distancia horizontal al piso de esta fila
+                let fwx = px + rowdist * rx                # punto del mundo sobre el suelo
+                let fwy = py + rowdist * ry
+                let mut txf = to_i32(to_f64(FT) * (fwx - to_f64(to_i32(fwx))))
+                let mut tyf = to_i32(to_f64(FT) * (fwy - to_f64(to_i32(fwy))))
+                if txf < 0 { txf = 0 }
+                if txf > FT - 1 { txf = FT - 1 }
+                if tyf < 0 { tyf = 0 }
+                if tyf > FT - 1 { tyf = FT - 1 }
+                let c = piso.get(tyf * FT + txf).unwrap_or(0)
+                let tf = solint * 0.35                          # luz cenital del sol sobre el suelo
+                let tr = (1.15 / (1.0 + rowdist * 0.6)) * noche  # antorcha del jugador (nocturna)
+                let lr_f = ar + tf * sunr + tr
+                let lg_f = ag + tf * sung + tr * 0.8
+                let lb_f = ab + tf * sunb + tr * 0.5
+                let r = clamp255(to_i32(to_f64((c >> 16) & 255) * lr_f))
+                let g = clamp255(to_i32(to_f64((c >> 8) & 255) * lg_f))
+                let b = clamp255(to_i32(to_f64(c & 255) * lb_f))
+                buf.pixeles.set(yf * W + col, lienzo.color(r, g, b))
+                yf = yf + 1
+            }
+        }
+
+        # --- sprites: las llamas de las antorchas (billboards con z-buffer) ---
+        for si in 0..NT {
+            let sx = tx.get(si).unwrap_or(0.0) - px
+            let sy = ty.get(si).unwrap_or(0.0) - py
+            let invdet = 1.0 / (plano_x * diry - dirx * plano_y)
+            let transx = invdet * (diry * sx - dirx * sy)
+            let transy = invdet * (0.0 - plano_y * sx + plano_x * sy)   # profundidad
+            if transy > 0.1 {
+                let base = absf(to_f64(H) / transy)
+                let mut tamh = to_i32(base * 1.05)        # alto (llama + soporte)
+                let mut tamw = to_i32(base * 0.42)
+                if tamh < 1 { tamh = 1 }
+                if tamw < 1 { tamw = 1 }
+                let scr = to_i32(to_f64(W) / 2.0 * (1.0 + transx / transy))
+                let cymid = horiz - to_i32(to_f64(tamh) * 0.05)         # casi centrado en el horizonte
+                let x0 = scr - tamw / 2
+                let y0 = cymid - tamh / 2
+                let fl = 0.78 + 0.22 * sin(tsec * 7.0 + to_f64(si) * 2.1)
+
+                let mut sxp = x0
+                while sxp < x0 + tamw {
+                    if sxp >= 0 and sxp < W and transy < zbuf.get(sxp).unwrap_or(1000000.0) {
+                        let texx = (sxp - x0) * FW / tamw
+                        if texx >= 0 and texx < FW {
+                            let mut syp = y0
+                            while syp < y0 + tamh {
+                                if syp >= 0 and syp < H {
+                                    let texy = (syp - y0) * FH / tamh
+                                    if texy >= 0 and texy < FH {
+                                        let c = flama.get(texy * FW + texx).unwrap_or(0)
+                                        if c != 0 {
+                                            # llama (filas < 24): emisiva. soporte: cálido y más tenue.
+                                            let mut mr = fl
+                                            let mut mg = fl
+                                            let mut mb = fl
+                                            if texy >= 24 {
+                                                mr = 0.85 * fl
+                                                mg = 0.58 * fl
+                                                mb = 0.42 * fl
+                                            }
+                                            let r = clamp255(to_i32(to_f64((c >> 16) & 255) * mr))
+                                            let g = clamp255(to_i32(to_f64((c >> 8) & 255) * mg))
+                                            let b = clamp255(to_i32(to_f64(c & 255) * mb))
+                                            buf.pixeles.set(syp * W + sxp, lienzo.color(r, g, b))
+                                        }
+                                    }
+                                }
+                                syp = syp + 1
+                            }
+                        }
+                    }
+                    sxp = sxp + 1
+                }
+            }
+        }
+
+        # etiqueta de la fase del día
+        let mut etq = "noche"
+        if sh > 0.35 {
+            etq = "dia"
+        } else {
+            if sh > 0.0 - 0.35 {
+                if solx > 0.0 {
+                    etq = "amanecer"
+                } else {
+                    if sh > 0.0 { etq = "atardecer" } else { etq = "anochecer" }
+                }
+            }
+        }
+        lienzo.texto(buf, 4, 4, etq, lienzo.color(240, 240, 180))
+        lienzo.texto(buf, W - 56, 4, "FPS " + a_texto(fps), lienzo.color(240, 240, 180))
+        # centrado: el buffer escalado puede dejar hasta (esc-1) px de borde
+        let offx = max(0, (ui.ancho - W * esc) / 2)
+        let offy = max(0, (ui.alto - H * esc) / 2)
+        pantalla.mostrar_en(buf, offx, offy, esc)
+
+        cuadros = cuadros + 1
+        let ahora = scar_sdl_ticks()
+        if ahora - ultimo_ms >= 500 {
+            fps = cuadros * 1000 / (ahora - ultimo_ms)
+            cuadros = 0
+            ultimo_ms = ahora
+        }
+    }
+}

@@ -8,10 +8,13 @@ memoria de otra; lo que tienen que compartir, se lo mandan por canales. Si una
 tarea falla, cancela a las que creó y el error sube hasta quien la espera:
 nada queda corriendo suelto (concurrencia estructurada).
 
+Las tareas son livianas: el programa reparte todas las que lances entre los
+núcleos del procesador, así que puede tener cien mil vivas a la vez.
+
 Cada programa corre de dos maneras, con la misma salida: con un intérprete
 (`scar run`) o compilado a C y a un binario nativo (`scar build`).
 
-> **Esto es un alfa (0.1.1).** El lenguaje funciona y está probado, pero
+> **Esto es un alfa (0.2.0).** El lenguaje funciona y está probado, pero
 > todavía puede cambiar. Qué trae y qué no: [`SCAR_0.1.0.md`](SCAR_0.1.0.md);
 > lo que cambió después: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -67,6 +70,16 @@ hola, SCAR
   compara.
 - [**La librería estándar**](libro/B_libreria_estandar.md): las librerías de
   `lib/` (texto, JSON, fechas, matemática, gráficos, red, `gui`, `autodiff`…).
+
+- [**Un motor de juego**](juegos/ENGINE.md): un raycaster estilo DOOM escrito
+  en SCAR, paso a paso (`juegos/paso1` a `paso5_mundo.scar`).
+
+## Quiénes lo hacen
+
+- **wins58xp**: el lenguaje, el compilador, el runtime, la librería estándar
+  y el libro.
+- **Enrique Palacios**: el motor raycaster de `juegos/` y la compilación en
+  Windows con MinGW-w64.
 
 ## Licencia
 

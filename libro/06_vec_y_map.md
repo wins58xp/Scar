@@ -20,11 +20,13 @@ fn main() {
 
 ```
 [10, 20, 30] 3
-['ana', 'luis']
+["ana", "luis"]
 ```
 
-(`print` muestra los textos de una colección entre comillas, para que
-`["a, b"]` y `["a", "b"]` no se confundan.)
+(`print` muestra lo que hay dentro de una colección, de un `Some`/`Ok`/`Err` o de
+un struct tal como se escribe en SCAR: los textos entre comillas dobles, para que
+`["a, b"]` y `["a", "b"]` no se confundan, con `\"`, `\\` y `\n` escapados, y los
+`bool` como `true`/`false`.)
 
 Una lista vacía se arma con `vec_new()`. Como no tiene elementos de los que
 sacar el tipo, se escribe en el `let`:
@@ -195,7 +197,7 @@ fn main() {
 ```
 
 ```
-{'manzana': 10, 'banana': 5, 'pera': 8} 3
+{"manzana": 10, "banana": 5, "pera": 8} 3
 Some(5) None
 ```
 
@@ -227,7 +229,7 @@ fn main() {
 ```
 
 ```
-{'sí': 3, 'no': 2}
+{"sí": 3, "no": 2}
 quitado: Some(2) quedan 1
 ```
 

@@ -19,7 +19,7 @@ static void scar_sleep(double seconds) {
         ctx->wait_cond = &ctx->sleep_cond;
         pthread_mutex_unlock(&ctx->wait_lock);
         while (!atomic_load(&ctx->cancelled)) {
-            if (pthread_cond_timedwait(&ctx->sleep_cond, &ctx->sleep_mu, &hasta) == ETIMEDOUT) break;
+            if (scar_cond_timedwait(&ctx->sleep_cond, &ctx->sleep_mu, &hasta) == ETIMEDOUT) break;
         }
         pthread_mutex_lock(&ctx->wait_lock);
         ctx->wait_mu = NULL;

@@ -7,7 +7,7 @@ static @@RES@@ scar_file_read_bytes(ScarFile __scar_h, int32_t n) {
     unsigned char buf[4096];
     int32_t falta = n;
     while (falta > 0) {
-        size_t k = fread(buf, 1, falta < 4096 ? (size_t)falta : 4096, f);
+        size_t k = SCAR_BLOQUEANDO(fread(buf, 1, falta < 4096 ? (size_t)falta : 4096, f));
         for (size_t i = 0; i < k; i++) scar_vec_push_i32(&v, (int32_t)buf[i]);
         falta -= (int32_t)k;
         if (k == 0) break;

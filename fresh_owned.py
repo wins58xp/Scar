@@ -309,17 +309,31 @@ class _Analyzer:
             state.pop(name, None)
 
     def _opt_fuente(self, ty, ret_ty):
-        """Option<S> con S el struct que devuelve la fn: el único
-        caso donde el codegen saca el contenido de la Option al devolver la
-        ligada de un while-let (solo para struct)."""
+        """Option<S> o Result<S> con S el struct que devuelve la fn: el único
+        caso donde el codegen saca el contenido al devolver la ligada de un
+        while-let (solo para struct). Result entra por el `match` sobre un
+        Result (`Ok(r) => { return r }`), que enum_match baja a un while let
+        con el patrón Ok sobre una variable oculta: un Result tiene la forma
+        de un Option."""
+        payload = _option_payload(ty)
+        if payload is None and getattr(ty, "name", None) == "Result" and getattr(ty, "args", None):
+            payload = ty.args[0]
         return (self.is_struct is not None and ret_ty is not None
-                and _option_payload(ty) == ret_ty and self.is_struct(ret_ty))
+                and payload == ret_ty and self.is_struct(ret_ty))
 
     def _opt_fresca(self, expr, ty, types_env):
         if isinstance(expr, NoneExpr):
             return True
         if isinstance(expr, MethodCall) and expr.method in _MALLOC_SCRUTINEE_METHODS:
             return True
+        if (getattr(ty, "name", None) == "Result" and isinstance(expr, Call)
+                and isinstance(expr.callee, Ident) and not getattr(expr.callee, "es_valor_fn", False)):
+            # un Result<S> que entrega una fn que siempre lo arma nuevo (su
+            # propio análisis lo dice: `return Ok(nuevo)`, `return otra()?`):
+            # la variable que lo recibe es su dueña, y el contenido también
+            r = self.resolve(expr.callee.name)
+            if r is not None and r.fresh:
+                return True
         return bool(self.is_fresh_source(expr, ty, types_env))
 
     def _marcar_opt(self, nombre, expr, ty, ret_ty, types_env, state):
@@ -760,6 +774,14 @@ def _variables_de_fn(decl, fns):
 
     visitar(decl.body)
     return nombres
+
+
+def es_compuesto_de_struct(t, structs):
+    """Option<Struct> o Result<Struct>: un Result tiene la forma de un Option,
+    así que la fn puede quedarse con su contenido de la misma manera
+    (`match r { Ok(p) => v.push(p) ... }`). El checker y el codegen usan esta
+    misma regla para saber qué parámetros se consumen: no pueden desacordar."""
+    return t.name in ("Option", "Result") and bool(t.args) and t.args[0].name in structs
 
 
 def resolve_consumed_option_params(fns, is_option_struct_type):

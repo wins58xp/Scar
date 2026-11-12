@@ -37,7 +37,7 @@ typedef struct TaskContext {
     // Registro de en que condvar/mutex de Chan<T> esta bloqueado ESTE hilo ahora mismo,
     // si lo esta. NULL/NULL cuando no esta bloqueado en ningun chan. Lo
     // escribe el propio hilo (bajo `wait_lock`, ver scar_chan_send_*/recv_*)
-    // justo antes de dormir en pthread_cond_wait() SIN timeout -- no hay un
+    // justo antes de dormir en scar_cond_wait() SIN timeout -- no hay un
     // despertar periodico, asi que scar_cancel_notify() (mas abajo) necesita poder despertarlo a
     // proposito en cuanto lo cancelan, en vez de dejarlo dormido para
     // siempre. `wait_lock` es un mutex CHICO y propio de este ctx (no el
@@ -47,17 +47,17 @@ typedef struct TaskContext {
     // sepa de antemano en que canal esta bloqueada su victima.
     pthread_mutex_t wait_lock;
     pthread_mutex_t *wait_mu;
-    pthread_cond_t *wait_cond;
+    ScarCond *wait_cond;
     // Fin del hilo, para que join() espere en una condvar en vez de
     // sondear.
     // 'done' (bajo done_mu) pasa a 1 en el ultimo paso del wrapper
     // (scar_ctx_mark_done), despues de toda su limpieza.
     pthread_mutex_t done_mu;
-    pthread_cond_t done_cond;
+    ScarCond done_cond;
     int done;
     // sleep() espera aca, interrumpible por scar_cancel_notify.
     pthread_mutex_t sleep_mu;
-    pthread_cond_t sleep_cond;
+    ScarCond sleep_cond;
     pthread_t thread;
     sigjmp_buf panic_env;
     ScarArena arena;
@@ -66,10 +66,15 @@ typedef struct TaskContext {
     // para task 'void' (nada que liberar) o si nunca se asigna.
     void (*free_retval)(void*);
     uint64_t rand_semilla;  // semilla de rand() de esta task
+    // Con tareas livianas (planificador.c) no hay pthread_t: el resultado lo
+    // deja la fibra al terminar (scar_tarea_fibra_termino), y
+    // 'fibra_terminada' dice que ya no corre (el gemelo de pthread_join).
+    void *retval_fibra;
+    atomic_int fibra_terminada;
 } TaskContext;
 
 typedef struct {
     TaskContext *ctx;
 } TaskHandle;
 
-static _Thread_local TaskContext *__scar_ctx = NULL;
+// __scar_ctx: en ScarHilo (tls.c)

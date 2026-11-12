@@ -1,12 +1,6 @@
 // Condvars de espera con reloj monotonico (un cambio de la
 // hora del sistema no adelanta ni atrasa un sleep o un join).
-static void scar_cond_init_mono(pthread_cond_t *c) {
-    pthread_condattr_t a;
-    pthread_condattr_init(&a);
-    pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
-    pthread_cond_init(c, &a);
-    pthread_condattr_destroy(&a);
-}
+static void scar_cond_init_mono(ScarCond *c) { scar_cond_init(c, 1); }
 
 // instante absoluto (CLOCK_MONOTONIC) dentro de 'secs' segundos
 static struct timespec scar_abs_mono(double secs) {
@@ -47,7 +41,75 @@ static TaskContext* scar_ctx_new(const char *name, TaskContext *parent) {
     pthread_mutex_init(&ctx->sleep_mu, NULL);
     scar_cond_init_mono(&ctx->sleep_cond);
     scar_arena_init(&ctx->arena);
+    ctx->retval_fibra = NULL;
+    atomic_init(&ctx->fibra_terminada, 0);
     return ctx;
+}
+
+static void scar_panic(const char *fmt, ...) __attribute__((noreturn));
+static _Atomic int scar_hilos_vivos;
+
+// Arranca la tarea: un hilo del sistema (SCAR_TAREAS=hilos) o una fibra del
+// planificador (livianas). Si no se puede (sin hilos o sin memoria para la
+// pila), la tarea queda como terminada sin correr (así ningún join ni la
+// limpieza de la madre la espera) y es un panic de quien la lanzaba, con la
+// causa: antes pthread_create fallaba en silencio y el join decía "probable
+// deadlock" a los 8 s.
+static void scar_tarea_lanzar(TaskContext *ctx, void *(*fn)(void *), void *args) {
+    int rc = 0;
+#ifdef SCAR_PLANIFICADOR
+    if (scar_livianas) {
+        ScarFibra *f = scar_fibra_nueva(fn, args, ctx, scar_tam_pila);
+        // la tarea nueva queda de "siguiente" en este mismo trabajador (como el
+        // runnext de Go): un spawn seguido de join corre sin cruzar de núcleo.
+        // Si la madre sigue trabajando, la hija pasa a la cola con el próximo
+        // spawn o cuando la madre cede el turno, y ahí otro trabajador la toma.
+        if (f) { scar_listo(f, 1); return; }
+        rc = errno ? errno : ENOMEM;
+    } else
+#endif
+    rc = pthread_create(&ctx->thread, NULL, fn, args);
+    if (rc == 0) return;
+    atomic_fetch_sub(&scar_hilos_vivos, 1);
+    atomic_store(&ctx->joined, 1);
+    atomic_store(&ctx->finished, 1);
+    atomic_store(&ctx->fibra_terminada, 1);
+    pthread_mutex_lock(&ctx->done_mu);
+    ctx->done = 1;
+    pthread_mutex_unlock(&ctx->done_mu);
+    free(args);
+#ifdef SCAR_PLANIFICADOR
+    if (scar_livianas)
+        scar_panic("no se pudo lanzar la tarea '%s': no hay memoria para su pila (%s). "
+                   "Cada tarea viva ocupa dos zonas de memoria y Linux permite "
+                   "vm.max_map_count por programa: para más tareas vivas a la vez, "
+                   "sudo sysctl vm.max_map_count=1048576", ctx->name, strerror(rc));
+#endif
+    scar_panic("no se pudo lanzar la tarea '%s': el sistema no da más hilos (%s). "
+               "Cada tarea es un hilo: el límite es ulimit -u; con "
+               "SCAR_TAREAS=livianas muchas tareas comparten pocos hilos",
+               ctx->name, strerror(rc));
+}
+
+// La fibra de una tarea terminó (ya no corre en su pila): su resultado.
+__attribute__((unused))
+static void scar_tarea_fibra_termino(void *tarea, void *resultado) {
+    TaskContext *ctx = tarea;
+    ctx->retval_fibra = resultado;
+    atomic_store_explicit(&ctx->fibra_terminada, 1, memory_order_release);
+}
+
+// El gemelo de pthread_join: espera a que la tarea ya no corra (después de
+// scar_ctx_mark_done le quedan unas líneas) y da su resultado.
+static void scar_tarea_recoger(TaskContext *ctx, void **retval) {
+#ifdef SCAR_PLANIFICADOR
+    if (scar_livianas) {
+        while (!atomic_load_explicit(&ctx->fibra_terminada, memory_order_acquire)) scar_ceder();
+        *retval = ctx->retval_fibra;
+        return;
+    }
+#endif
+    pthread_join(ctx->thread, retval);
 }
 
 // Ultimo paso del wrapper de una task (normal, panic o
@@ -55,7 +117,7 @@ static TaskContext* scar_ctx_new(const char *name, TaskContext *parent) {
 static void scar_ctx_mark_done(TaskContext *ctx) {
     pthread_mutex_lock(&ctx->done_mu);
     ctx->done = 1;
-    pthread_cond_broadcast(&ctx->done_cond);
+    scar_cond_broadcast(&ctx->done_cond);
     pthread_mutex_unlock(&ctx->done_mu);
 }
 
@@ -80,9 +142,9 @@ static void scar_ctx_free(TaskContext *ctx) {
     pthread_mutex_destroy(&ctx->wait_lock);
     pthread_mutex_destroy(&ctx->injected_lock);
     pthread_mutex_destroy(&ctx->done_mu);
-    pthread_cond_destroy(&ctx->done_cond);
+    scar_cond_destroy(&ctx->done_cond);
     pthread_mutex_destroy(&ctx->sleep_mu);
-    pthread_cond_destroy(&ctx->sleep_cond);
+    scar_cond_destroy(&ctx->sleep_cond);
     free(ctx->injected_slots);  // NULL si la task no tiene 'accepts'
     free(ctx->children);
     free(ctx->panic_msg);
@@ -92,7 +154,7 @@ static void scar_ctx_free(TaskContext *ctx) {
 // Unico punto de entrada para cancelar un TaskContext (lo usan
 // scar_cancel_siblings, scar_cancel_children y el timeout de
 // scar_join_wait): ademas de marcar 'cancelled', si ese ctx
-// esta bloqueado AHORA MISMO en un pthread_cond_wait() sin timeout de
+// esta bloqueado AHORA MISMO en un scar_cond_wait() sin timeout de
 // scar_chan_send_*/recv_* (ver wait_mu/wait_cond en TaskContext), lo
 // despierta al toque en vez de dejarlo dormido hasta que otro
 // send()/recv()/close() en ese mismo canal lo despierte por su cuenta
@@ -101,8 +163,8 @@ static void scar_ctx_free(TaskContext *ctx) {
 // El lock+broadcast+unlock de abajo se hace primero bajo wait_lock (para
 // leer wait_mu/wait_cond de forma segura) y despues bajo el propio mutex
 // del canal apuntado por wait_mu (requisito de POSIX para que
-// pthread_cond_broadcast() tenga garantizado despertar a quien esta en
-// pthread_cond_wait() sobre ese mismo par mutex/cond -- broadcastear sin
+// scar_cond_broadcast() tenga garantizado despertar a quien esta en
+// scar_cond_wait() sobre ese mismo par mutex/cond -- broadcastear sin
 // tener el mutex tomado es una carrera clasica de "signal perdido").
 // Si el ctx no esta bloqueado en ningun canal (wait_mu NULL, el caso
 // comun), esto es solo el atomic_store de antes mas un lock/unlock chico
@@ -124,13 +186,13 @@ static void scar_cancel_notify(TaskContext *ctx) {
     for (;;) {
         pthread_mutex_lock(&ctx->wait_lock);
         pthread_mutex_t *mu = ctx->wait_mu;
-        pthread_cond_t *cond = ctx->wait_cond;
+        ScarCond *cond = ctx->wait_cond;
         if (!mu || !cond) {
             pthread_mutex_unlock(&ctx->wait_lock);
             return;
         }
         if (pthread_mutex_trylock(mu) == 0) {
-            pthread_cond_broadcast(cond);
+            scar_cond_broadcast(cond);
             pthread_mutex_unlock(mu);
             pthread_mutex_unlock(&ctx->wait_lock);
             return;
@@ -176,7 +238,7 @@ static void scar_cancel_children(TaskContext *ctx) {
             // este compare_exchange falla y el retval sigue siendo su
             // responsabilidad -- sin cambio para ese camino.
             void *__scar_orphan_retval = NULL;
-            pthread_join(kids[i]->thread, &__scar_orphan_retval);
+            scar_tarea_recoger(kids[i], &__scar_orphan_retval);
             if (__scar_orphan_retval && kids[i]->free_retval) {
                 kids[i]->free_retval(__scar_orphan_retval);
             }
@@ -257,12 +319,24 @@ static _Atomic unsigned long scar_progreso = 0;
 // en pasos que cuenten como avance), asi que join() considera que hay progreso mientras
 // alguna duerma (va a despertar sola).
 static _Atomic int scar_durmiendo = 0;
-static __thread unsigned int scar_progreso_local = 0;
+// scar_progreso_local: en ScarHilo (tls.c)
 static inline void scar_avance(void) {
     atomic_fetch_add_explicit(&scar_progreso, 1, memory_order_relaxed);
 }
 static inline void scar_safepoint(void) {
-    if ((++scar_progreso_local & 0x3Fu) == 0) scar_avance();
+    if ((++scar_progreso_local & 0x3Fu) == 0) {
+        scar_avance();
+#ifdef SCAR_PLANIFICADOR
+        // con tareas livianas nadie le quita el hilo a una tarea que no espera:
+        // en un bucle largo, cede el turno de vez en cuando si hay otras listas
+        // (y si venció un plazo -el sleep de otra tarea- y nadie más lo va a
+        // ver: los plazos se disparan al buscar trabajo. Sin esto, una tarea
+        // que nunca espera dejaba dormida para siempre a la que hizo sleep:
+        // 39_cancelacion_durante_send llenaba la memoria.)
+        if (scar_livianas && (scar_progreso_local & 0xFFFu) == 0
+            && (scar_hay_otras() || scar_plazo_vencido())) scar_ceder();
+#endif
+    }
     scar_cancel_check();
 }
 
@@ -274,7 +348,7 @@ static inline void scar_safepoint(void) {
 // Una tarea que duerme, lee la red o el teclado, o corre codigo, no
 // cuenta como esperando: no hay falsos positivos. Gemelo de
 // _EsperaCanal en interpreter.py.
-static _Atomic int scar_hilos_vivos = 1;
+static _Atomic int scar_hilos_vivos = 1;  // declarado arriba (scar_tarea_lanzar)
 static _Atomic int scar_hilos_esperando = 0;
 // Giro antes de dormir en un canal: antes de dormirse de verdad, la tarea
 // prueba un rato si llegó un mensaje (o se liberó lugar). El rato se mide en
@@ -318,8 +392,25 @@ static int scar_nucleos(void) {
     return v;
 }
 static inline int scar_conviene_girar(void) {
-    return scar_giro_us() > 0
-        && atomic_load_explicit(&scar_hilos_vivos, memory_order_relaxed) <= scar_nucleos();
+    if (scar_giro_us() <= 0) return 0;
+    if (atomic_load_explicit(&scar_hilos_vivos, memory_order_relaxed) > scar_nucleos()) return 0;
+#ifdef SCAR_PLANIFICADOR
+    // con tareas livianas, además, solo si este trabajador no tiene otra tarea
+    // lista: si la tiene (la pareja de una ida y vuelta, que acaba de quedar
+    // de "siguiente"), dormirse y dejarla correr acá cuesta menos que girar.
+    // Sin otra lista, la que falta está corriendo en otro núcleo (varios
+    // productores y consumidores): ahí girar un momento gana, como con hilos.
+    if (scar_livianas) return !scar_hay_otras();
+#endif
+    return 1;
+}
+// mientras gira le pueden dejar una tarea lista en su trabajador: deja de girar
+static inline int scar_dejar_de_girar(void) {
+#ifdef SCAR_PLANIFICADOR
+    return scar_livianas && scar_hay_otras();
+#else
+    return 0;
+#endif
 }
 // El presupuesto de giro de un canal (en nanosegundos) aprende de lo que pasó:
 // si el giro sirvió (llegó algo mientras giraba) se duplica, hasta SCAR_GIRO;
@@ -359,14 +450,23 @@ static inline void scar_pausa_cpu(void) {
 }
 
 typedef struct { unsigned long visto; int quietas; } ScarEspera;
-static int scar_esperar_cond(pthread_cond_t *cv, pthread_mutex_t *mu, ScarEspera *e) {
+static int scar_esperar_cond(ScarCond *cv, pthread_mutex_t *mu, ScarEspera *e) {
     atomic_fetch_add(&scar_hilos_esperando, 1);
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);  // las condvars de canal usan el reloj por defecto
     ts.tv_nsec += 250000000L;
     if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
     int trabado = 0;
-    if (pthread_cond_timedwait(cv, mu, &ts) == ETIMEDOUT) {
+#ifdef SCAR_PLANIFICADOR
+    // con tareas livianas la espera no tiene plazo: el deadlock lo ve el
+    // planificador (scar_detectar_deadlock) y despierta a una como trabada
+    if (scar_livianas && scar_fibra_actual()) {
+        if (scar_cond_timedwait(cv, mu, NULL) == SCAR_TRABADA) trabado = 1;
+        atomic_fetch_sub(&scar_hilos_esperando, 1);
+        return trabado;
+    }
+#endif
+    if (scar_cond_timedwait(cv, mu, &ts) == ETIMEDOUT) {
         unsigned long p = atomic_load_explicit(&scar_progreso, memory_order_relaxed);
         if (p == e->visto && atomic_load(&scar_durmiendo) == 0
             && atomic_load(&scar_hilos_esperando) >= atomic_load(&scar_hilos_vivos)) {
@@ -538,12 +638,12 @@ static void* scar_join_wait(TaskContext *child_ctx) {
             struct timespec giveup = scar_abs_mono(1.0);
             pthread_mutex_lock(&child_ctx->done_mu);
             while (!child_ctx->done) {
-                if (pthread_cond_timedwait(&child_ctx->done_cond, &child_ctx->done_mu, &giveup) == ETIMEDOUT) break;
+                if (scar_cond_timedwait_k(&child_ctx->done_cond, &child_ctx->done_mu, &giveup, 1) == ETIMEDOUT) break;
             }
             int termino = child_ctx->done;
             pthread_mutex_unlock(&child_ctx->done_mu);
             if (termino) {
-                pthread_join(child_ctx->thread, &retval);
+                scar_tarea_recoger(child_ctx, &retval);
                 atomic_store(&child_ctx->joined, 1);
             }
             scar_panic(
@@ -570,7 +670,7 @@ static void* scar_join_wait(TaskContext *child_ctx) {
             }
         }
         atomic_fetch_add(&scar_hilos_esperando, 1);  // Join() tambien espera
-        pthread_cond_timedwait(&child_ctx->done_cond, &child_ctx->done_mu, &hasta);
+        scar_cond_timedwait_k(&child_ctx->done_cond, &child_ctx->done_mu, &hasta, 1);
         atomic_fetch_sub(&scar_hilos_esperando, 1);
         if (yo) {
             pthread_mutex_lock(&yo->wait_lock);
@@ -581,7 +681,7 @@ static void* scar_join_wait(TaskContext *child_ctx) {
     }
     pthread_mutex_unlock(&child_ctx->done_mu);
     // la hija ya hizo su ultimo paso: este join es inmediato
-    pthread_join(child_ctx->thread, &retval);
+    scar_tarea_recoger(child_ctx, &retval);
     atomic_store(&child_ctx->joined, 1);
     if (atomic_load(&child_ctx->panicked)) {
         scar_propagate_panic(child_ctx);

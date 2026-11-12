@@ -30,7 +30,7 @@ static void scar_pool_make_key(void) {
 // necesaria como el único gancho que ofrece pthread para correr
 // código al salir el hilo; esta bandera no la reemplaza, solo evita
 // volver a tocarla en cada llamada.
-static _Thread_local int scar_pool_registered = 0;
+// scar_pool_registered: en ScarHilo (tls.c)
 
 static inline void scar_pool_touch_thread(void) {
     if (scar_pool_registered) return;

@@ -44,8 +44,13 @@ fn main() {
 primos menores que 100000: 9592
 ```
 
-Las dos mitades se cuentan en paralelo, cada una en su propio hilo. Mientras
+Las dos mitades se cuentan en paralelo, cada una en un núcleo. Mientras
 tanto `main` sigue: recién `.join()` la hace esperar.
+
+Una tarea es liviana: no es un hilo del sistema. El programa compilado tiene
+un hilo por núcleo y reparte entre ellos todas las tareas que lances, así que
+puedes tener cien mil vivas a la vez sin problema. Cuando una espera (un
+`join`, un canal, un `sleep`), le deja su lugar a otra.
 
 ## 9.2 Cada tarea es dueña de su región
 
@@ -55,7 +60,7 @@ lo que quede se libera. Lo que devuelve con `return` pasa a quien hizo
 `join()`, así que el resultado sobrevive a la tarea que lo creó.
 
 Lo que le pasas a `spawn` **se mueve** a la tarea, igual que con `let b = a`
-(capítulo 8). Es la regla que impide que dos hilos toquen el mismo dato al
+(capítulo 8). Es la regla que impide que dos tareas toquen el mismo dato al
 mismo tiempo:
 
 ```scar-error
@@ -79,7 +84,7 @@ fn main() {
 ```
 
 Si `spawn` prestara `c` como una función normal, `main` y la tarea cambiarían
-el mismo contador a la vez desde dos hilos: una *condición de carrera*, el
+el mismo contador a la vez, cada una en su núcleo: una *condición de carrera*, el
 error más difícil de encontrar en programas concurrentes. En SCAR no compila.
 La forma correcta es que cada tarea tenga lo suyo y devuelva el resultado:
 
@@ -241,6 +246,9 @@ espero algo que nunca llega...
 
 Una tarea que duerme (`sleep`), lee de la red o hace cuentas no cuenta como
 esperando, así que esto no da falsas alarmas.
+
+En el binario el deadlock se nota en el acto. El intérprete espera unos
+segundos sin que nada avance antes de darlo.
 
 ## 9.7 Guardar un handle para después
 

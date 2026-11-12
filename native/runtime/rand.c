@@ -1,6 +1,5 @@
-static _Thread_local uint64_t __scar_rand_state = 0;
-static _Thread_local uint64_t __scar_rand_base = 0;
-static _Thread_local uint64_t __scar_rand_hijos = 0;
+#define SCAR_HAY_RAND 1
+// __scar_rand_state, __scar_rand_base y __scar_rand_hijos: en ScarHilo (tls.c)
 
 static inline uint64_t scar_splitmix64(uint64_t z) {
     z += 0x9E3779B97F4A7C15ULL;

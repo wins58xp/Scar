@@ -13,6 +13,14 @@ import re
 RAIZ = os.path.dirname(os.path.abspath(__file__))
 CARPETA = os.path.join(RAIZ, "native", "lib")
 
+ES_WINDOWS = os.name == "nt"
+
+
+def nombre_archivo_lib(lib):
+    """El archivo de la librería nativa en esta plataforma: scarsdl.dll en
+    Windows, libscarsdl.so en Linux/Unix."""
+    return f"{lib}.dll" if ES_WINDOWS else f"lib{lib}.so"
+
 # nombre en `from "..."` -> (fuente, para qué sirve, qué instalar antes)
 PROPIAS = {
     "scarsdl": ("native/scarsdl.c", "ventanas, dibujo y sonido",
@@ -30,16 +38,21 @@ INSTALAR_CC = "instala gcc (sudo apt install gcc) o clang"
 
 
 def ruta_local(lib):
-    """La .so de una librería de SCAR compilada por instalar.sh, o None."""
+    """La librería de SCAR compilada en native/lib/ (.so en Linux, .dll en
+    Windows), o None."""
     if lib not in PROPIAS:
         return None
-    ruta = os.path.join(CARPETA, f"lib{lib}.so")
+    ruta = os.path.join(CARPETA, nombre_archivo_lib(lib))
     return ruta if os.path.exists(ruta) else None
 
 
 def flags_de_enlace(libs):
-    """-L y -rpath a native/lib/ si alguna de `libs` está compilada ahí."""
+    """Flags para enlazar contra native/lib/ si alguna de `libs` está ahí.
+    En Linux agrega -rpath para que el binario encuentre la .so al correr; en
+    Windows no hay rpath: el .dll se copia junto al .exe (ver codegen)."""
     if any(ruta_local(lib) for lib in libs):
+        if ES_WINDOWS:
+            return ["-L" + CARPETA]
         return ["-L" + CARPETA, "-Wl,-rpath," + CARPETA]
     return []
 

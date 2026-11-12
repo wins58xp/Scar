@@ -13,9 +13,21 @@ from .comun import (
     panic_c,
     _abs_min_max_helpers_c, _C_RESERVADOS_EXPORT, _chr_ord_helpers_c, CodegenError,
     FN_MARK, _i64_helpers_c, MAP_MARK, _marcas_strc, _PANIC_MAIN_C, _rand_runtime_c,
-    _RE_USA_POOL, _shift_helpers_c, _STRC_C, _TEXTO_SIN_TOPE_C, _to_i32_helper_c,
+    _RE_USA_POOL, _shift_helpers_c, _STRC_C, _TEXTO_SIN_TOPE_C, _tls_runtime_c, _to_i32_helper_c,
     VEC_MARK, _vivos_runtime_c,
 )
+
+
+# La etiqueta de ensamblador del símbolo real de una extern fn. gcc y clang
+# definen __USER_LABEL_PREFIX__ ("" en Linux, "_" en macOS).
+_SIMBOLO_C = ("#define SCAR_SIMBOLO_TXT2(x) #x\n"
+              "#define SCAR_SIMBOLO_TXT(x) SCAR_SIMBOLO_TXT2(x)\n"
+              "#define SCAR_SIMBOLO(n) __asm__(SCAR_SIMBOLO_TXT(__USER_LABEL_PREFIX__) n)")
+
+
+def simbolo_c(nombre):
+    """El nombre de C con el que se declara y se llama una extern fn."""
+    return f"scar_ext_{nombre}"
 
 
 class Programa:
@@ -486,7 +498,15 @@ class Programa:
             # Una librería aislada vive solo en el binario worker: su símbolo no
             # existe en este y no se declara.
             if not isolated:
-                decls.append(f"extern {ret_c_type} {name}({param_list});")
+                # El símbolo se declara con un nombre de C propio y la etiqueta del
+                # real (SCAR_SIMBOLO, ver _SIMBOLO_C): una extern fn con el nombre
+                # de una función que el runtime ya declara por sus #include
+                # (`extern "C" fn strlen(s: str) -> i64` contra el `size_t
+                # strlen(const char*)` de string.h) chocaba con "conflicting
+                # types". Así cada extern tiene su propia firma en C.
+                if not decls or decls[0] != _SIMBOLO_C:
+                    decls.insert(0, _SIMBOLO_C)
+                decls.append(f"extern {ret_c_type} {simbolo_c(name)}({param_list}) SCAR_SIMBOLO(\"{name}\");")
 
             guard_param_list = ", ".join(
                 f"{self._ffi_c_type(t, param=True)} __scar_gp{i}" for i, t in enumerate(params)
@@ -504,16 +524,16 @@ class Programa:
                 continue
 
             if ret_c_type == "void":
-                call_line = f"    {name}({guard_args_fwd});\n"
+                call_line = f"    scar_bloqueo_entrar(); {simbolo_c(name)}({guard_args_fwd}); scar_bloqueo_salir();\n"
                 crash_ret = ""
                 normal_ret = ""
             else:
                 if ret_for_decl.name == "str":
                     # C sigue siendo dueño de lo que devolvió: el programa se queda con
                     # una copia (ver scar_ffi_str_propia)
-                    call_line = f"    {ret_c_type} __scar_gr = scar_ffi_str_propia({name}({guard_args_fwd}));\n"
+                    call_line = f"    {ret_c_type} __scar_gr = scar_ffi_str_propia(SCAR_BLOQUEANDO({simbolo_c(name)}({guard_args_fwd})));\n"
                 else:
-                    call_line = f"    {ret_c_type} __scar_gr = {name}({guard_args_fwd});\n"
+                    call_line = f"    {ret_c_type} __scar_gr = SCAR_BLOQUEANDO({simbolo_c(name)}({guard_args_fwd}));\n"
                 # Este return no se ejecuta (scar_extern_report_crash() termina o
                 # salta), pero sin él gcc avisa "control reaches end". `(Tipo){0}`
                 # sirve para escalares y para un struct por valor.
@@ -523,7 +543,7 @@ class Programa:
                 f"static {ret_c_type} scar_extern_guarded_{name}({guard_param_list}) {{\n"
                 f"    scar_extern_guard_fnname = \"{name}\";\n"
                 f"    scar_extern_guard_active = 1;\n"
-                f"    if (sigsetjmp(scar_extern_guard_env, 1) != 0) {{\n"
+                f"    if (SCAR_SIGSETJMP(scar_extern_guard_env) != 0) {{\n"
                 f"        scar_extern_report_crash(\"{name}\", scar_extern_guard_signum);\n"
                 f"{crash_ret}"
                 f"    }}\n"
@@ -611,9 +631,9 @@ class Programa:
             "fmt_f64",
             RYU_D2D=ryu_d2d,
         )
-        # scar_repr_str(): el str dentro de Ok(...)/Err(...) en print(), con
-        # repr() de Python: re-escapa \n, \t, \r, la comilla y '\' (el mismo
-        # conjunto que el lexer y los literales de gen_expr).
+        # scar_repr_str(): el str dentro de Ok(...)/Err(...) en print(), como
+        # un literal de SCAR: entre comillas dobles, re-escapa \n, \t, \r, la
+        # comilla y '\' (el mismo conjunto que el lexer y los literales de gen_expr).
         repr_str_helper = runtime_c.texto("repr_str")
 
         # scar_hash_{i32,f64,str,bool}, compartidas por todos los Map<K,V>.
@@ -780,7 +800,7 @@ class Programa:
             task_context_struct = runtime_c.texto("task_context_struct")
             task_context_helpers = runtime_c.texto(
                 "task_context",
-                VIVOS_RUNTIME_C=_vivos_runtime_c('__thread '),
+                VIVOS_RUNTIME_C=_vivos_runtime_c(),
             )
             idiv_helper = runtime_c.texto(
                 "idiv",
@@ -832,13 +852,12 @@ class Programa:
         # solo garantiza un final reconocible (exit(1) o la cascada de panic).
         # Para seguir corriendo después del crash está el worker aislado
         # (abajo).
-        guard_storage = "_Thread_local " if self.has_tasks else ""
+        # (las variables del guardián viven en ScarHilo, tls.c)
         # El str que devuelve una extern fn es siempre una copia propia, como
         # por el worker aislado (si no, se liberaba un buffer estático o el
         # entorno de getenv).
         extern_guard_helpers = runtime_c.texto(
             "extern_guard",
-            GUARD_STORAGE=str(guard_storage),
             FFI_STR_PROPIA=runtime_c.texto("ffi_str_propia") if self._extern_str_en_proceso() else '',
         )
         if self.has_tasks:
@@ -1008,7 +1027,7 @@ class Programa:
                        blk_runtime, preamble, needs_scar_malloc, scar_pool_allocator):
         """El comienzo del archivo: el preámbulo y el runtime que el programa
         usa, en orden."""
-        parts = [preamble]
+        parts = [preamble, _tls_runtime_c(self.has_tasks or self.uses_chan, self.libreria, bool(self.extern_sigs))]
         rand_rt = _rand_runtime_c(self.needs_rand, self.has_tasks)
         if rand_rt:
             parts.append(rand_rt)  # antes de scar_ctx_new, que lo usa
@@ -1020,13 +1039,20 @@ class Programa:
         parts.append(scar_pool_allocator if needs_scar_malloc else None)
         if self.has_tasks:
             parts.append(arena_support)
+            # el planificador de tareas livianas y la condvar que lo conoce
+            # (ScarCond), antes del contexto, que las usa
+            parts.append(runtime_c.texto("planificador"))
+            parts.append(runtime_c.texto("cond"))
             parts.append(task_context_struct)
             parts.append(task_context_helpers)
         else:
             # Sin tasks, el mismo registro de dueñas vivas (global: un solo hilo)
             # y un único punto de panic que lo suelta antes de exit(1), gemelo de
             # scar_panic().
-            parts.append(_vivos_runtime_c("") + _PANIC_MAIN_C)
+            parts.append(_vivos_runtime_c() + _PANIC_MAIN_C)
+            if self.uses_chan:
+                # un Chan sin tareas: ScarCond es la pthread_cond_t a secas
+                parts.append(runtime_c.texto("cond"))
         if self.needs_sleep:
             # sleep_helper ya está definido en la rama con o sin tasks: acá solo
             # se decide si el programa lo usa.
@@ -1266,12 +1292,15 @@ class Programa:
             parts.append("\n\n".join(task_thread_defs))
         if self._vivos_drop_defs:
             parts.append("\n\n".join(self._vivos_drop_defs))
+        if self.has_tasks:
+            # al final: lo por tarea que el planificador guarda y repone
+            parts.append(runtime_c.texto("planificador_tls"))
         if not needs_scar_malloc and _RE_USA_POOL.search("\n".join(p for p in parts if p is not None)):
             # Lo que decide si hace falta scar_malloc es lo que el C generado usa
             # (una lista de flags se quedaba corta).
             parts[lugar_pool] = scar_pool_allocator
         if self.needs_str_index or self.needs_utf8_len:
-            parts.insert(1, _STRC_C)
+            parts.insert(2, _STRC_C)
         if self.libreria:
             # el panic no escribe en stderr (lo da scar_error())
             parts.insert(1, "#define SCAR_LIBRERIA 1")

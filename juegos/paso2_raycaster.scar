@@ -1,0 +1,200 @@
+# Paso 2 (v2): raycaster a lo DOOM, dibujando DIRECTO al renderer.
+#
+#   python3 main.py juegos/paso2_raycaster.scar
+#   scar build juegos/paso2_raycaster.scar -o paso2 && ./paso2
+#
+# A diferencia de la v1, no usa lib/gui ni lib/lienzo: corre su propio bucle y
+# pinta cada rebanada de pared con scar_sdl_draw_rect_color, con su clear() al
+# empezar y present() al terminar. Es el patrón de examples/doom_scar.scar: sin
+# arrastre y más rápido (no sube una textura por cuadro).
+#
+# Mover: flechas arriba/abajo = adelante/atrás, izquierda/derecha = girar,
+#        A / D = ir de lado (strafe).
+
+extern "C" fn scar_sdl_abrir(ancho: i32, alto: i32, titulo: str) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_cerrar() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_eventos() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_key_down(scancode: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_clear() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_draw_rect_color(x: i32, y: i32, w: i32, h: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_present() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_delay(ms: i32) -> i32 from "scarsdl"
+
+# El mapa: '#' pared, '.' piso. Cerrado por los bordes.
+fn texto_mapa() -> str {
+    return "################\n" +
+           "#..............#\n" +
+           "#..............#\n" +
+           "#......##......#\n" +
+           "#......##......#\n" +
+           "#..............#\n" +
+           "#..###....###..#\n" +
+           "#..............#\n" +
+           "#..............#\n" +
+           "#..............#\n" +
+           "################"
+}
+
+struct Mundo {
+    ancho: i32
+    alto: i32
+    celdas: Vec<i32>
+}
+
+fn cargar_mundo(s: str) -> Mundo {
+    let n = len(s)
+    let mut ancho = 0
+    let mut actual = 0
+    let mut alto = 0
+    for i in 0..n {
+        if s[i] == "\n" {
+            if actual > ancho { ancho = actual }
+            actual = 0
+            alto = alto + 1
+        } else {
+            actual = actual + 1
+        }
+    }
+    if actual > 0 {
+        if actual > ancho { ancho = actual }
+        alto = alto + 1
+    }
+    let celdas: Vec<i32> = vec_new()
+    for i in 0..(ancho * alto) { celdas.push(0) }
+    let mut f = 0
+    let mut c = 0
+    for i in 0..n {
+        if s[i] == "\n" {
+            f = f + 1
+            c = 0
+        } else {
+            if s[i] == "#" { celdas.set(f * ancho + c, 1) }
+            c = c + 1
+        }
+    }
+    return Mundo { ancho: ancho, alto: alto, celdas: celdas }
+}
+
+fn pared(m: Mundo, mx: i32, my: i32) -> bool {
+    if mx < 0 or my < 0 or mx >= m.ancho or my >= m.alto { return true }
+    return m.celdas.get(my * m.ancho + mx).unwrap_or(1) > 0
+}
+
+fn absf(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn main() {
+    let ANCHO = 960
+    let ALTO = 600
+    let NCOL = 240                    # cuántos rayos; cada columna mide ANCHO/NCOL
+    let COLW = ANCHO / NCOL
+
+    if scar_sdl_abrir(ANCHO, ALTO, "SCAR motor — paso 2 (raycaster)") != 0 {
+        print("no se pudo abrir la ventana")
+        return
+    }
+
+    let mundo = cargar_mundo(texto_mapa())
+    let mut px = 2.5
+    let mut py = 2.5
+    let mut ang = 0.35
+    let plano = 0.66
+    let vel = 0.06
+    let giro = 0.045
+
+    let mut cerrar = false
+    while cerrar == false {
+        if scar_sdl_eventos() == 1 { cerrar = true }
+
+        let dirx = cos(ang)
+        let diry = sin(ang)
+
+        if scar_sdl_key_down(80) == 1 { ang = ang - giro }   # izquierda
+        if scar_sdl_key_down(79) == 1 { ang = ang + giro }   # derecha
+
+        let mut mx = 0.0
+        let mut my = 0.0
+        if scar_sdl_key_down(82) == 1 { mx = mx + dirx * vel  my = my + diry * vel }   # arriba
+        if scar_sdl_key_down(81) == 1 { mx = mx - dirx * vel  my = my - diry * vel }   # abajo
+        if scar_sdl_key_down(4) == 1 { mx = mx + diry * vel  my = my - dirx * vel }    # A
+        if scar_sdl_key_down(7) == 1 { mx = mx - diry * vel  my = my + dirx * vel }    # D
+
+        if not pared(mundo, to_i32(px + mx), to_i32(py)) { px = px + mx }
+        if not pared(mundo, to_i32(px), to_i32(py + my)) { py = py + my }
+
+        # --- cuadro nuevo ---
+        scar_sdl_clear()
+        scar_sdl_draw_rect_color(0, 0, ANCHO, ALTO / 2, 30, 30, 48, 255)           # cielo
+        scar_sdl_draw_rect_color(0, ALTO / 2, ANCHO, ALTO - ALTO / 2, 24, 26, 24, 255)  # piso
+
+        let plano_x = 0.0 - diry * plano
+        let plano_y = dirx * plano
+
+        for i in 0..NCOL {
+            let camx = 2.0 * to_f64(i) / to_f64(NCOL) - 1.0
+            let mut rx = dirx + plano_x * camx
+            let mut ry = diry + plano_y * camx
+            if rx == 0.0 { rx = 0.000001 }
+            if ry == 0.0 { ry = 0.000001 }
+
+            let mut celx = to_i32(px)
+            let mut cely = to_i32(py)
+            let ddx = absf(1.0 / rx)
+            let ddy = absf(1.0 / ry)
+
+            let mut pasox = 1
+            let mut pasoy = 1
+            let mut sdx = (to_f64(celx) + 1.0 - px) * ddx
+            let mut sdy = (to_f64(cely) + 1.0 - py) * ddy
+            if rx < 0.0 { pasox = 0 - 1  sdx = (px - to_f64(celx)) * ddx }
+            if ry < 0.0 { pasoy = 0 - 1  sdy = (py - to_f64(cely)) * ddy }
+
+            let mut lado = 0
+            let mut pasos = 0
+            while pasos < 64 {
+                if sdx < sdy {
+                    sdx = sdx + ddx
+                    celx = celx + pasox
+                    lado = 0
+                } else {
+                    sdy = sdy + ddy
+                    cely = cely + pasoy
+                    lado = 1
+                }
+                if pared(mundo, celx, cely) { pasos = 999 }
+                pasos = pasos + 1
+            }
+
+            let mut dist = 0.0
+            if lado == 0 {
+                dist = (to_f64(celx) - px + to_f64(1 - pasox) / 2.0) / rx
+            } else {
+                dist = (to_f64(cely) - py + to_f64(1 - pasoy) / 2.0) / ry
+            }
+            dist = absf(dist)
+            if dist < 0.0001 { dist = 0.0001 }
+
+            let h = to_i32(to_f64(ALTO) / dist)
+            let mut y0 = ALTO / 2 - h / 2
+            if y0 < 0 { y0 = 0 }
+            let mut altura = h
+            if y0 + altura > ALTO { altura = ALTO - y0 }
+
+            let mut f = 1.0 - dist * 0.09
+            if f < 0.15 { f = 0.15 }
+            if lado == 1 { f = f * 0.65 }
+
+            let r = to_i32(200.0 * f)
+            let g = to_i32(90.0 * f)
+            let b = to_i32(70.0 * f)
+            scar_sdl_draw_rect_color(i * COLW, y0, COLW, altura, r, g, b, 255)
+        }
+
+        scar_sdl_present()
+        scar_sdl_delay(10)
+    }
+
+    scar_sdl_cerrar()
+}

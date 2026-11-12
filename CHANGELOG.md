@@ -1,8 +1,45 @@
 # Cambios
 
-## Sin publicar
+## 0.2.0
 
-Nada todavía.
+Tareas livianas. El lenguaje no cambia: los programas se escriben igual. Lo
+único que puede notarse es el formato de `print` (ver el último punto).
+
+- **Tareas livianas:** muchas tareas en pocos hilos, uno por núcleo, como en
+  Go o Erlang. Cada `spawn` deja de ser un hilo del sistema. Los programas se
+  escriben igual, y cancelación, panics, deadlocks, `sleep`, archivos, red y
+  las `extern fn` se comportan igual; una tarea pegada en C no frena a las
+  demás, y un deadlock se detecta al instante. Medido en un Ryzen de 12
+  hilos contra un hilo por tarea: pasar un mensaje por una cadena de tareas
+  30 a 37 veces más rápido, crear tareas 20 veces, 8 veces menos memoria
+  por tarea viva (9,8 kB contra 78,9), 100.000 tareas a la vez con 86 MB en
+  vez de 7,3 GB, y los canales con buffer 3 a 4 veces más rápidos; una ida
+  y vuelta entre dos tareas queda igual.
+  `SCAR_TAREAS=hilos` vuelve a un hilo por tarea.
+- **Arreglo:** cuando el sistema no da más hilos (o, con tareas livianas, no
+  hay memoria para la pila), `spawn` es un panic con la causa en vez de un
+  falso "probable deadlock" a los 8 s.
+- **Nuevo:** `scar build` en Windows con MinGW-w64 (sale un `.exe`, con los
+  `.dll` de las librerías de SCAR al lado). `python construir_nativas.py`
+  compila las librerías nativas en Windows y en Linux. En Linux nada cambia.
+  En Windows cada tarea sigue siendo un hilo. Aporte de Enrique Palacios.
+- **Nuevo:** un motor raycaster estilo DOOM escrito en SCAR, en `juegos/`
+  (`paso1` a `paso5_mundo.scar`, explicado en `juegos/ENGINE.md`): paredes con
+  textura, antorchas, cielo con ciclo de día y noche, WASD y ratón. Aporte de
+  Enrique Palacios.
+
+- **Arreglo:** una fn que devuelve el dato de un `match` sobre un `Result`
+  (`Ok(r) => { return r }`) perdía memoria en el binario cuando se la llamaba con
+  valores recién armados (`hmac_sha256(t("k"), t("m"))` en `lib/codigos`).
+- **Arreglo:** `print(Ok(q)?)` perdía `q` en el binario, y `let r = Ok(q)?` daba
+  un error de "se movió" que no correspondía.
+- **Arreglo:** una `extern fn` con el nombre de una función de la libc y otra
+  firma (`extern "C" fn strlen(s: str) -> i64`) no compilaba a binario.
+- **Cambio de salida:** `print` muestra lo que va dentro de una lista, un mapa,
+  un `Some`/`Ok`/`Err` o un struct tal como se escribe en SCAR: `[true, false]` en
+  vez de `[True, False]`, y los textos siempre entre comillas dobles
+  (`Some("hola")`, `{"a": 1}`, `P(nombre="Ana")`) en vez de las simples de Python.
+  Un programa que compara su salida con texto guardado puede necesitar ajustarse.
 
 ## 0.1.1
 

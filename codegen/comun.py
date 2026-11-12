@@ -76,8 +76,10 @@ C_TYPE = {
 # y con varias tareas liberando Vec grandes a la vez ese lock se llevaba la
 # mayor parte del tiempo (medido con push/pop de Vec entre varias tareas).
 SCAR_MALLOPT_PROLOGUE = (
+    "#ifdef __GLIBC__\n"   # mallopt/M_MMAP_* son de glibc; MinGW/otros no los tienen
     "    mallopt(M_MMAP_THRESHOLD, 64 * 1024 * 1024);\n"
     "    mallopt(M_MMAP_MAX, 0);\n"
+    "#endif\n"
 )
 
 # Prólogo de main() cuando el programa usa rand(): siembra el hilo de main
@@ -280,14 +282,78 @@ class _ShadowSubBlock:
         self.stmts = stmts
 
 
-def _vivos_runtime_c(tls):
+def _vivos_runtime_c():
     """El registro de dueñas vivas, que un panic recorre para soltar lo que
-    estaba vivo. Con tasks es por hilo (tls="__thread "); sin
-    tasks hay un solo hilo y basta un global (tls="")."""
-    return runtime_c.texto(
-        "vivos",
-        TLS=tls,
-    )
+    estaba vivo. Vive en ScarHilo (tls.c): por hilo con tasks, y con el
+    planificador el de cada tarea."""
+    return runtime_c.texto("vivos")
+
+
+# scar_hilo no es static: el asm la nombra, y con -flto una variable static que
+# solo se usa desde un asm se cae (undefined reference); 'used' la sostiene
+_TLS_X86 = (
+    "__thread ScarHilo scar_hilo __attribute__((used, visibility(\"hidden\")));\n"
+    "static inline ScarHilo *scar_tls(void) {\n"
+    "    ScarHilo *p;\n"
+    "    __asm__ volatile(\"movq %%fs:0, %0\\n\\tleaq scar_hilo@tpoff(%0), %0\" : \"=r\"(p));\n"
+    "    return p;\n"
+    "}"
+)
+_TLS_ARM64 = (
+    "__thread ScarHilo scar_hilo __attribute__((used, visibility(\"hidden\")));\n"
+    "static inline ScarHilo *scar_tls(void) {\n"
+    "    ScarHilo *p;\n"
+    "    __asm__ volatile(\"mrs %0, tpidr_el0\\n\\tadd %0, %0, #:tprel_hi12:scar_hilo, lsl #12\\n\\t\"\n"
+    "                     \"add %0, %0, #:tprel_lo12_nc:scar_hilo\" : \"=r\"(p));\n"
+    "    return p;\n"
+    "}"
+)
+# en una librería (.so) no hay modelo local-exec, y en otras arquitecturas no
+# hay asm: una función que no se inlinea, con una barrera para que el
+# compilador no la tome por pura y junte dos llamadas
+_TLS_LENTO = (
+    "static __thread ScarHilo scar_hilo;\n"
+    "__attribute__((noinline)) static ScarHilo *scar_tls(void) {\n"
+    "    ScarHilo *p = &scar_hilo;\n"
+    "    __asm__ volatile(\"\" : \"+r\"(p));\n"
+    "    return p;\n"
+    "}"
+)
+
+
+# Capa portable de salto no-local del guardián de las extern fn: en POSIX
+# sigsetjmp/siglongjmp (preservan la máscara de señales); en Windows (MinGW) no
+# existen, se cae a setjmp/longjmp.
+_GUARD_TIPOS_C = (
+    "#include <setjmp.h>\n"
+    "#ifdef _WIN32\n"
+    "typedef jmp_buf scar_sig_jmp_buf;\n"
+    "#define SCAR_SIGSETJMP(env) setjmp(env)\n"
+    "#define SCAR_SIGLONGJMP(env, v) longjmp((env), (v))\n"
+    "#else\n"
+    "typedef sigjmp_buf scar_sig_jmp_buf;\n"
+    "#define SCAR_SIGSETJMP(env) sigsetjmp((env), 1)\n"
+    "#define SCAR_SIGLONGJMP(env, v) siglongjmp((env), (v))\n"
+    "#endif"
+)
+
+
+def _tls_runtime_c(por_hilo, libreria, con_guard):
+    """ScarHilo (tls.c) y scar_tls(): sin hilos, una variable común. El
+    sigjmp_buf del guardián de las extern fn solo cuando hay extern fn
+    (sigjmp_buf pide _GNU_SOURCE, que sin tareas ni extern no se define)."""
+    if not por_hilo:
+        tls = "static ScarHilo scar_hilo;\n#define scar_tls() (&scar_hilo)"
+    elif libreria:
+        tls = _TLS_LENTO
+    else:
+        # (en Windows no hay planificador ni TLS por %fs: la variante común)
+        tls = ("#if defined(__x86_64__) && !defined(_WIN32)\n" + _TLS_X86
+               + "\n#elif defined(__aarch64__) && !defined(_WIN32) && !defined(__APPLE__)\n"
+               + _TLS_ARM64 + "\n#else\n" + _TLS_LENTO + "\n#endif")
+    return runtime_c.texto("tls", TLS=tls,
+                           GUARD_TIPOS=_GUARD_TIPOS_C if con_guard else "",
+                           GUARD_ENV="    scar_sig_jmp_buf guard_env;" if con_guard else "")
 
 
 _PANIC_MAIN_C = runtime_c.texto("panic_main")
@@ -414,10 +480,9 @@ def _raiz_fin_c(pad="    "):
 
 
 _STRC_C = (
-    "// Los dos últimos str medidos en este hilo (ver scar_strc_medir)\n"
-    "typedef struct { const char* p; size_t b0, bi; int32_t len, ci; int ascii; } ScarStrc;\n"
-    "static _Thread_local ScarStrc scar_strc[2];\n"
-    "static _Thread_local int scar_strc_ult;"
+    "// Los dos últimos str medidos en este hilo: scar_strc y scar_strc_ult, en\n"
+    "// ScarHilo (tls.c); ver scar_strc_medir\n"
+    "#define SCAR_HAY_STRC 1"
 )
 
 _RE_MARCA_STRC = re.compile(r"^([ \t]*)/\*SCAR_STRC(_FREE)?\*/\n", re.M)

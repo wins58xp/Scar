@@ -64,17 +64,37 @@ from parser import (
 
 # ---------------- Valores del runtime ----------------
 
+def scar_repr_str(s):
+    r"""Un str adentro de otro valor (Vec, Map, Some/Ok/Err, struct), como se
+    escribe en SCAR: siempre entre comillas dobles, con las mismas cinco
+    secuencias de escape que acepta el lexer (\\, \", \n, \t, \r). Igual
+    que scar_repr_str del nativo (native/runtime/repr_str.c)."""
+    return '"' + (s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                  .replace("\t", "\\t").replace("\r", "\\r")) + '"'
+
+
+def scar_repr(v):
+    """Un valor adentro de otro, en la forma de SCAR (no el repr() de Python):
+    true/false, textos con comillas dobles. Lo demás (números, Vec, Map,
+    structs...) con su propio __repr__, que a su vez usa esta función."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        return scar_repr_str(v)
+    return repr(v)
+
+
 class Ok:
     def __init__(self, value): self.value = value
-    def __repr__(self): return f"Ok({self.value!r})"
+    def __repr__(self): return f"Ok({scar_repr(self.value)})"
 
 class Err:
     def __init__(self, value): self.value = value
-    def __repr__(self): return f"Err({self.value!r})"
+    def __repr__(self): return f"Err({scar_repr(self.value)})"
 
 class SomeVal:
     def __init__(self, value): self.value = value
-    def __repr__(self): return f"Some({self.value!r})"
+    def __repr__(self): return f"Some({scar_repr(self.value)})"
 
 class NoneVal:
     def __repr__(self): return "None"
@@ -91,9 +111,9 @@ class StructInstance:
             v, n = self.variantes[self.fields["tag"]]
             if n == 0:
                 return v
-            datos = ", ".join(repr(self.fields[f"{v}_{j}"]) for j in range(n))
+            datos = ", ".join(scar_repr(self.fields[f"{v}_{j}"]) for j in range(n))
             return f"{v}({datos})"
-        inner = ", ".join(f"{k}={v!r}" for k, v in self.fields.items())
+        inner = ", ".join(f"{k}={scar_repr(v)}" for k, v in self.fields.items())
         return f"{self.name}({inner})"
 
 
@@ -351,7 +371,7 @@ class ScarVec:
         # <interpreter.ScarVec object at 0x...>, y suelto como [a, b], que no
         # distingue ["a, b"] de ["a", "b"]. Mismo texto que scar_fmt_Vec_* del
         # nativo.
-        return "[" + ", ".join(repr(x) for x in self.items) + "]"
+        return "[" + ", ".join(scar_repr(x) for x in self.items) + "]"
 
 
 class ScarMap:
@@ -386,7 +406,7 @@ class ScarMap:
     def __repr__(self):
         # Mismo criterio que ScarVec.__repr__. El nativo todavía no
         # imprime un Map (su tabla no guarda el orden de inserción).
-        return "{" + ", ".join(f"{k!r}: {v!r}" for k, v in self.items.items()) + "}"
+        return "{" + ", ".join(f"{scar_repr(k)}: {scar_repr(v)}" for k, v in self.items.items()) + "}"
 
 
 class ScarPipe:

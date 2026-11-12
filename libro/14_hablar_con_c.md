@@ -189,7 +189,7 @@ Las reglas:
   devuelve 0 (o `NULL`) y `scar_error()` da el mensaje.
 - Cada llamada es como un `main` chico: puede lanzar tareas y usar canales, y
   antes de volver espera o cancela las que lanzó. Se puede llamar desde varios
-  hilos a la vez.
+  hilos a la vez. En una librería cada tarea es un hilo del sistema.
 
 ## 14.6 Ejercicios
 

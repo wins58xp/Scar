@@ -155,7 +155,7 @@ fn main() {
 ```
 
 ```
-['martillo', 'llave']
+["martillo", "llave"]
 ```
 
 ## 8.4 Devolver entrega

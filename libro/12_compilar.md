@@ -47,8 +47,10 @@ Con `scar run`, este programa tarda unos segundos; compilado, menos de un
 milisegundo. En cálculos numéricos el binario anda a la par de un programa
 escrito en C a mano.
 
-Cada `task` del binario es un hilo de verdad del sistema, con la misma
-cancelación y los mismos límites de tiempo que en el intérprete.
+Las tareas del binario son livianas: hay un hilo del sistema por núcleo y
+todas las tareas se reparten entre ellos, con la misma cancelación y los
+mismos límites de tiempo que en el intérprete. Crear una tarea cuesta menos
+de un microsegundo y unos 10 kB de memoria.
 
 ## 12.3 Cómo se sabe que los dos dan lo mismo
 
@@ -77,6 +79,14 @@ Con variables de entorno se puede cambiar:
 | `SCAR_CC_NATIVE=0`   | sin `-march=native`: el binario corre en otras máquinas con el mismo sistema |
 | `SCAR_CC_HARDEN=0`   | sin las defensas (un poco más rápido; `max` las sube) |
 | `SCAR_JOIN_TIMEOUT=n`| cuántos segundos espera un `join` antes de dar un panic (8 por omisión) |
+
+Y estas se le dan al binario, al correrlo:
+
+| Variable               | Qué hace |
+|------------------------|----------|
+| `SCAR_TAREAS=hilos`    | cada tarea en su propio hilo del sistema, como antes de 0.2.0 |
+| `SCAR_TAREAS_HILOS=n`  | cuántos hilos se reparten las tareas (por omisión, uno por núcleo) |
+| `SCAR_PILA_TAREA_KB=n` | el tamaño de la pila de cada tarea, en kB |
 
 ```
 SCAR_CC_NATIVE=0 scar build primos.scar -o primos

@@ -211,7 +211,11 @@ def _emit_call(idx, decl, extern_types, lines):
     ret_c_type = None if ret_kind == "void" else _c_type_name(ret_name, extern_types)
 
     raw_param_list = ", ".join(param_c_types) or "void"
-    lines.append(f"extern {ret_c_type or 'void'} {decl.name}({raw_param_list});\n")
+    # nombre de C propio con la etiqueta del símbolo real (ver
+    # codegen/programa.py, _SIMBOLO_C): una extern fn que se llama como una
+    # función de la libc ya declarada por los #include (strlen) no choca
+    lines.append(f"extern {ret_c_type or 'void'} scar_ext_{decl.name}({raw_param_list}) "
+                 f"SCAR_SIMBOLO(\"{decl.name}\");\n")
     lines.append(f"static void call_{idx}(void) {{\n")
 
     reader_for_kind = {
@@ -238,9 +242,9 @@ def _emit_call(idx, decl, extern_types, lines):
     args_fwd = ", ".join(arg_names)
 
     if ret_kind == "void":
-        lines.append(f"    {decl.name}({args_fwd});\n")
+        lines.append(f"    scar_ext_{decl.name}({args_fwd});\n")
     else:
-        lines.append(f"    {ret_c_type} r = {decl.name}({args_fwd});\n")
+        lines.append(f"    {ret_c_type} r = scar_ext_{decl.name}({args_fwd});\n")
         writer = {
             "i32": "write_i32(r);",
             "i64": "write_i64(r);",
@@ -262,7 +266,10 @@ def _emit_call(idx, decl, extern_types, lines):
 
 def _build_worker_source(library, decls, extern_types):
     validar_nombre_lib(library)
-    lines = [_HARNESS_PRELUDE, "#include <stdint.h>\n\n"]
+    lines = [_HARNESS_PRELUDE, "#include <stdint.h>\n\n",
+             "#define SCAR_SIMBOLO_TXT2(x) #x\n"
+             "#define SCAR_SIMBOLO_TXT(x) SCAR_SIMBOLO_TXT2(x)\n"
+             "#define SCAR_SIMBOLO(n) __asm__(SCAR_SIMBOLO_TXT(__USER_LABEL_PREFIX__) n)\n\n"]
     for idx, decl in enumerate(decls):
         _emit_call(idx, decl, extern_types, lines)
 

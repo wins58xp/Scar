@@ -130,7 +130,7 @@ Ana 31
 Luis 25
 Eva 28
 [1, 3, 5, 9]
-['ajo', 'manzana', 'pera']
+["ajo", "manzana", "pera"]
 ```
 
 ## 10.4 Probar tu código: `prueba`

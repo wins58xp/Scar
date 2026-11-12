@@ -1,10 +1,6 @@
-#define SCAR_POOL_MIN_SHIFT 4
-#define SCAR_POOL_MAX_SHIFT 11
-#define SCAR_POOL_NUM_CLASSES (SCAR_POOL_MAX_SHIFT - SCAR_POOL_MIN_SHIFT + 1)
-
+// SCAR_POOL_MIN_SHIFT/MAX_SHIFT/NUM_CLASSES y scar_pool_freelist: en ScarHilo (tls.c)
 typedef struct ScarPoolNode { struct ScarPoolNode *next; } ScarPoolNode;
 
-static _Thread_local ScarPoolNode *scar_pool_freelist[SCAR_POOL_NUM_CLASSES];
 @@SCAR_POOL_CLEANUP@@
 // Pool allocator para objetos chicos de vida corta: strings devueltas
 // por scar_str_concat/scar_str_index, buffers de scar_fmt_*/

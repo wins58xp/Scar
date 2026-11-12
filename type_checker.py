@@ -38,7 +38,7 @@ from types_ import (TypeAnn, T_I32, T_I64, T_F64, T_STR, T_BOOL, T_VOID,
                     int_literal_type, numeric_result, numeric_mix_ok,
                     RESULT, OPTION_MARK, TASK_MARK, CHAN_MARK, VEC_MARK, MAP_MARK, PIPE_MARK,
                     FILE_MARK, SOCKET_MARK, FN_MARK, LISTENER_MARK, FFI_SUPPORTED_TYPES)
-from fresh_owned import resolve_consumed_option_params, resolve_consumed_params, resolve_returned_params
+from fresh_owned import es_compuesto_de_struct, resolve_consumed_option_params, resolve_consumed_params, resolve_returned_params
 from enum_match import bajar_enums, bajar_main_result
 from if_expr import bajar as bajar_if_expr, hay_if_expr
 from continuar import bajar as bajar_continue
@@ -470,7 +470,7 @@ class Checker:
         # Lo mismo para un parámetro Option<Struct> cuyo CONTENIDO
         # la fn puede quedarse (la misma tabla que usa codegen/).
         self.consumed_option_params = resolve_consumed_option_params(
-            fns, lambda t: t.name == "Option" and bool(t.args) and t.args[0].name in self.structs)
+            fns, lambda t: es_compuesto_de_struct(t, self.structs))
         # qué parámetros struct puede devolver cada fn como el mismo
         # objeto (ver fresh_owned.resolve_returned_params y _move_if_needed).
         self.returned_params = resolve_returned_params(fns, lambda t: t.name in self.structs)
@@ -2058,6 +2058,12 @@ class Checker:
             return False
         inner = expr.expr
         if isinstance(inner, OkExpr):
+            if isinstance(inner.expr, (Ident, FieldAccess)):
+                # una variable (o su campo) nunca es un str recién armado; y
+                # volver a inferirla daba "uso de 'q' después de movida" en
+                # `let r = Ok(q)?`, porque el Ok(q) de la misma sentencia ya
+                # la había movido
+                return False
             inner_ty = self._infer(inner.expr, env, fn, ret_ty)
             return self._is_fresh_str_concat(inner.expr, inner_ty) or self._is_fresh_try_str(
                 inner.expr, env, fn, ret_ty, resolve

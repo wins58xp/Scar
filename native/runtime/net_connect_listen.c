@@ -16,7 +16,7 @@ static Result_Socket scar_tcp_connect(const char* host, int32_t port) {
         char* buf = scar_aprintf("no se pudo conectar a %s:%d: %s", host, port, strerror(errno));
         return Result_Socket_Err(buf);
     }
-    int __scar_conn_rc = connect(fd, __scar_res->ai_addr, __scar_res->ai_addrlen);
+    int __scar_conn_rc = SCAR_BLOQUEANDO(connect(fd, __scar_res->ai_addr, __scar_res->ai_addrlen));
     freeaddrinfo(__scar_res);
     if (__scar_conn_rc != 0) {
         close(fd);
@@ -56,7 +56,7 @@ static Result_i32 scar_socket_write(ScarSocket __scar_h, const char* s) {
     while (__scar_sent < __scar_len) {
         // MSG_NOSIGNAL: si la otra punta cerró, Err como en el intérprete
         // (sin él, SIGPIPE terminaba el proceso)
-        ssize_t __scar_n = send(sock, s + __scar_sent, __scar_len - __scar_sent, MSG_NOSIGNAL);
+        ssize_t __scar_n = SCAR_BLOQUEANDO(send(sock, s + __scar_sent, __scar_len - __scar_sent, MSG_NOSIGNAL));
         if (__scar_n < 0) {
             char* err = scar_aprintf("error de escritura: %s", strerror(errno));
             return Result_i32_Err(err);

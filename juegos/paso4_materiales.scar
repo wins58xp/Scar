@@ -1,0 +1,341 @@
+# Paso 4: varios materiales (ladrillo y piedra con musgo) + más rápido.
+#
+#   scar build juegos/paso4_materiales.scar -o paso4 && ./paso4
+#
+# Dos mejoras sobre el paso 3:
+# 1) Varios materiales: en el mapa, '#' (o '1') es ladrillo y '2' es piedra con
+#    musgo. Cada pared se dibuja con su textura.
+# 2) Velocidad: en vez de re-escanear la textura 64 veces por columna cada
+#    cuadro, se PRECALCULA una tabla de tramos (runs) de color por columna de
+#    textura. En el cuadro solo se recorren ~8 tramos por columna.
+#
+# Mover: flechas = adelante/atrás y girar, A/D = de lado, ESC o X = salir.
+
+extern "C" fn scar_sdl_abrir(ancho: i32, alto: i32, titulo: str) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_cerrar() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_eventos() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_key_down(scancode: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_clear() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_draw_rect_color(x: i32, y: i32, w: i32, h: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_present() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_delay(ms: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_texto(x: i32, y: i32, s: str, tam: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_ticks() -> i32 from "scarsdl"
+
+fn texto_mapa() -> str {
+    return "################\n" +
+           "#..............#\n" +
+           "#......22......#\n" +
+           "#......22......#\n" +
+           "#..............#\n" +
+           "#..2........2..#\n" +
+           "#..............#\n" +
+           "#..###....###..#\n" +
+           "#..............#\n" +
+           "#..............#\n" +
+           "################"
+}
+
+struct Mundo {
+    ancho: i32
+    alto: i32
+    celdas: Vec<i32>          # 0 vacío, 1 ladrillo, 2 piedra
+}
+
+fn cargar_mundo(s: str) -> Mundo {
+    let n = len(s)
+    let mut ancho = 0
+    let mut actual = 0
+    let mut alto = 0
+    for i in 0..n {
+        if s[i] == "\n" {
+            if actual > ancho { ancho = actual }
+            actual = 0
+            alto = alto + 1
+        } else {
+            actual = actual + 1
+        }
+    }
+    if actual > 0 {
+        if actual > ancho { ancho = actual }
+        alto = alto + 1
+    }
+    let celdas: Vec<i32> = vec_new()
+    for i in 0..(ancho * alto) { celdas.push(0) }
+    let mut f = 0
+    let mut c = 0
+    for i in 0..n {
+        if s[i] == "\n" {
+            f = f + 1
+            c = 0
+        } else {
+            if s[i] == "2" {
+                celdas.set(f * ancho + c, 2)
+            } else {
+                if s[i] == "#" or s[i] == "1" { celdas.set(f * ancho + c, 1) }
+            }
+            c = c + 1
+        }
+    }
+    return Mundo { ancho: ancho, alto: alto, celdas: celdas }
+}
+
+# Material de la celda: 0 vacío, 1 ladrillo, 2 piedra.
+fn celda(m: Mundo, mx: i32, my: i32) -> i32 {
+    if mx < 0 or my < 0 or mx >= m.ancho or my >= m.alto { return 1 }
+    return m.celdas.get(my * m.ancho + mx).unwrap_or(1)
+}
+
+fn absf(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn rgb(r: i32, g: i32, b: i32) -> i32 {
+    return ((r & 255) << 16) | ((g & 255) << 8) | (b & 255)
+}
+
+# ---- texturas (64x64, tonos planos para que los tramos verticales se agrupen) ----
+
+fn textura_ladrillo() -> Vec<i32> {
+    let t: Vec<i32> = vec_new()
+    for y in 0..64 {
+        let fila = y / 16
+        let desf = (fila % 2) * 16
+        for x in 0..64 {
+            let xx = (x + desf) % 64
+            let junta = (y % 16 < 3) or (xx % 32 < 3)
+            if junta {
+                t.push(rgb(48, 44, 42))
+            } else {
+                let pieza = (fila + xx / 32) % 2
+                if pieza == 0 { t.push(rgb(176, 72, 52)) } else { t.push(rgb(150, 58, 44)) }
+            }
+        }
+    }
+    return t
+}
+
+fn textura_piedra() -> Vec<i32> {
+    let t: Vec<i32> = vec_new()
+    for y in 0..64 {
+        let fila = y / 21                       # bloques altos irregulares
+        let desf = (fila % 2) * 12
+        for x in 0..64 {
+            let xx = (x + desf) % 64
+            let junta = (y % 21 < 3) or (xx % 24 < 3)
+            let mut c = 0
+            if junta {
+                c = rgb(58, 60, 56)              # juntas oscuras
+            } else {
+                let bloque = (fila + xx / 24) % 2
+                if bloque == 0 { c = rgb(116, 120, 112) } else { c = rgb(100, 104, 98) }
+            }
+            # Musgo: vetas verticales en ciertas columnas, de la mitad hacia abajo.
+            if (x * 13) % 9 < 3 and y > 30 and junta == false {
+                c = rgb(58, 104, 52)
+            }
+            if (x * 7) % 11 < 2 and y > 44 and junta == false {
+                c = rgb(74, 120, 58)
+            }
+            t.push(c)
+        }
+    }
+    return t
+}
+
+# ---- tabla de tramos (runs) por columna de textura, precalculada una vez ----
+
+struct Mat {
+    rc: Vec<i32>          # color de cada tramo
+    re: Vec<i32>          # fila de textura donde termina el tramo (exclusiva)
+    cs: Vec<i32>          # índice del primer tramo de cada columna (65 entradas)
+}
+
+fn construir_mat(tex: Vec<i32>) -> Mat {
+    let rc: Vec<i32> = vec_new()
+    let re: Vec<i32> = vec_new()
+    let cs: Vec<i32> = vec_new()
+    let mut total = 0
+    for x in 0..64 {
+        cs.push(total)
+        let mut y = 0
+        while y < 64 {
+            let c = tex.get(y * 64 + x).unwrap_or(0)
+            let mut j = y + 1
+            while j < 64 and tex.get(j * 64 + x).unwrap_or(0) == c { j = j + 1 }
+            rc.push(c)
+            re.push(j)
+            total = total + 1
+            y = j
+        }
+    }
+    cs.push(total)
+    return Mat { rc: rc, re: re, cs: cs }
+}
+
+# Dibuja una columna de pared con la tabla de tramos del material.
+fn dibujar_columna(mat: Mat, x: i32, colw: i32, texx: i32, y0: i32, h: i32, alto: i32, f: f64) {
+    let ini = mat.cs.get(texx).unwrap_or(0)
+    let fin = mat.cs.get(texx + 1).unwrap_or(0)
+    let mut tstart = 0
+    let mut ri = ini
+    while ri < fin {
+        let c = mat.rc.get(ri).unwrap_or(0)
+        let tend = mat.re.get(ri).unwrap_or(64)
+        let mut sy0 = y0 + tstart * h / 64
+        let mut sy1 = y0 + tend * h / 64
+        if sy0 < 0 { sy0 = 0 }
+        if sy1 > alto { sy1 = alto }
+        if sy1 > sy0 {
+            let r = to_i32(to_f64((c >> 16) & 255) * f)
+            let g = to_i32(to_f64((c >> 8) & 255) * f)
+            let b = to_i32(to_f64(c & 255) * f)
+            scar_sdl_draw_rect_color(x, sy0, colw, sy1 - sy0, r, g, b, 255)
+        }
+        tstart = tend
+        ri = ri + 1
+    }
+}
+
+fn main() {
+    let W = 960
+    let H = 600
+    let NCOL = 160                    # menos columnas = menos trabajo por cuadro (más FPS)
+    let COLW = W / NCOL
+
+    if scar_sdl_abrir(W, H, "SCAR motor — paso 4 (materiales)") != 0 {
+        print("no se pudo abrir la ventana")
+        return
+    }
+
+    let mundo = cargar_mundo(texto_mapa())
+    let mat_ladrillo = construir_mat(textura_ladrillo())
+    let mat_piedra = construir_mat(textura_piedra())
+
+    let mut px = 2.5
+    let mut py = 2.5
+    let mut ang = 0.35
+    let plano = 0.66
+    let vel = 0.06
+    let giro = 0.045
+
+    let mut fps = 0
+    let mut cuadros = 0
+    let mut ultimo_ms = scar_sdl_ticks()
+
+    let mut cerrar = false
+    while cerrar == false {
+        if scar_sdl_eventos() != 0 { cerrar = true }
+        if scar_sdl_key_down(41) == 1 { cerrar = true }
+
+        let dirx = cos(ang)
+        let diry = sin(ang)
+
+        if scar_sdl_key_down(80) == 1 { ang = ang - giro }
+        if scar_sdl_key_down(79) == 1 { ang = ang + giro }
+
+        let mut mx = 0.0
+        let mut my = 0.0
+        if scar_sdl_key_down(82) == 1 { mx = mx + dirx * vel  my = my + diry * vel }
+        if scar_sdl_key_down(81) == 1 { mx = mx - dirx * vel  my = my - diry * vel }
+        if scar_sdl_key_down(4) == 1 { mx = mx + diry * vel  my = my - dirx * vel }
+        if scar_sdl_key_down(7) == 1 { mx = mx - diry * vel  my = my + dirx * vel }
+
+        if celda(mundo, to_i32(px + mx), to_i32(py)) == 0 { px = px + mx }
+        if celda(mundo, to_i32(px), to_i32(py + my)) == 0 { py = py + my }
+
+        scar_sdl_clear()
+        scar_sdl_draw_rect_color(0, 0, W, H / 2, 30, 30, 48, 255)
+        scar_sdl_draw_rect_color(0, H / 2, W, H - H / 2, 24, 26, 24, 255)
+
+        let plano_x = 0.0 - diry * plano
+        let plano_y = dirx * plano
+
+        for col in 0..NCOL {
+            let camx = 2.0 * to_f64(col) / to_f64(NCOL) - 1.0
+            let mut rx = dirx + plano_x * camx
+            let mut ry = diry + plano_y * camx
+            if rx == 0.0 { rx = 0.000001 }
+            if ry == 0.0 { ry = 0.000001 }
+
+            let mut celx = to_i32(px)
+            let mut cely = to_i32(py)
+            let ddx = absf(1.0 / rx)
+            let ddy = absf(1.0 / ry)
+
+            let mut pasox = 1
+            let mut pasoy = 1
+            let mut sdx = (to_f64(celx) + 1.0 - px) * ddx
+            let mut sdy = (to_f64(cely) + 1.0 - py) * ddy
+            if rx < 0.0 { pasox = 0 - 1  sdx = (px - to_f64(celx)) * ddx }
+            if ry < 0.0 { pasoy = 0 - 1  sdy = (py - to_f64(cely)) * ddy }
+
+            let mut lado = 0
+            let mut mat_id = 1
+            let mut pasos = 0
+            while pasos < 64 {
+                if sdx < sdy {
+                    sdx = sdx + ddx
+                    celx = celx + pasox
+                    lado = 0
+                } else {
+                    sdy = sdy + ddy
+                    cely = cely + pasoy
+                    lado = 1
+                }
+                let cc = celda(mundo, celx, cely)
+                if cc > 0 { mat_id = cc  pasos = 999 }
+                pasos = pasos + 1
+            }
+
+            let mut dist = 0.0
+            if lado == 0 {
+                dist = (to_f64(celx) - px + to_f64(1 - pasox) / 2.0) / rx
+            } else {
+                dist = (to_f64(cely) - py + to_f64(1 - pasoy) / 2.0) / ry
+            }
+            dist = absf(dist)
+            if dist < 0.0001 { dist = 0.0001 }
+
+            let mut wallx = 0.0
+            if lado == 0 { wallx = py + dist * ry } else { wallx = px + dist * rx }
+            wallx = wallx - to_f64(to_i32(wallx))
+            let mut texx = to_i32(wallx * 64.0)
+            if lado == 0 and rx > 0.0 { texx = 63 - texx }
+            if lado == 1 and ry < 0.0 { texx = 63 - texx }
+            if texx < 0 { texx = 0 }
+            if texx > 63 { texx = 63 }
+
+            let h = to_i32(to_f64(H) / dist)
+            let y0 = H / 2 - h / 2
+
+            let mut f = 1.0 - dist * 0.09
+            if f < 0.2 { f = 0.2 }
+            if lado == 1 { f = f * 0.7 }
+
+            let x = col * COLW
+            if mat_id == 2 {
+                dibujar_columna(mat_piedra, x, COLW, texx, y0, h, H, f)
+            } else {
+                dibujar_columna(mat_ladrillo, x, COLW, texx, y0, h, H, f)
+            }
+        }
+
+        scar_sdl_texto(W - 103, 11, "FPS " + a_texto(fps), 20, 0, 0, 0, 220)
+        scar_sdl_texto(W - 104, 10, "FPS " + a_texto(fps), 20, 240, 240, 180, 255)
+
+        scar_sdl_present()
+        scar_sdl_delay(2)
+
+        cuadros = cuadros + 1
+        let ahora = scar_sdl_ticks()
+        if ahora - ultimo_ms >= 500 {
+            fps = cuadros * 1000 / (ahora - ultimo_ms)
+            cuadros = 0
+            ultimo_ms = ahora
+        }
+    }
+
+    scar_sdl_cerrar()
+}

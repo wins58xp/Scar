@@ -21,7 +21,8 @@ class Tareas:
         (tienen que sobrevivir a este frame), crea el TaskContext de la hija y lo
         registra como hija del contexto actual antes de arrancar el hilo (si no,
         la hija podría hacer panic antes de estar en la lista de su madre), y
-        recién ahí llama a pthread_create con el envoltorio de la tarea. El
+        recién ahí la lanza (scar_tarea_lanzar: un hilo del sistema, o una fibra
+        del planificador con SCAR_TAREAS=livianas) con el envoltorio de la tarea. El
         TaskHandle solo guarda el puntero al TaskContext; el tipo de retorno se
         recupera en .join()."""
         call = expr.call
@@ -113,7 +114,7 @@ class Tareas:
         )
         out.append(f"{pad}scar_ctx_add_child(__scar_ctx, {tmp_ctx});")
         if decl.accepts:
-            # el struct InjectedSlots_<task> se reserva antes de pthread_create, en
+            # el struct InjectedSlots_<task> se reserva antes de lanzarla, en
             # cero (cada slot NULL): la hija puede llegar a accept_chan() enseguida
             out.append(
                 f"{pad}{tmp_ctx}->injected_slots = "
@@ -131,14 +132,14 @@ class Tareas:
             out.append(f"{pad}{tmp_ctx}->free_retval = {self._retval_free_fn(ret)};")
         elif ret.name != "void":
             out.append(f"{pad}{tmp_ctx}->free_retval = free;")
-        out.append(f"{pad}{tmp_args}->__scar_ctx = {tmp_ctx};")
+        out.append(f"{pad}{tmp_args}->__scar_ctx_hija = {tmp_ctx};")
         tmp_handle = self._new_tmp()
         out.append(f"{pad}TaskHandle {tmp_handle};")
         out.append(f"{pad}{tmp_handle}.ctx = {tmp_ctx};")
         out.append(f"{pad}/*SCAR_STRC*/")
         out.append(f"{pad}atomic_fetch_add(&scar_hilos_vivos, 1);")
         out.append(
-            f"{pad}pthread_create(&{tmp_ctx}->thread, NULL, "
+            f"{pad}scar_tarea_lanzar({tmp_ctx}, "
             f"{self._task_thread_fn_name(name)}, {tmp_args});"
         )
         return tmp_handle
@@ -384,7 +385,7 @@ class Tareas:
             )
         typedef_args = (
             f"typedef struct {{\n"
-            f"    TaskContext* __scar_ctx;\n"
+            f"    TaskContext* __scar_ctx_hija;\n"
             f"{field_lines}\n"
             f"}} {args_struct};"
         )
@@ -559,7 +560,7 @@ class Tareas:
         def_wrapper = (
             f"static void* {thread_fn_name}(void* __scar_arg) {{\n"
             f"    {args_struct}* __scar_args = ({args_struct}*)__scar_arg;\n"
-            f"    TaskContext* __scar_task_ctx = __scar_args->__scar_ctx;\n"
+            f"    TaskContext* __scar_task_ctx = __scar_args->__scar_ctx_hija;\n"
             f"    __scar_ctx = __scar_task_ctx;\n"
             f"{'    scar_pila_iniciar();' + chr(10) if getattr(self, '_fns_recursivas', None) else ''}"
             f"    SCAR_RAND_HILO(__scar_task_ctx->rand_semilla);\n"

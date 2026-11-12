@@ -18,10 +18,10 @@ static Result_str scar_socket_read(ScarSocket __scar_h) {
         fd_set __scar_fdset;
         FD_ZERO(&__scar_fdset);
         FD_SET(sock, &__scar_fdset);
-        int __scar_rc = select(sock + 1, &__scar_fdset, NULL, NULL, &__scar_tv);
+        int __scar_rc = SCAR_BLOQUEANDO(select(sock + 1, &__scar_fdset, NULL, NULL, &__scar_tv));
         if (__scar_rc > 0 && FD_ISSET(sock, &__scar_fdset)) {
             char __scar_buf[4096];
-            ssize_t __scar_n = recv(sock, __scar_buf, sizeof(__scar_buf), 0);
+            ssize_t __scar_n = SCAR_BLOQUEANDO(recv(sock, __scar_buf, sizeof(__scar_buf), 0));
             if (__scar_n <= 0) {
                 char* __scar_eof = scar_malloc(4);
                 memcpy(__scar_eof, "EOF", 4);
@@ -53,9 +53,9 @@ static Result_Socket scar_listener_accept(ScarListener __scar_h) {
         fd_set __scar_fdset;
         FD_ZERO(&__scar_fdset);
         FD_SET(sock, &__scar_fdset);
-        int __scar_rc = select(sock + 1, &__scar_fdset, NULL, NULL, &__scar_tv);
+        int __scar_rc = SCAR_BLOQUEANDO(select(sock + 1, &__scar_fdset, NULL, NULL, &__scar_tv));
         if (__scar_rc > 0 && FD_ISSET(sock, &__scar_fdset)) {
-            int __scar_conn = accept(sock, NULL, NULL);
+            int __scar_conn = SCAR_BLOQUEANDO(accept(sock, NULL, NULL));
             if (__scar_conn < 0) {
                 char* err = scar_aprintf("error de accept: %s", strerror(errno));
                 return Result_Socket_Err(err);

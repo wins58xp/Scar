@@ -17,10 +17,10 @@ static Result_str scar_read_pipe(int32_t fd) {
         fd_set __scar_fdset;
         FD_ZERO(&__scar_fdset);
         FD_SET(fd, &__scar_fdset);
-        int __scar_rc = select(fd + 1, &__scar_fdset, NULL, NULL, &__scar_tv);
+        int __scar_rc = SCAR_BLOQUEANDO(select(fd + 1, &__scar_fdset, NULL, NULL, &__scar_tv));
 @@CHEQUEO_SELECT@@        if (__scar_rc > 0 && FD_ISSET(fd, &__scar_fdset)) {
             char __scar_buf[4096];
-            ssize_t __scar_n = read(fd, __scar_buf, sizeof(__scar_buf));
+            ssize_t __scar_n = SCAR_BLOQUEANDO(read(fd, __scar_buf, sizeof(__scar_buf)));
             if (__scar_n <= 0) {
                 char* __scar_eof = scar_malloc(4);
                 memcpy(__scar_eof, "EOF", 4);

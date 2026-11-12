@@ -1,0 +1,45 @@
+# Paso 1 del motor: que algo aparezca en pantalla.
+#
+#   scar run juegos/paso1_degradado.scar          # con el intérprete
+#   scar build juegos/paso1_degradado.scar -o paso1 && ./paso1   # nativo (WSL)
+#
+# Dibuja un degradado de cielo (noche arriba -> horizonte naranja), la línea
+# del horizonte y un texto. Si esto se ve, toda la cadena gui -> lienzo ->
+# pantalla -> SDL2 funciona, y ya tenemos dónde pintar el motor.
+
+use "gui"
+use "lienzo"
+use "pantalla"
+
+# Resolución interna baja, a lo DOOM; la ventana la escala x3.
+fn main() {
+    let ancho = 320
+    let alto = 200
+    let escala = 3
+
+    let ui = gui.ventana("Paso 1 — cielo", ancho * escala, alto * escala)
+    let l = lienzo.nuevo(ancho, alto, lienzo.negro())
+
+    let horizonte = alto * 3 / 5        # el horizonte, un poco abajo del medio
+
+    while gui.abierta(ui) {
+        # Cielo: una línea horizontal por fila, del azul noche al naranja.
+        for y in 0..horizonte {
+            let t = y * 255 / horizonte           # 0 arriba, 255 en el horizonte
+            let r = 20 + t * 220 / 255            #  20 -> 240
+            let g = 24 + t * 120 / 255            #  24 -> 144
+            let b = 60 + (255 - t) * 120 / 255    # 180 -> 60 (más azul arriba)
+            lienzo.linea(l, 0, y, ancho - 1, y, lienzo.color(r, g, b))
+        }
+
+        # Suelo: un gris verdoso parejo.
+        lienzo.rect(l, 0, horizonte, ancho, alto - horizonte, lienzo.color(30, 34, 28))
+
+        # La línea del horizonte.
+        lienzo.linea(l, 0, horizonte, ancho - 1, horizonte, lienzo.color(255, 180, 90))
+
+        lienzo.texto(l, 6, 6, "SCAR motor — paso 1", lienzo.color(240, 240, 240))
+
+        pantalla.mostrar(ui, l, escala)
+    }
+}

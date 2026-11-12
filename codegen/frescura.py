@@ -11,7 +11,7 @@ from parser import (marca_new_generico, elemento_de_pop,
 )
 from types_ import T_I32, T_STR
 from fresh_owned import (
-    resolve_consumed_option_params, resolve_consumed_params, resolve_fn_ownership,
+    es_compuesto_de_struct, resolve_consumed_option_params, resolve_consumed_params, resolve_fn_ownership,
 )
 
 from .comun import (
@@ -80,6 +80,16 @@ class Frescura:
             return False
         inner = expr.expr
         if isinstance(inner, OkExpr):
+            # un Ok(..) con un struct, Vec o Map adentro es siempre dueño de su
+            # contenido (_contenido_propio: lo fresco tal cual, una dueña se
+            # transfiere, lo demás se copia), así que `Ok(q)?` entrega un valor
+            # propio aunque q sea una variable
+            try:
+                ok_ty = self.infer(inner, env)
+            except CodegenError:
+                ok_ty = None
+            if ok_ty is not None and ok_ty.args and self._contenido_se_entrega(ok_ty.args[0]):
+                return True
             return self._let_creates_fresh_owner(inner.expr, None, env)
         if isinstance(inner, Call) and isinstance(inner.callee, Ident):
             # `f(x)?` con f una fn que fresh_owned_fns marcó siempre fresca
@@ -327,76 +337,80 @@ class Frescura:
                 fns[item.name] = (item, self.fn_sigs[item.name][0])
         self.consumed_params = resolve_consumed_params(fns, lambda t: t.name in self.structs, self.structs)
         self.consumed_option_params = resolve_consumed_option_params(
-            fns, lambda t: t.name == "Option" and bool(t.args) and t.args[0].name in self.structs)
+            fns, lambda t: es_compuesto_de_struct(t, self.structs))
 
     def _capture_fresh_option_arg(self, fn_name, index, expr, code, env, out, pad):
-        """`f(v.get(0))` pasa una copia nueva (un Option<Struct> de
-        get()/pop()/recv()) directo como argumento, sin variable que sea su
-        dueña. Si f no se queda con el contenido de ese parámetro, la copia va a
-        un temporal que se libera al terminar la sentencia. Si f es genérica, una
-        task, una extern o la consume, o si es la condición de un if/while/for, se
-        deja como está: en el peor caso una pérdida acotada, nunca un free
-        inválido."""
+        """Una sola regla (agua) para un Option/Result recién armado que se pasa
+        directo a una fn que lo recibe prestado: es como `let tmp = <arg>`. La
+        sentencia es su dueña, con el mismo origen que le daría ese let
+        (_origen_de_temporal), y se suelta entero al terminar la sentencia, sea
+        cual sea su contenido (str, primitivo, struct, Vec, anidado...).
+
+        Antes había un camino por caso (Option<str>, Result<str>, Option<Struct>,
+        anidados) y los que faltaban perdían memoria: Err(..) a un Result<i32>,
+        Ok(struct nuevo) a un Result<Struct>.
+
+        No se suelta (se deja como está: en el peor caso una pérdida acotada,
+        nunca un free inválido) si la fn se queda con el contenido (Option o
+        Result de un struct que mueve a otro lado, o un Option<Vec/Map>, que
+        siempre recibe como dueña), si no es una fn normal (task, extern,
+        genérica), si el argumento es de alguien (una variable o un campo) o si
+        es la condición de un if/while/for."""
         if not self._can_capture_arg_temps or fn_name is None:
             return code
-        params = self.fn_sigs[fn_name][0] if fn_name in self.fn_sigs and fn_name not in self.task_sigs else None
-        if (params is not None and index < len(params) and self._es_anidado(params[index])
-                and not isinstance(expr, (Ident, FieldAccess, NoneExpr))
-                and self._valor_compuesto_propio(expr, params[index], env)):
-            # un Option/Result anidado fresco que la fn recibe prestado
-            drop = self._vivo_drop_fn(params[index], "anidado")
-            if drop is None:
-                return code
-            tmp = self._new_tmp()
-            out.append(f"{pad}{self.c_type(params[index])} {tmp} = {code};")
-            self.pending_expr_temps.append(f"dropfree:{drop}:{tmp}")
-            return tmp
+        if fn_name not in self.fn_sigs or fn_name in self.task_sigs:
+            return code
         if fn_name not in self.consumed_option_params:
+            return code  # sin el análisis de consumo no se sabe: no se suelta
+        params = self.fn_sigs[fn_name][0]
+        if index >= len(params) or params[index] is None:
+            return code
+        ty = params[index]
+        if ty.name not in ("Option", "Result") or self._is_moved_container_type(ty):
+            return code
+        if isinstance(expr, (Ident, FieldAccess, NoneExpr)):
             return code
         if index in self.consumed_option_params[fn_name]:
+            # la fn se lleva el contenido (el .value), nunca el mensaje de un Err:
+            # ese sigue siendo de la sentencia
+            if ty.name == "Result" and self._origen_de_temporal(expr, ty, env) is not None:
+                tmp = self._new_tmp()
+                out.append(f"{pad}{self.c_type(ty)} {tmp} = {code};")
+                msg = self._new_tmp()
+                out.append(f"{pad}const char* {msg} = {tmp}.err;")
+                self.pending_expr_temps.append(msg)  # un str temporal más
+                return tmp
             return code
-        try:
-            ty = self.infer(expr, env)
-        except CodegenError:
+        origen = self._origen_de_temporal(expr, ty, env)
+        if origen is None:
             return code
-        if isinstance(expr, ErrExpr) and fn_name in self.fn_sigs:
-            # un Err no dice su tipo: el del parámetro
-            params = self.fn_sigs[fn_name][0]
-            if index < len(params) and params[index] is not None:
-                ty = params[index]
-        if (ty.name == "Result" and ty.args and ty.args[0].name == "str"
-                and fn_name in self.fn_sigs and fn_name not in self.task_sigs
-                and isinstance(expr, (OkExpr, ErrExpr))):
-            # `f(Err("x"))`, `f(Ok(a + b))` con un parámetro Result<str> prestado:
-            # se sueltan el .err (siempre propio) y, si es fresco, el .value
-            fresco = isinstance(expr, OkExpr) and self._let_creates_fresh_owner(
-                expr.expr, marca_new_generico(expr.expr), env)
-            drop = self._vivo_drop_fn(ty, "result_str:plain" if fresco else "plain")
-            if drop is None:
-                return code
-            tmp = self._new_tmp()
-            out.append(f"{pad}{self.c_type(ty)} {tmp} = {code};")
-            self.pending_expr_temps.append(f"dropfree:{drop}:{tmp}")
-            return tmp
-        if (ty.name == "Option" and ty.args and ty.args[0].name == "str"
-                and fn_name in self.fn_sigs and fn_name not in self.task_sigs
-                and self._option_str_fresca(expr, env)):
-            # `f(Some("a" + b))` con un parámetro Option<str>, que una fn recibe
-            # prestado (si lo guarda, se queda con una copia): el str se suelta al
-            # terminar la sentencia
-            drop = self._vivo_drop_fn(ty, "plain")
-            if drop is None:
-                return code
-            tmp = self._new_tmp()
-            out.append(f"{pad}{self.c_type(ty)} {tmp} = {code};")
-            self.pending_expr_temps.append(f"dropfree:{drop}:{tmp}")
-            return tmp
-        if not (self._option_payload_is_malloc(expr, ty, env) or self._option_struct_fresca(expr, ty, env)):
+        drop = self._vivo_drop_fn(ty, origen)
+        if drop is None:
             return code
         tmp = self._new_tmp()
         out.append(f"{pad}{self.c_type(ty)} {tmp} = {code};")
-        self.pending_expr_temps.append(f"optfree:{ty.args[0].name}:{tmp}")
+        self.pending_expr_temps.append(f"dropfree:{drop}:{tmp}")
         return tmp
+
+    def _origen_de_temporal(self, expr, ty, env):
+        """El origen que tendría `let tmp: ty = expr`, para soltar un Option/Result
+        temporal con la misma lógica que una variable; None si ese let no sería
+        dueño de nada (un Some/Ok de algo prestado: el contenido sigue siendo de
+        quien era)."""
+        if self._es_anidado(ty):
+            return "anidado" if self._valor_compuesto_propio(expr, ty, env) else None
+        if isinstance(expr, ErrExpr):
+            # un Err no trae valor: solo su mensaje, que es siempre propio
+            return "plain"
+        if isinstance(expr, (SomeExpr, OkExpr)):
+            inner = expr.expr
+            if not self._let_creates_fresh_owner(inner, marca_new_generico(inner), env):
+                return None
+            payload = ty.args[0] if ty.args else T_I32
+            if ty.name == "Result" and payload.name == "str":
+                return "result_str:plain"
+            return "plain"
+        return self._print_fresh_result_origin(expr, ty, env)
 
     # Tipos de campo que se pueden sacar de un struct temporal, dejando un
     # valor vacío que {T}_free tolera.

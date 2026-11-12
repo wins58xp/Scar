@@ -1,0 +1,280 @@
+# Paso 3 (v2): raycaster con paredes TEXTURADAS, por el camino sin arrastre.
+#
+#   python3 main.py juegos/paso3_texturas.scar
+#   scar build juegos/paso3_texturas.scar -o paso3 && ./paso3
+#
+# El paso 2 (rects directos con scar_sdl_draw_rect_color) no arrastra; el camino
+# de subir una textura (scar_sdl_pixeles) sí. Así que texturizamos POR EL MISMO
+# camino de rects: cada columna de pared se dibuja como una pila de segmentos,
+# un rect por texel de la textura (64 de alto). Sin buffer de píxeles, sin gui:
+# su propio bucle (clear/present) y cero arrastre.
+#
+# Mover: flechas arriba/abajo = adelante/atrás, izquierda/derecha = girar,
+#        A / D = ir de lado (strafe), ESC o la X = salir.
+
+extern "C" fn scar_sdl_abrir(ancho: i32, alto: i32, titulo: str) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_cerrar() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_eventos() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_key_down(scancode: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_clear() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_draw_rect_color(x: i32, y: i32, w: i32, h: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_present() -> i32 from "scarsdl"
+extern "C" fn scar_sdl_delay(ms: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_texto(x: i32, y: i32, s: str, tam: i32, r: i32, g: i32, b: i32, a: i32) -> i32 from "scarsdl"
+extern "C" fn scar_sdl_ticks() -> i32 from "scarsdl"
+
+fn texto_mapa() -> str {
+    return "################\n" +
+           "#..............#\n" +
+           "#..............#\n" +
+           "#......##......#\n" +
+           "#......##......#\n" +
+           "#..............#\n" +
+           "#..###....###..#\n" +
+           "#..............#\n" +
+           "#..............#\n" +
+           "#..............#\n" +
+           "################"
+}
+
+struct Mundo {
+    ancho: i32
+    alto: i32
+    celdas: Vec<i32>
+}
+
+fn cargar_mundo(s: str) -> Mundo {
+    let n = len(s)
+    let mut ancho = 0
+    let mut actual = 0
+    let mut alto = 0
+    for i in 0..n {
+        if s[i] == "\n" {
+            if actual > ancho { ancho = actual }
+            actual = 0
+            alto = alto + 1
+        } else {
+            actual = actual + 1
+        }
+    }
+    if actual > 0 {
+        if actual > ancho { ancho = actual }
+        alto = alto + 1
+    }
+    let celdas: Vec<i32> = vec_new()
+    for i in 0..(ancho * alto) { celdas.push(0) }
+    let mut f = 0
+    let mut c = 0
+    for i in 0..n {
+        if s[i] == "\n" {
+            f = f + 1
+            c = 0
+        } else {
+            if s[i] == "#" { celdas.set(f * ancho + c, 1) }
+            c = c + 1
+        }
+    }
+    return Mundo { ancho: ancho, alto: alto, celdas: celdas }
+}
+
+fn pared(m: Mundo, mx: i32, my: i32) -> bool {
+    if mx < 0 or my < 0 or mx >= m.ancho or my >= m.alto { return true }
+    return m.celdas.get(my * m.ancho + mx).unwrap_or(1) > 0
+}
+
+fn absf(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+# Empaqueta un color en 0xRRGGBB (sin alfa; acá el alfa lo pone el draw_rect).
+fn rgb(r: i32, g: i32, b: i32) -> i32 {
+    return ((r & 255) << 16) | ((g & 255) << 8) | (b & 255)
+}
+
+# Textura de ladrillo 64x64: mortero oscuro grueso y ladrillos de dos tonos
+# PLANOS (sin ruido por píxel) para que cada columna tenga tramos verticales
+# uniformes: así se agrupan en pocos rects (run-length) y va rápido.
+fn textura_ladrillo() -> Vec<i32> {
+    let t: Vec<i32> = vec_new()
+    for y in 0..64 {
+        let fila = y / 16
+        let desf = (fila % 2) * 16
+        for x in 0..64 {
+            let xx = (x + desf) % 64
+            let junta = (y % 16 < 3) or (xx % 32 < 3)
+            if junta {
+                t.push(rgb(48, 44, 42))              # mortero
+            } else {
+                let pieza = (fila + xx / 32) % 2
+                if pieza == 0 {
+                    t.push(rgb(176, 72, 52))         # ladrillo claro
+                } else {
+                    t.push(rgb(150, 58, 44))         # ladrillo oscuro
+                }
+            }
+        }
+    }
+    return t
+}
+
+fn main() {
+    let W = 960
+    let H = 600
+    let NCOL = 320
+    let COLW = W / NCOL
+
+    if scar_sdl_abrir(W, H, "SCAR motor — paso 3 (texturas)") != 0 {
+        print("no se pudo abrir la ventana")
+        return
+    }
+
+    let mundo = cargar_mundo(texto_mapa())
+    let tex = textura_ladrillo()
+
+    let mut px = 2.5
+    let mut py = 2.5
+    let mut ang = 0.35
+    let plano = 0.66
+    let vel = 0.06
+    let giro = 0.045
+
+    # Contador de FPS: cuenta cuadros y cada 0.5s calcula el promedio.
+    let mut fps = 0
+    let mut cuadros = 0
+    let mut ultimo_ms = scar_sdl_ticks()
+
+    let mut cerrar = false
+    while cerrar == false {
+        if scar_sdl_eventos() != 0 { cerrar = true }       # 2 = cerró la ventana (X)
+        if scar_sdl_key_down(41) == 1 { cerrar = true }     # ESC
+
+        let dirx = cos(ang)
+        let diry = sin(ang)
+
+        if scar_sdl_key_down(80) == 1 { ang = ang - giro }
+        if scar_sdl_key_down(79) == 1 { ang = ang + giro }
+
+        let mut mx = 0.0
+        let mut my = 0.0
+        if scar_sdl_key_down(82) == 1 { mx = mx + dirx * vel  my = my + diry * vel }
+        if scar_sdl_key_down(81) == 1 { mx = mx - dirx * vel  my = my - diry * vel }
+        if scar_sdl_key_down(4) == 1 { mx = mx + diry * vel  my = my - dirx * vel }
+        if scar_sdl_key_down(7) == 1 { mx = mx - diry * vel  my = my + dirx * vel }
+
+        if not pared(mundo, to_i32(px + mx), to_i32(py)) { px = px + mx }
+        if not pared(mundo, to_i32(px), to_i32(py + my)) { py = py + my }
+
+        scar_sdl_clear()
+        scar_sdl_draw_rect_color(0, 0, W, H / 2, 30, 30, 48, 255)           # cielo
+        scar_sdl_draw_rect_color(0, H / 2, W, H - H / 2, 24, 26, 24, 255)   # piso
+
+        let plano_x = 0.0 - diry * plano
+        let plano_y = dirx * plano
+
+        for col in 0..NCOL {
+            let camx = 2.0 * to_f64(col) / to_f64(NCOL) - 1.0
+            let mut rx = dirx + plano_x * camx
+            let mut ry = diry + plano_y * camx
+            if rx == 0.0 { rx = 0.000001 }
+            if ry == 0.0 { ry = 0.000001 }
+
+            let mut celx = to_i32(px)
+            let mut cely = to_i32(py)
+            let ddx = absf(1.0 / rx)
+            let ddy = absf(1.0 / ry)
+
+            let mut pasox = 1
+            let mut pasoy = 1
+            let mut sdx = (to_f64(celx) + 1.0 - px) * ddx
+            let mut sdy = (to_f64(cely) + 1.0 - py) * ddy
+            if rx < 0.0 { pasox = 0 - 1  sdx = (px - to_f64(celx)) * ddx }
+            if ry < 0.0 { pasoy = 0 - 1  sdy = (py - to_f64(cely)) * ddy }
+
+            let mut lado = 0
+            let mut pasos = 0
+            while pasos < 64 {
+                if sdx < sdy {
+                    sdx = sdx + ddx
+                    celx = celx + pasox
+                    lado = 0
+                } else {
+                    sdy = sdy + ddy
+                    cely = cely + pasoy
+                    lado = 1
+                }
+                if pared(mundo, celx, cely) { pasos = 999 }
+                pasos = pasos + 1
+            }
+
+            let mut dist = 0.0
+            if lado == 0 {
+                dist = (to_f64(celx) - px + to_f64(1 - pasox) / 2.0) / rx
+            } else {
+                dist = (to_f64(cely) - py + to_f64(1 - pasoy) / 2.0) / ry
+            }
+            dist = absf(dist)
+            if dist < 0.0001 { dist = 0.0001 }
+
+            # columna de la textura según dónde pegó el rayo
+            let mut wallx = 0.0
+            if lado == 0 { wallx = py + dist * ry } else { wallx = px + dist * rx }
+            wallx = wallx - to_f64(to_i32(wallx))
+            let mut texx = to_i32(wallx * 64.0)
+            if lado == 0 and rx > 0.0 { texx = 63 - texx }
+            if lado == 1 and ry < 0.0 { texx = 63 - texx }
+            if texx < 0 { texx = 0 }
+            if texx > 63 { texx = 63 }
+
+            let h = to_i32(to_f64(H) / dist)
+            let y0 = H / 2 - h / 2                 # tope de la pared (puede ser negativo)
+
+            # sombra por distancia y por lado
+            let mut f = 1.0 - dist * 0.09
+            if f < 0.2 { f = 0.2 }
+            if lado == 1 { f = f * 0.7 }
+
+            let x = col * COLW
+
+            # Recorro los 64 texels de la columna y AGRUPO los seguidos del mismo
+            # color en un solo rect (run-length): pocas llamadas por columna.
+            let mut ty = 0
+            while ty < 64 {
+                let c = tex.get(ty * 64 + texx).unwrap_or(0)
+                let mut tj = ty + 1
+                while tj < 64 and tex.get(tj * 64 + texx).unwrap_or(0) == c {
+                    tj = tj + 1
+                }
+                # el tramo de texels [ty, tj) -> filas de pantalla
+                let mut sy0 = y0 + ty * h / 64
+                let mut sy1 = y0 + tj * h / 64
+                if sy0 < 0 { sy0 = 0 }
+                if sy1 > H { sy1 = H }
+                if sy1 > sy0 {
+                    let r = to_i32(to_f64((c >> 16) & 255) * f)
+                    let g = to_i32(to_f64((c >> 8) & 255) * f)
+                    let b = to_i32(to_f64(c & 255) * f)
+                    scar_sdl_draw_rect_color(x, sy0, COLW, sy1 - sy0, r, g, b, 255)
+                }
+                ty = tj
+            }
+        }
+
+        # FPS arriba a la derecha (sombra negra + texto claro para que se lea).
+        scar_sdl_texto(W - 103, 11, "FPS " + a_texto(fps), 20, 0, 0, 0, 220)
+        scar_sdl_texto(W - 104, 10, "FPS " + a_texto(fps), 20, 240, 240, 180, 255)
+
+        scar_sdl_present()
+        scar_sdl_delay(10)
+
+        cuadros = cuadros + 1
+        let ahora = scar_sdl_ticks()
+        if ahora - ultimo_ms >= 500 {
+            fps = cuadros * 1000 / (ahora - ultimo_ms)
+            cuadros = 0
+            ultimo_ms = ahora
+        }
+    }
+
+    scar_sdl_cerrar()
+}

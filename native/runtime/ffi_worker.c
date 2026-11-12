@@ -3,7 +3,7 @@
 static int scar_ffi_write_exact(int fd, const void *buf, size_t n) {
     size_t sent = 0;
     while (sent < n) {
-        ssize_t w = write(fd, (const char *)buf + sent, n - sent);
+        ssize_t w = SCAR_BLOQUEANDO(write(fd, (const char *)buf + sent, n - sent));
         if (w <= 0) return 0;
         sent += (size_t)w;
     }
@@ -12,7 +12,7 @@ static int scar_ffi_write_exact(int fd, const void *buf, size_t n) {
 static int scar_ffi_read_exact(int fd, void *buf, size_t n) {
     size_t got = 0;
     while (got < n) {
-        ssize_t r = read(fd, (char *)buf + got, n - got);
+        ssize_t r = SCAR_BLOQUEANDO(read(fd, (char *)buf + got, n - got));
         if (r <= 0) return 0;
         got += (size_t)r;
     }

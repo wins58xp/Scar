@@ -1,7 +1,5 @@
-typedef struct { void *slot; void (*drop)(void*); const bool *flag; } ScarVivo;
-static @@TLS@@ScarVivo *scar_vivos = NULL;
-static @@TLS@@int scar_nvivos = 0;
-static @@TLS@@int scar_capvivos = 0;
+typedef struct ScarVivo { void *slot; void (*drop)(void*); const bool *flag; } ScarVivo;
+// scar_vivos, scar_nvivos y scar_capvivos: en ScarHilo (tls.c)
 // alta idempotente: si el slot ya esta registrado (desde 'base', el
 // inicio de la funcion actual), solo actualiza como se suelta
 static void scar_vivo_alta(void *slot, void (*drop)(void*), const bool *flag, int base) {

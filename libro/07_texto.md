@@ -162,7 +162,7 @@ fn main() {
 ```
 
 ```
-['manzana', 'pera', 'uva'] 3
+["manzana", "pera", "uva"] 3
 ÑANDÚ a+b+c
 5 3.14
 a / b / c

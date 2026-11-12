@@ -30,8 +30,8 @@ class Plantillas:
             f"    atomic_init(&c->hay_mensajes, 0);\n"
             f"    atomic_init(&c->lleno, 0);\n"
             f"    pthread_mutex_init(&c->mu, NULL);\n"
-            f"    pthread_cond_init(&c->not_empty, NULL);\n"
-            f"    pthread_cond_init(&c->not_full, NULL);\n"
+            f"    scar_cond_init(&c->not_empty, 0);\n"
+            f"    scar_cond_init(&c->not_full, 0);\n"
             f"    atomic_init(&c->refcount, 1);\n"
             f"    return c;\n"
             f"}}\n"
@@ -101,7 +101,7 @@ class Plantillas:
             + ("        scar_avance();  // pasar un mensaje es progreso\n" if self.has_tasks else "")
             + f""
             f"        pthread_mutex_unlock(&c->mu);\n"
-            f"        pthread_cond_signal(&c->not_empty);\n"
+            f"        scar_cond_signal(&c->not_empty);\n"
             f"        return;\n"
             f"    }}\n"
             f"}}\n"
@@ -121,8 +121,8 @@ class Plantillas:
             f"    atomic_store_explicit(&c->hay_mensajes, 1, memory_order_relaxed);\n"
             f"    atomic_store_explicit(&c->lleno, 0, memory_order_relaxed);\n"
             f"    pthread_mutex_unlock(&c->mu);\n"
-            f"    pthread_cond_broadcast(&c->not_empty);\n"
-            f"    pthread_cond_broadcast(&c->not_full);\n"
+            f"    scar_cond_broadcast(&c->not_empty);\n"
+            f"    scar_cond_broadcast(&c->not_full);\n"
             f"}}\n"
             f"\n"
             f"// Espera con pthread_cond_wait() sin timeout (ver recv_wait_block\n"
@@ -171,7 +171,7 @@ class Plantillas:
                f"                node = NULL;\n"
                f"            }}\n")
             + f"            pthread_mutex_unlock(&c->mu);\n"
-            f"            pthread_cond_signal(&c->not_full);\n"
+            f"            scar_cond_signal(&c->not_full);\n"
             + (
                 # Struct: no se libera el nodo acá. node->value es su primer miembro, así
                 # que el nodo es el struct, y se libera entero cuando el receptor llame a
@@ -225,7 +225,7 @@ class Plantillas:
                f"            node = NULL;\n"
                f"        }}\n")
             + f"        pthread_mutex_unlock(&c->mu);\n"
-            f"        pthread_cond_signal(&c->not_full);\n"
+            f"        scar_cond_signal(&c->not_full);\n"
             + (
                 f"        return {opt_c_name}_Some(({suf}*)node);\n"
                 if inner_is_struct else

@@ -19,6 +19,8 @@ import librerias_nativas
 from . import Codegen
 from .comun import CodegenError
 
+ES_WINDOWS = os.name == "nt"
+
 
 def _read_join_timeout_env():
     """SCAR_JOIN_TIMEOUT, con la misma regla que
@@ -60,7 +62,7 @@ def _cc_command(out_binary, c_path):
     SCAR_CC_NATIVE=0 quita -march=native (que ata el binario a la CPU);
     SCAR_CC fuerza un compilador."""
     forced = os.environ.get("SCAR_CC")
-    compiler = forced or shutil.which("clang") or "cc"
+    compiler = forced or shutil.which("clang") or shutil.which("gcc") or "cc"
 
     # f64: cada operación se redondea por separado, como IEEE-754 y el
     # intérprete; sin esto clang fusiona a*b+c en una FMA y el último
@@ -83,8 +85,13 @@ def _cc_command(out_binary, c_path):
         # PIE, RELRO), K02. -fstack-protector (no -strong, que costaba ~15 % en
         # fib(36)); SCAR_CC_HARDEN=max usa el strong, =0 apaga todo.
         protector = "-fstack-protector-strong" if endurecer == "max" else "-fstack-protector"
-        cmd += [protector, "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=2",
-                "-Wformat", "-Wformat-security", "-fPIE", "-pie", "-Wl,-z,relro", "-Wl,-z,now"]
+        if ES_WINDOWS:
+            # En Windows (MinGW) las defensas ELF no aplican: sin -pie ni
+            # relro/now, y sin _FORTIFY_SOURCE (no está en la libc de MinGW).
+            cmd += [protector, "-Wformat", "-Wformat-security"]
+        else:
+            cmd += [protector, "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=2",
+                    "-Wformat", "-Wformat-security", "-fPIE", "-pie", "-Wl,-z,relro", "-Wl,-z,now"]
 
     cmd += ["-o", out_binary, c_path, "-lm"]
     return cmd
@@ -165,7 +172,12 @@ def compile_file(path, out_binary, libreria=False):
     with open(c_path, "w", encoding="utf-8") as f:
         f.write(c_src)
 
-    cc_cmd = _cc_command(out_binary, c_path)
+    # En Windows el ejecutable lleva .exe (el .c conserva el nombre base).
+    binario = out_binary
+    if ES_WINDOWS and not libreria and not binario.lower().endswith(".exe"):
+        binario = binario + ".exe"
+
+    cc_cmd = _cc_command(binario, c_path)
     if libreria:
         # una .so que otro proceso carga (ctypes, dlopen)
         cc_cmd = [f for f in cc_cmd if f not in ("-fPIE", "-pie")]
@@ -204,7 +216,23 @@ def compile_file(path, out_binary, libreria=False):
         if falta is not None:
             raise CodegenError(falta)
         raise CodegenError(f"gcc/cc falló:\n{result.stdout}\n{result.stderr}")
-    return c_path, out_binary
+
+    # Windows no tiene rpath: el .dll de cada librería nativa se copia junto al
+    # .exe para que el sistema lo encuentre al correr. (SDL2.dll se toma del
+    # PATH de MinGW.)
+    if ES_WINDOWS and not libreria:
+        destino_dir = os.path.dirname(os.path.abspath(binario))
+        for lib in codegen.extern_libs - codegen.pipe_isolated_libs:
+            dll = librerias_nativas.ruta_local(lib)
+            if dll is None:
+                continue
+            destino = os.path.join(destino_dir, os.path.basename(dll))
+            if os.path.abspath(dll) != destino:
+                try:
+                    shutil.copy2(dll, destino)
+                except OSError:
+                    pass
+    return c_path, binario
 
 
 def main():

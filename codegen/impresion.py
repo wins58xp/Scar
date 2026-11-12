@@ -45,8 +45,8 @@ class Impresion:
 
     def _value_fmt(self, ty: TypeAnn, code: str, pre: list, post: list):
         """Formato de printf y expresión de C para un valor dentro de un
-        Ok/Some/struct/Vec, como el repr() de Python en el intérprete (str entre
-        comillas simples, bool True/False).
+        Ok/Some/struct/Vec, como scar_repr() del intérprete: en la forma de SCAR
+        (str entre comillas dobles, bool true/false).
 
         pre/post: líneas de C (sin sangría) para antes y después del snprintf
         que usa el valor. Los formateadores que reservan un texto nuevo
@@ -70,7 +70,7 @@ class Impresion:
             post.append(f"scar_free({tmp});")
             return "%s", tmp
         if ty.name == "bool":
-            return "%s", f'({code} ? "True" : "False")'
+            return "%s", f'({code} ? "true" : "false")'
         if ty.name == "void":
             # Result<()>: el valor se imprime "None" (sale Ok(None), como en el
             # intérprete); el bool que lo representa no se muestra

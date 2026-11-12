@@ -22,11 +22,11 @@ Tareas livianas. El lenguaje no cambia: los programas se escriben igual. Lo
 - **Nuevo:** `scar build` en Windows con MinGW-w64 (sale un `.exe`, con los
   `.dll` de las librerías de SCAR al lado). `python construir_nativas.py`
   compila las librerías nativas en Windows y en Linux. En Linux nada cambia.
-  En Windows cada tarea sigue siendo un hilo. Aporte de Enrique Palacios.
+  En Windows cada tarea sigue siendo un hilo. Aporte de [ManiacPC](https://github.com/ManiacPC).
 - **Nuevo:** un motor raycaster estilo DOOM escrito en SCAR, en `juegos/`
   (`paso1` a `paso5_mundo.scar`, explicado en `juegos/ENGINE.md`): paredes con
   textura, antorchas, cielo con ciclo de día y noche, WASD y ratón. Aporte de
-  Enrique Palacios.
+  [ManiacPC](https://github.com/ManiacPC).
 
 - **Arreglo:** una fn que devuelve el dato de un `match` sobre un `Result`
   (`Ok(r) => { return r }`) perdía memoria en el binario cuando se la llamaba con

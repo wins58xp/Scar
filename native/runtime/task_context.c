@@ -449,13 +449,68 @@ static inline void scar_pausa_cpu(void) {
 #endif
 }
 
-typedef struct { unsigned long visto; int quietas; } ScarEspera;
+// Una espera de canal (send a uno lleno, recv de uno vacío). Los dos primeros
+// campos son de la confirmación del deadlock; los demás, de la lista de los que
+// esperan en modo hilos (abajo). El codegen la arma con {~0UL, 0}: el resto en 0.
+typedef struct ScarEspera {
+    unsigned long visto;
+    int quietas;
+    ScarCond *cv;
+    pthread_mutex_t *mu;
+    struct ScarEspera *ant, *sig;
+    int vigilar;  // la despertaron para que se ofrezca de vigía
+} ScarEspera;
+
+// Deadlock en modo hilos (SCAR_TAREAS=hilos), por eventos. Antes cada hilo que
+// esperaba se despertaba cada 250 ms para mirar si todos estaban trabados: con
+// 10.000 esperando eran 40.000 despertares por segundo, cada uno peleando el
+// candado de su canal, y el sistema no hacía otra cosa. Ahora UNO solo vigila:
+// el que, al ponerse a esperar, ve que ya esperan todos (scar_hilos_esperando
+// >= scar_hilos_vivos). Ese espera con plazo de 250 ms y confirma como siempre
+// (dos plazos seguidos sin progreso, nadie durmiendo, todos esperando); si se
+// confirma, él es el que da el deadlock. Los demás esperan sin plazo: los
+// despierta solo un mensaje, un lugar libre, una cancelación o el relevo. Si
+// todos quedan esperando porque una tarea TERMINÓ (y nadie se puso a esperar
+// después), la que termina despierta a una de la lista para que se ofrezca de
+// vigía (scar_vigia_relevo). Con pocos hilos da lo mismo que antes; con miles,
+// nadie se despierta por reloj salvo la vigía.
+#define SCAR_ESPERA_PLAZO_NS 250000000LL
+static _Atomic int scar_vigia = 0;          // 1 si alguien vigila
+static pthread_mutex_t scar_vigia_mu = PTHREAD_MUTEX_INITIALIZER;
+static ScarEspera *scar_vigia_cab = NULL;   // los que esperan sin plazo
+
+static int scar_todos_esperan(void) {
+    return atomic_load(&scar_durmiendo) == 0
+        && atomic_load(&scar_hilos_esperando) >= atomic_load(&scar_hilos_vivos);
+}
+
+// Cuando todos quedan esperando sin que nadie vigile (lo deja así una tarea
+// que termina), despierta a una de la lista: se vuelve a poner a esperar y, al
+// ver que esperan todos, toma la vigía. El candado de su canal se prueba con
+// trylock (quien lo tiene puede estar esperando scar_vigia_mu para salir de la
+// lista): si no se puede, se suelta todo y se reintenta.
+static void scar_vigia_relevo(void) {
+    for (;;) {
+        if (!scar_todos_esperan() || atomic_load(&scar_vigia) != 0) return;
+        pthread_mutex_lock(&scar_vigia_mu);
+        ScarEspera *e = scar_vigia_cab;
+        if (!e) { pthread_mutex_unlock(&scar_vigia_mu); return; }
+        if (pthread_mutex_trylock(e->mu) == 0) {
+            // mientras esté en la lista no puede salir de su espera: su canal vive
+            e->vigilar = 1;
+            scar_cond_broadcast(e->cv);
+            pthread_mutex_unlock(e->mu);
+            pthread_mutex_unlock(&scar_vigia_mu);
+            return;
+        }
+        pthread_mutex_unlock(&scar_vigia_mu);
+        struct timespec espera = { .tv_sec = 0, .tv_nsec = 1000 };
+        nanosleep(&espera, NULL);
+    }
+}
+
 static int scar_esperar_cond(ScarCond *cv, pthread_mutex_t *mu, ScarEspera *e) {
     atomic_fetch_add(&scar_hilos_esperando, 1);
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);  // las condvars de canal usan el reloj por defecto
-    ts.tv_nsec += 250000000L;
-    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
     int trabado = 0;
 #ifdef SCAR_PLANIFICADOR
     // con tareas livianas la espera no tiene plazo: el deadlock lo ve el
@@ -466,21 +521,58 @@ static int scar_esperar_cond(ScarCond *cv, pthread_mutex_t *mu, ScarEspera *e) {
         return trabado;
     }
 #endif
-    if (scar_cond_timedwait(cv, mu, &ts) == ETIMEDOUT) {
-        unsigned long p = atomic_load_explicit(&scar_progreso, memory_order_relaxed);
-        if (p == e->visto && atomic_load(&scar_durmiendo) == 0
-            && atomic_load(&scar_hilos_esperando) >= atomic_load(&scar_hilos_vivos)) {
-            if (++e->quietas >= 2) trabado = 1;
+    int libre = 0;
+    if (scar_todos_esperan() && atomic_compare_exchange_strong(&scar_vigia, &libre, 1)) {
+        // la vigía: espera con plazo y confirma
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);  // las condvars de canal usan el reloj por defecto
+        ts.tv_nsec += (long)SCAR_ESPERA_PLAZO_NS;
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        if (scar_cond_timedwait(cv, mu, &ts) == ETIMEDOUT) {
+            unsigned long p = atomic_load_explicit(&scar_progreso, memory_order_relaxed);
+            if (p == e->visto && scar_todos_esperan()) {
+                if (++e->quietas >= 2) trabado = 1;
+            } else {
+                e->quietas = 0;
+                e->visto = p;
+            }
         } else {
-            e->quietas = 0;
-            e->visto = p;
+            e->quietas = 0;  // la despertó algo de verdad
         }
+        atomic_store(&scar_vigia, 0);
+    } else {
+        // sin plazo: la despierta un mensaje, un lugar libre, una cancelación o
+        // el relevo. Se anota bajo su candado (lo tiene: nadie la puede
+        // despertar antes de que esté esperando).
+        e->cv = cv;
+        e->mu = mu;
+        e->vigilar = 0;
+        pthread_mutex_lock(&scar_vigia_mu);
+        e->ant = NULL;
+        e->sig = scar_vigia_cab;
+        if (scar_vigia_cab) scar_vigia_cab->ant = e;
+        scar_vigia_cab = e;
+        pthread_mutex_unlock(&scar_vigia_mu);
+        scar_cond_timedwait(cv, mu, NULL);
+        pthread_mutex_lock(&scar_vigia_mu);
+        if (e->ant) e->ant->sig = e->sig; else scar_vigia_cab = e->sig;
+        if (e->sig) e->sig->ant = e->ant;
+        pthread_mutex_unlock(&scar_vigia_mu);
+        e->quietas = 0;
+        e->visto = ~0UL;
     }
     atomic_fetch_sub(&scar_hilos_esperando, 1);
     return trabado;
 }
 
 static void scar_panic_propio(char *buf) __attribute__((noreturn));
+// gcc 13 con -fsanitize=undefined avisa "null format string" en los vsnprintf
+// de abajo (falso positivo de -Wformat-truncation: sin UBSan no aparece, y fmt
+// nunca es NULL); se apaga solo acá, igual que en scar_aprintf.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
 static void scar_panic(const char *fmt, ...) {
     // sin tope (antes buf[256] cortaba el mensaje). Mide, reserva
     // lo justo y le pasa el bloque a scar_panic_propio.
@@ -497,6 +589,9 @@ static void scar_panic(const char *fmt, ...) {
     va_end(ap2);
     scar_panic_propio(buf);
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 // El panic con un mensaje ya armado en el heap (malloc), del que
 // pasa a ser dueño: con ctx lo guarda el contexto; sin ctx se libera
@@ -670,6 +765,10 @@ static void* scar_join_wait(TaskContext *child_ctx) {
             }
         }
         atomic_fetch_add(&scar_hilos_esperando, 1);  // Join() tambien espera
+        // si con este join quedan todos esperando y nadie vigila (las tareas se
+        // pusieron a esperar antes, mientras esta corría), que alguien vigile:
+        // si no, el deadlock lo daría recién el plazo de join
+        scar_vigia_relevo();
         scar_cond_timedwait_k(&child_ctx->done_cond, &child_ctx->done_mu, &hasta, 1);
         atomic_fetch_sub(&scar_hilos_esperando, 1);
         if (yo) {

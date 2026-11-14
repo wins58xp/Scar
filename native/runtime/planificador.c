@@ -239,6 +239,11 @@ static ScarGiro scar_global_mu;
 static ScarFibra *scar_global_cab = NULL, *scar_global_cola = NULL;
 static atomic_int scar_global_n = 0;
 static atomic_int scar_n_dormidos = 0;
+// trabajadores ya contados como dormidos que todavía miran si hay trabajo (la
+// última mirada antes de dormir, que puede robar una fibra o disparar un
+// plazo): mientras haya alguno, una fibra puede estar en tránsito, fuera de
+// toda cola, y el detector de deadlock no puede concluir nada
+static atomic_int scar_buscando = 0;
 static atomic_int scar_trab_girando = 0;          // trabajadores ociosos girando
 static long long scar_giro_ocioso_ns = 5000;      // cuánto gira uno sin trabajo antes de dormir
 // El trabajador dormido que cuida el próximo plazo (duerme justo hasta que
@@ -817,6 +822,10 @@ static int scar_detectar_deadlock(ScarTrab *t) {
         if (atomic_load_explicit(&scar_trab[i].n, memory_order_relaxed) > 0
             || atomic_load_explicit(&scar_trab[i].siguiente, memory_order_relaxed)) return 0;
     }
+    // después de mirar las colas: un trabajador que robó de una cola que ya se
+    // vio vacía se anotó en scar_buscando antes de robar, así que acá se ve
+    // (un falso deadlock: la fibra robada iba en camino a correr)
+    if (atomic_load(&scar_buscando) != 0) return 0;
     for (int i = 0; i < creados; i++) {
         ScarTrab *v = &scar_trab[i];
         ScarFibra *elegida = NULL;
@@ -888,8 +897,20 @@ static void *scar_bucle_trabajador(void *p) {
         if (mi_bit) atomic_fetch_or(&scar_dormidos_mapa, mi_bit);
         atomic_store(&t->durmiendo, 1);
         scar_barrera();
+        atomic_fetch_add(&scar_buscando, 1);
         f = scar_buscar_trabajo(t, 1000);
-        if (!f && scar_detectar_deadlock(t)) {
+        if (f) {
+            // encontró trabajo: deja de contarse como dormido antes de dejar de
+            // contarse como buscando, así el detector nunca ve un hueco
+            atomic_store(&t->durmiendo, 0);
+            if (mi_bit) atomic_fetch_and(&scar_dormidos_mapa, ~mi_bit);
+            atomic_fetch_sub(&scar_n_dormidos, 1);
+            atomic_fetch_sub(&scar_buscando, 1);
+            scar_cambiar_a_fibra(t, f);
+            continue;
+        }
+        atomic_fetch_sub(&scar_buscando, 1);
+        if (scar_detectar_deadlock(t)) {
             // despertó a una fibra como trabada (o panickeó): volver a mirar
             atomic_store(&t->durmiendo, 0);
             if (mi_bit) atomic_fetch_and(&scar_dormidos_mapa, ~mi_bit);

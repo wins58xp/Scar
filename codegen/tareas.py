@@ -541,6 +541,8 @@ class Tareas:
                 f"    scar_vivos_liberar_registro();\n"
                 f"    atomic_fetch_sub(&scar_hilos_vivos, 1);\n"
                 f"    scar_ctx_mark_done(__scar_task_ctx);\n"
+                # si al irse quedan todos esperando, que alguien vigile
+                f"    scar_vigia_relevo();\n"
             )
         else:
             finished_block = (
@@ -548,6 +550,7 @@ class Tareas:
                 "    scar_vivos_liberar_registro();\n"
                 "    atomic_fetch_sub(&scar_hilos_vivos, 1);\n"
                 "    scar_ctx_mark_done(__scar_task_ctx);\n"
+                "    scar_vigia_relevo();\n"
             )
         return cancel_decref_block, untaken_args_block, hoisted_block, finished_block
 

@@ -1,5 +1,22 @@
 # Cambios
 
+## 0.2.1
+
+Solo arreglos; el lenguaje no cambia: todo programa que corría en 0.2.0 corre
+igual.
+
+- **Arreglo: un falso deadlock con tareas livianas.** Con dos trabajadores, un
+  programa que se pasa valores paso a paso entre tareas podía terminar en
+  "deadlock" sin estarlo (cerca de 1 de cada 8 corridas): el detector no veía una
+  tarea que otro trabajador acababa de tomar para correrla.
+- **Arreglo: con `SCAR_TAREAS=hilos`, miles de tareas esperando ya no ahogan al
+  sistema.** Cada una se despertaba cada 250 ms para mirar si había un deadlock:
+  4.000 tareas esperando gastaban cerca de medio segundo de procesador por cada
+  segundo sin hacer nada, y con 10.000 un programa que ahora termina en unos 3 s
+  tardaba de 7 s a más de un minuto (medido en una máquina de 2 núcleos). Ahora
+  vigila una sola y las demás duermen hasta que pasa algo; un deadlock con miles
+  de tareas se sigue informando en cerca de un segundo.
+
 ## 0.2.0
 
 Tareas livianas. El lenguaje no cambia: los programas se escriben igual. Lo

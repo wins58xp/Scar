@@ -1,0 +1,9 @@
+# espera: no se puede pasar un pedazo de 'w' y, en la misma llamada, 'w' de otra forma
+# La fn podría agrandar w (segundo parámetro) y el pedazo quedaría colgando.
+fn junta(a: Vec<f32>, b: Vec<f32>) {
+    b.push(a[0])
+}
+fn main() {
+    let w: Vec<f32> = [1.0, 2.0]
+    junta(w[0..1], w)
+}

@@ -3,7 +3,7 @@
 de SCAR a C.
 """
 
-from parser import (marca_new_generico, 
+from parser import (marca_new_generico, Parser,
     NumLit, StrLit, BoolLit, Ident, Call, FieldAccess, ArrayLit, MethodCall,
 )
 from types_ import TypeAnn, T_I32, T_STR, T_VOID
@@ -297,7 +297,9 @@ class Metodos:
         name_part = self._mangled_name(inner)
         obj_code = self.gen_expr(expr.obj, env, out, pad)
         if expr.method in ("push", "pop", "set", "replace"):
-            if not self._is_c_lvalue(obj_code):
+            # un lugar que pasa por v[i] (m[i].push(x), red[k].pesos.push(x)) es una
+            # lvalue de C aunque lleve paréntesis (*scar_vec_lugar_...)
+            if not self._is_c_lvalue(obj_code) and not Parser._is_place(expr.obj):
                 raise CodegenError(
                     f"'.{expr.method}()' sobre Vec requiere una variable o campo "
                     f"real (no una expresión intermedia); asignalo a una variable "
@@ -314,8 +316,9 @@ class Metodos:
                     t_idx = self._new_tmp()
                     out.append(f"{pad}int32_t {t_idx} = {idx_pre};")
                     idx_pre = t_idx
-            if inner.name in ("Option", "Result"):
-                # `v.push(None)` necesita saber de qué Option es
+            if inner.name in ("Option", "Result", VEC_MARK, MAP_MARK):
+                # `v.push(None)` necesita saber de qué Option es, y `m.push(vec_new())`
+                # de qué Vec (sin esto salía un Vec<i32> y el C no compilaba)
                 arg_code = self.gen_expr(value_arg, env, out, pad, expected_ty=inner)
             else:
                 arg_code = self.gen_expr(value_arg, env, out, pad)
@@ -407,6 +410,30 @@ class Metodos:
             return f"scar_vec_pop_{name_part}(&{obj_code})"
         if expr.method == "len":
             return f"scar_vec_len_{name_part}({obj_code})"
+        if expr.method == "suma":
+            return f"scar_vec_suma_{name_part}({obj_code})"
+        if expr.method == "punto":
+            otro = self.gen_expr(expr.args[0], env, out, pad)
+            return f"scar_vec_punto_{name_part}({obj_code}, {otro})"
+        if expr.method == "llenar":
+            # v.llenar(x): el Vec (o el pedazo) va por valor y
+            # se escribe por su puntero a los datos. x es una lectura simple (lo pide
+            # el checker), así que no cambia el Vec antes de llenarlo.
+            x = self.gen_expr(expr.args[0], env, out, pad, expected_ty=inner)
+            if ("llenar", name_part) not in self.vec_trozo_defs:
+                self.vec_trozo_defs[("llenar", name_part)] = \
+                    self._vec_c_llenar(name_part, self.c_type(obj_ty), inner)
+            out.append(f"{pad}scar_vec_llenar_{name_part}({obj_code}, {x});")
+            return "((void)0)"
+        if expr.method == "acumular":
+            # el Vec (o el pedazo) va por valor: escribe por su puntero a los datos
+            otro = self.gen_expr(expr.args[0], env, out, pad)
+            k = self.gen_expr(expr.args[1], env, out, pad, expected_ty=inner)
+            if inner.name in ("i32", "i64") and ("acumular", name_part) not in self.vec_trozo_defs:
+                self.vec_trozo_defs[("acumular", name_part)] = \
+                    self._vec_c_acumular_entero(name_part, self.c_type(obj_ty), inner)
+            out.append(f"{pad}scar_vec_acumular_{name_part}({obj_code}, {otro}, {k});")
+            return "((void)0)"
         raise CodegenError(f"Vec no tiene método '.{expr.method}()' en el backend de C")
 
     @staticmethod

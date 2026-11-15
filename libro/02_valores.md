@@ -55,6 +55,7 @@ necesitas cambiar uno, cópialo primero a una variable tuya (`let mut k = n`).
 | `i32`  | `42`, `-7`            | entero de 32 bits: el entero de siempre      |
 | `i64`  | `3000000000`          | entero de 64 bits, para lo que no cabe en un `i32` |
 | `f64`  | `3.14`, `1e-5`        | número real (punto flotante de 64 bits)      |
+| `f32`  | `let x: f32 = 0.5`    | número real de 32 bits: la mitad de memoria, unas 7 cifras |
 | `bool` | `true`, `false`       | verdadero o falso                            |
 | `str`  | `"hola"`              | texto (capítulo 7)                           |
 
@@ -179,6 +180,56 @@ fn main() {
 8000
 ```
 
+### `f32`: decimales de 32 bits
+
+Un `f64` ocupa 8 bytes. Cuando hay millones de números (los pesos de una red
+neuronal, las muestras de un audio, los vértices de un modelo), está `f32`:
+ocupa la mitad, guarda unas 7 cifras en vez de 16, y es el formato de las GPU
+y de casi todas las librerías de IA.
+
+```scar
+fn main() {
+    let a: f32 = 0.1
+    let b: f32 = 0.2
+    print(a + b)                        # en f32
+    print(0.1 + 0.2)                    # en f64
+    print(a * 3, a / 3.0, a < 0.5)
+    let ancho: f64 = a                  # un f32 pasa solo a f64
+    print(ancho)
+    print(to_f32(7), to_f32(2.5))
+}
+```
+
+```
+0.3
+0.30000000000000004
+0.3 0.033333335 true
+0.10000000149011612
+7.0 2.5
+```
+
+Las reglas son las mismas de los otros números:
+
+- Un número escrito toma el tipo que se espera: `let a: f32 = 0.1` guarda el
+  `f32` más cercano a 0,1. También en una cuenta: en `a * 3` y en `a < 0.5`,
+  con `a` un `f32`, el `3` y el `0.5` son `f32`. Uno entero tiene que caber
+  exacto (un `f32` guarda enteros exactos solo hasta 16777216).
+- Un `f32` pasa solo a `f64`, porque no se pierde nada. Una cuenta entre un
+  `f32` y un `f64` da `f64`.
+- Al revés hay que pedirlo: `to_f32(x)` redondea un `f64` al `f32` más
+  cercano, y también convierte un entero. Un `f32` y una variable entera no se
+  mezclan solos: `a + n` con `n` un `i32` es un error, y se escribe
+  `a + to_f32(n)`.
+- `to_i32(x)` y `to_i64(x)` de un `f32` truncan hacia cero, y `to_f64(x)` lo
+  amplía.
+
+Cada cuenta se redondea a 32 bits, igual en el intérprete y en el binario, y
+`print` muestra las cifras que tiene un `f32`: `0.1`, no
+`0.10000000149011612`. Un `f32` va en todo lo que guarda números: campos de
+un struct, `Vec<f32>`, `Map`, `Option`, `Result`, canales y funciones
+genéricas con `Numeric` (capítulo 13). Todavía no cruza a C en una
+`extern fn` (capítulo 14).
+
 Si te equivocas, el compilador te dice qué conversión escribir:
 
 ```scar-error
@@ -221,8 +272,9 @@ fn main() {
 ## 2.7 Funciones matemáticas
 
 Sobre `f64`: `sin`, `cos`, `tan`, `atan`, `exp`, `ln` (logaritmo natural),
-`log10`, `pow(b, e)`, `sqrt` y `floor`. Sobre cualquier número: `abs`, `min` y
-`max` (`abs(-3)` es el entero `3`). Dan exactamente lo mismo en el intérprete y
+`log10`, `pow(b, e)`, `sqrt` y `floor`. Un `f32` entra solo y el resultado es
+un `f64` (se vuelve con `to_f32`, como en `to_f32(sqrt(x))`). Sobre cualquier
+número: `abs`, `min` y `max` (`abs(-3)` es el entero `3`). Dan exactamente lo mismo en el intérprete y
 en el binario.
 
 ```scar

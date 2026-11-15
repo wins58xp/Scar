@@ -360,7 +360,8 @@ class FFI:
         if vecs_c:
             out.append("// Un Vec cruza la frontera como {datos, n}. El que devuelve")
             out.append("// una export fn es de quien llama: lo suelta con scar_liberar_vec(datos).")
-            out.append("void scar_liberar_vec(void* datos) { free(datos); }")
+            out.append("// (el buffer viene del reciclador con su encabezado; vuelve al sistema)")
+            out.append("void scar_liberar_vec(void* datos) { if (datos) free((unsigned char*)datos - SCAR_VBUF_HDR); }")
         for suf, elem in vecs_c.items():
             out.append(f"typedef struct {{ {elem}* datos; int64_t n; }} ScarVecC_{suf};")
             out.append(f"static Vec_{suf} scar_vec_de_c_{suf}(ScarVecC_{suf} c) {{")

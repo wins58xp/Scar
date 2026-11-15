@@ -61,7 +61,7 @@ BUILTIN_METHODS = {
     "File": ["read_all", "read_bytes", "write", "write_bytes", "close"],
     "Socket": ["read", "read_bytes", "write", "write_bytes", "close"],
     "Listener": ["accept", "close"],
-    "Vec": ["push", "get", "pop", "set", "replace", "len"],
+    "Vec": ["push", "get", "pop", "set", "replace", "len", "suma", "punto", "acumular", "llenar"],
     "Map": ["set", "get", "remove", "len"],
     "str": ["len", "contains", "starts_with", "ends_with"],
 }

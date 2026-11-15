@@ -52,6 +52,13 @@ todas las tareas se reparten entre ellos, con la misma cancelación y los
 mismos límites de tiempo que en el intérprete. Crear una tarea cuesta menos
 de un microsegundo y unos 10 kB de memoria.
 
+La memoria del binario tampoco va al sistema operativo cada vez: los textos,
+los structs y los `Vec` que se sueltan quedan en una lista de su hilo y se
+reusan (capítulo 8), y lo que sobra pasa en lotes de un hilo a otro. Con una
+tarea que arma datos y otra que los suelta, eso es la diferencia entre
+millones de llamadas al sistema por segundo y unas pocas miles en todo el
+programa.
+
 ## 12.3 Cómo se sabe que los dos dan lo mismo
 
 No se confía en que "debería": se mide. Mientras se desarrolla SCAR, cada

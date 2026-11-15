@@ -11,7 +11,8 @@ from parser import (marca_new_generico, elemento_de_pop,
 )
 from types_ import T_I32, T_STR
 from fresh_owned import (
-    es_compuesto_de_struct, resolve_consumed_option_params, resolve_consumed_params, resolve_fn_ownership,
+    es_compuesto_de_struct, resolve_consumed_option_params, resolve_consumed_params, resolve_contenedores_prestados,
+    resolve_fn_ownership,
 )
 
 from .comun import (
@@ -39,7 +40,8 @@ class Frescura:
         s[i] (scar_str_index) o un campo str sacado de un struct temporal. La
         misma condición que usa _let_creates_fresh_owner."""
         if isinstance(expr, IndexExpr):
-            return True
+            # s[i] reserva un str nuevo; v[i] de un Vec de números da un número
+            return self.infer(expr.obj, env).name == "str"
         if isinstance(expr, FieldAccess):
             # un campo str sacado de un struct temporal
             info = self._campo_de_temporal(expr, env)
@@ -335,7 +337,12 @@ class Frescura:
         for item in self._concrete_fn_items():
             if not item.is_task and item.name in self.fn_sigs:
                 fns[item.name] = (item, self.fn_sigs[item.name][0])
-        self.consumed_params = resolve_consumed_params(fns, lambda t: t.name in self.structs, self.structs)
+        # Los Vec/Map que cada fn normal recibe prestados (la misma tabla que el
+        # checker). Las instancias de las fn genéricas no están: reciben movido.
+        from type_checker import NOMBRES_BUILTIN
+        self.contenedores_prestados = resolve_contenedores_prestados(self.program.items, NOMBRES_BUILTIN)
+        self.consumed_params = resolve_consumed_params(fns, lambda t: t.name in self.structs, self.structs,
+                                                       prestados=self.contenedores_prestados)
         self.consumed_option_params = resolve_consumed_option_params(
             fns, lambda t: es_compuesto_de_struct(t, self.structs))
 

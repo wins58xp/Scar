@@ -1,0 +1,19 @@
+# espera: no se puede pasar 'r.capa' y, en la misma llamada, lo que lo contiene
+# f() reemplaza r.capa entero mientras 'c' es ese struct prestado: el binario leería
+# memoria ya soltada.
+struct Capa {
+    pesos: Vec<f64>
+    n: i32
+}
+struct Red {
+    capa: Capa
+    extra: Vec<f64>
+}
+fn f(r: Red, c: Capa) -> f64 {
+    r.capa = Capa { pesos: [9.0, 9.0, 9.0], n: 5 }
+    return c.pesos[0]
+}
+fn main() {
+    let r = Red { capa: Capa { pesos: [1.0, 2.0], n: 0 }, extra: [0.5] }
+    print(f(r, r.capa))
+}

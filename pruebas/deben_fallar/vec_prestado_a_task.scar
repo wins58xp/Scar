@@ -1,0 +1,14 @@
+# espera: lanzar() se queda con su parámetro 'v' porque se lo pasa a una task con spawn
+# Una fn que manda su Vec a una task se queda con él: quien la llama lo pierde.
+task contar(v: Vec<i32>) -> i32 {
+    return v.len()
+}
+fn lanzar(v: Vec<i32>) -> i32 {
+    let t = spawn contar(v)
+    return t.join()
+}
+fn main() {
+    let w = [1, 2, 3]
+    print(lanzar(w))
+    print(w.len())
+}

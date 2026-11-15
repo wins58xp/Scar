@@ -1,0 +1,9 @@
+# espera: 'v' no puede cambiar de largo mientras se usa el pedazo 'p'
+# Mientras p se usa, v no puede crecer: su buffer se movería y p quedaría
+# mirando memoria suelta. (Después de la última línea que nombra a p, sí.)
+fn main() {
+    let v = [1, 2, 3]
+    let p = v[0..2]
+    v.push(4)
+    print(p)
+}

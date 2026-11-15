@@ -1,0 +1,12 @@
+# espera: toma un pedazo de algo que está adentro de 'a'
+# f() toma un pedazo de una fila de 'a' y agranda una fila de 'b'. 'b' no cambia
+# de largo, pero si es la misma matriz, la fila que el pedazo mira se muda.
+fn f(a: Vec<Vec<f64>>, b: Vec<Vec<f64>>) -> f64 {
+    let q = a[0][0..1]
+    b[0].push(1.0)
+    return q[0]
+}
+fn main() {
+    let m: Vec<Vec<f64>> = [[1.0, 2.0], [3.0]]
+    print(f(m, m))
+}

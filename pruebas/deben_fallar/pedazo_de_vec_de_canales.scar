@@ -1,0 +1,6 @@
+# espera: por ahora 'v[a..b]' es para un Vec de números, bool, str, structs o Vec
+fn main() {
+    let cs: Vec<Chan<i32>> = []
+    let p = cs[0..0]
+    print(p.len())
+}

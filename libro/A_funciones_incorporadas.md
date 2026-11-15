@@ -45,9 +45,10 @@ lenguaje, que acepta cualquier cantidad de valores de cualquier tipo.
 | `floor(x: f64) -> f64` | redondea hacia abajo: `floor(-2.5)` es `-3.0` |
 | `abs(x) -> el tipo de x` | valor absoluto; de un entero es exacto, y el del entero más chico (que no tiene positivo) es un panic |
 | `min(a, b)`, `max(a, b)` | el menor / mayor; el tipo sigue la regla de una suma (`i32` con `i64` da `i64`); con NaN devuelven el primero |
-| `to_i32(x) -> i32` | de un `f64`, trunca hacia cero (`3.99` → 3, `-3.99` → -3); de un `i64`, lo deja igual; `nan` o un valor que no entra en `i32` es un panic |
-| `to_i64(x) -> i64` | de un `i32`, siempre cabe; de un `f64`, trunca hacia cero; `nan` o un valor que no entra es un panic |
-| `to_f64(n) -> f64` | convierte un `i32` o un `i64` a `f64` (un `i64` de más de 2^53 puede perder precisión) |
+| `to_i32(x) -> i32` | de un `f64` o un `f32`, trunca hacia cero (`3.99` → 3, `-3.99` → -3); de un `i64`, lo deja igual; `nan` o un valor que no entra en `i32` es un panic |
+| `to_i64(x) -> i64` | de un `i32`, siempre cabe; de un `f64` o un `f32`, trunca hacia cero; `nan` o un valor que no entra es un panic |
+| `to_f64(n) -> f64` | convierte un `i32`, un `i64` o un `f32` a `f64` (un `i64` de más de 2^53 puede perder precisión) |
+| `to_f32(x) -> f32` | redondea un `f64` al `f32` más cercano (lo que no cabe es `inf`), o convierte un entero |
 | `rand() -> f64` | número al azar en [0, 1), el mismo generador en los dos backends |
 | `seed(n: i32)` | fija la semilla de `rand()` de la tarea actual (las tareas que cree después derivan la suya de esta) |
 
@@ -60,7 +61,7 @@ Todas siguen las reglas de `f64` (IEEE 754): un resultado fuera de rango es
 | Función | Qué hace |
 |---|---|
 | `len(s: str) -> i32` | cantidad de caracteres (no de bytes): `len("ñandú")` es 5 |
-| `a_texto(x) -> str` | un `i32`, `i64`, `f64`, `bool` o `str` como texto, igual que lo imprime `print`: `a_texto(2.5)` es `"2.5"` |
+| `a_texto(x) -> str` | un `i32`, `i64`, `f64`, `f32`, `bool` o `str` como texto, igual que lo imprime `print`: `a_texto(2.5)` es `"2.5"` |
 | `chr(n: i32) -> str` | el carácter de código Unicode `n`: `chr(8364)` es `"€"` (§7.3) |
 | `ord(s: str) -> i32` | el código del primer carácter: `ord("€")` es 8364 |
 | `int(s: str) -> Result<i32>` | texto a entero: `Ok(42)`, o `Err(...)` si no es un número; acepta espacios al principio y al final y un signo; fuera de `i32` es `Err` |

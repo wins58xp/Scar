@@ -122,8 +122,8 @@ class _Bajador:
         n = t.name
         if n in ("i32", "i64"):
             return _pos(NumLit(0), src)  # en un lugar i64, el checker lo amplía
-        if n == "f64":
-            return _pos(NumLit(0.0), src)
+        if n in ("f64", "f32"):
+            return _pos(NumLit(0.0), src)  # en un lugar f32, el checker lo marca f32
         if n == "bool":
             return _pos(BoolLit(False), src)
         if n == "str":

@@ -1,0 +1,11 @@
+# espera: 'red[0].pesos' no puede cambiar de largo mientras se usa el pedazo 'w'
+struct Capa {
+    pesos: Vec<f64>
+}
+fn main() {
+    let red: Vec<Capa> = [Capa { pesos: [1.0, 2.0] }]
+    let c = red[0..1]
+    let w = c[0].pesos[0..1]
+    c.set(0, Capa { pesos: [] })
+    print(w[0])
+}

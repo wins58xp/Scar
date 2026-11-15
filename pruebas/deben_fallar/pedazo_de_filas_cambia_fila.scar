@@ -1,0 +1,8 @@
+# espera: acá se cambia el elemento 'm[0]', y eso suelta el que había
+fn main() {
+    let m: Vec<Vec<f64>> = [[1.0, 2.0], [3.0]]
+    let p = m[0..2]
+    let q = p[0][0..1]
+    p.set(0, [9.0])
+    print(q[0])
+}

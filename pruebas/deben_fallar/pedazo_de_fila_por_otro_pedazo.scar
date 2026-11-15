@@ -1,0 +1,9 @@
+# espera: 'm[0]' no puede cambiar de largo mientras se usa el pedazo 'q'
+# 'q' se tomó de 'p[0]', que es la fila 'm[0]': agrandar 'm[0]' la muda.
+fn main() {
+    let m: Vec<Vec<f64>> = [[1.0, 2.0], [3.0]]
+    let p = m[0..2]
+    let q = p[0][0..1]
+    m[0].push(1.0)
+    print(q[0])
+}

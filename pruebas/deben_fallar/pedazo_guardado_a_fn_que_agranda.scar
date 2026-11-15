@@ -1,0 +1,9 @@
+# espera: a agrega() no se le puede pasar un pedazo en 'v': puede cambiarle el largo
+fn agrega(v: Vec<i32>) {
+    v.push(1)
+}
+fn main() {
+    let v = [1, 2, 3]
+    let p = v[0..2]
+    agrega(p)
+}

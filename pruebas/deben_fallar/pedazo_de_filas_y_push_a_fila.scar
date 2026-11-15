@@ -1,0 +1,9 @@
+# espera: 'm[0]' no puede cambiar de largo mientras se usa el pedazo 'q'
+# 'p' es un pedazo de las filas de 'm': 'p[0]' es la fila 'm[0]', la que 'q' mira.
+fn main() {
+    let m: Vec<Vec<f64>> = [[1.0, 2.0], [3.0]]
+    let p = m[0..2]
+    let q = m[0][0..1]
+    p[0].push(1.0)
+    print(q[0])
+}

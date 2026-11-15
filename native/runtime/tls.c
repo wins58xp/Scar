@@ -37,6 +37,10 @@ typedef struct ScarHilo {
     // del hilo
     unsigned int progreso_local;
     struct ScarPoolNode *pool_freelist[SCAR_POOL_NUM_CLASSES];
+    int pool_n[SCAR_POOL_NUM_CLASSES];
+    // con varios hilos, la segunda lista de cada clase (pool_allocator.c)
+    struct ScarPoolNode *pool_previo[SCAR_POOL_NUM_CLASSES];
+    int pool_previo_n[SCAR_POOL_NUM_CLASSES];
     int pool_registered;
     struct ScarTrab *trab;
     volatile sig_atomic_t guard_active;
@@ -64,6 +68,9 @@ typedef struct ScarHilo {
 #define scar_strc_ult (scar_tls()->strc_ult)
 #define scar_progreso_local (scar_tls()->progreso_local)
 #define scar_pool_freelist (scar_tls()->pool_freelist)
+#define scar_pool_n (scar_tls()->pool_n)
+#define scar_pool_previo (scar_tls()->pool_previo)
+#define scar_pool_previo_n (scar_tls()->pool_previo_n)
 #define scar_pool_registered (scar_tls()->pool_registered)
 #define scar_yo (scar_tls()->trab)
 #define scar_extern_guard_active (scar_tls()->guard_active)

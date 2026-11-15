@@ -1,0 +1,98 @@
+# Capítulo 18: un cerebro de miles de regiones. Cada región es una tarea con su
+# modelo y su cinta de vectores (lib/autodiff); main es el router que en cada
+# paso le manda una muestra a cada una por un canal con tope y espera las
+# respuestas de todas. Sin argumentos lanza 8 regiones; con un número, esas:
+#     scar build ejemplos/18_muchas_regiones.scar -o /tmp/r && /tmp/r 10000
+use "autodiff"
+
+struct Muestra {
+    x: Vec<f32>
+    y: f32
+}
+
+struct Respuesta {
+    region: i32
+    perdida: f32
+}
+
+task region(id: i32, entrada: Chan<Muestra>, salida: Chan<Respuesta>) -> i32 {
+    let c = autodiff.cinta_v()
+    let w = autodiff.v_parametro(c, 1, 2, [0.0, 0.0])
+    let b = autodiff.v_parametro(c, 1, 1, [0.0])
+    let mut n = 0
+    while let Some(m) = entrada.recv() {
+        autodiff.v_reiniciar(c)
+        let x = autodiff.v_constante(c, m.x)
+        let z = autodiff.v_sigmoide(c, autodiff.v_suma(c, autodiff.v_matvec(c, w, x), b))
+        let objetivo = autodiff.v_constante(c, [m.y])
+        let perdida = autodiff.v_ecm(c, z, objetivo)
+        autodiff.v_derivar(c, perdida)
+        autodiff.v_aprender(c, 2.0)
+        salida.send(Respuesta { region: id, perdida: autodiff.v_valor_en(c, perdida, 0) })
+        n = n + 1
+    }
+    return n
+}
+
+# la muestra del paso p para la región r: un punto (a, b) y su clase
+fn muestra(r: i32, p: i32) -> Muestra {
+    let a = to_f32((p * 37 + r * 11) % 41) / 20.0 - 1.0
+    let b = to_f32((p * 53 + r * 7) % 43) / 21.0 - 1.0
+    let mut y: f32 = 0.0
+    if r % 2 == 0 and a > b {
+        y = 1.0
+    }
+    if r % 2 == 1 and a + b > 0.0 {
+        y = 1.0
+    }
+    return Muestra { x: [a, b], y: y }
+}
+
+fn main() {
+    let mut regiones = 8
+    match arg(0) {
+        Some(t) => { regiones = int(t).unwrap_or(8) }
+        None => {}
+    }
+    let pasos = 60
+    let salida: Chan<Respuesta> = chan_new()
+    let mut canales: Vec<Chan<Muestra>> = vec_new()
+    let mut tareas: Vec<Task<i32, region>> = vec_new()
+    for r in 0..regiones {
+        let e: Chan<Muestra> = chan_new(2)
+        tareas.push(spawn region(r, e, salida))
+        canales.push(e)
+    }
+    let mut perdidas: Vec<f32> = vec_new()
+    for r in 0..regiones {
+        perdidas.push(0.0)
+    }
+    for p in 0..pasos {
+        for r in 0..regiones {
+            match canales.get(r) {
+                Some(e) => e.send(muestra(r, p)),
+                None => {}
+            }
+        }
+        for k in 0..regiones {
+            match salida.recv() {
+                Some(resp) => { perdidas[resp.region] = resp.perdida }
+                None => {}
+            }
+        }
+        if p == 0 or p == pasos - 1 {
+            print("vuelta", p, "pérdida media:", perdidas.suma() / to_f32(regiones))
+        }
+    }
+    for r in 0..regiones {
+        match canales.get(r) {
+            Some(e) => e.close(),
+            None => {}
+        }
+    }
+    let mut total = 0
+    while let Some(t) = tareas.pop() {
+        total = total + t.join()
+    }
+    print("muestras aprendidas:", total)
+}

@@ -1,0 +1,11 @@
+# espera: no se puede pasar un pedazo de 'm' y, en la misma llamada, 'm' de otra forma a dos()
+# dos() mira una fila de 'a' por adentro y agranda una fila de 'b'.
+fn dos(a: Vec<Vec<f64>>, b: Vec<Vec<f64>>) -> f64 {
+    let q = a[0][0..1]
+    b[0].push(1.0)
+    return q[0]
+}
+fn main() {
+    let m: Vec<Vec<f64>> = [[1.0, 2.0], [3.0]]
+    print(dos(m[0..1], m[0..2]))
+}

@@ -35,6 +35,10 @@ class Node:
     # cada cuenta entera (BinOp, '-' unario), y el valor de un `-N` plegado.
     tipo_int = None
     literal_plegado = None
+    # Un literal usado como f32 (`let x: f32 = 0.5`, `x * 2.0` con x: f32):
+    # el checker guarda acá su valor ya redondeado a f32 (types_.literal_f32).
+    # En un '-' unario, que su literal es f32.
+    lit_f32 = None
     # Un uso de una variable que una vuelta anterior del loop pudo
     # mover (en una sola rama de un if): se comprueba en tiempo de ejecución
     # (verificar_movida); y un movimiento de esa variable, que lo anota
@@ -256,11 +260,20 @@ class FieldAccess(Node):
     def __init__(self, obj, field): self.obj = obj; self.field = field
 
 class IndexExpr(Node):
-    """s[i]: indexado por posición, hoy solo sobre str (indexado de
-    caracteres). Fuera de rango es panic en runtime (intérprete/backend C),
+    """s[i] o v[i]: indexado por posición, sobre un str (el carácter i, como
+    otro str) o un Vec de números o bool (el elemento i). Fuera de rango es panic en runtime (intérprete/backend C),
     no un tipo Option/Result -- misma familia que un acceso a campo
-    inexistente, no un caso "esperable" que el programa deba manejar."""
+    inexistente, no un caso "esperable" que el programa deba manejar.
+    `v[i] = x` no llega acá: el parser lo baja a `v.set(i, x)`."""
     def __init__(self, obj, index): self.obj = obj; self.index = index
+
+class SliceExpr(Node):
+    """v[a..b]: el pedazo de un Vec de números que va de a (incluido) a b (sin
+    incluir), sin copiarlo. Por ahora solo
+    se usa con .suma(), .punto() y .acumular(): `w[a..b].punto(x)`,
+    `x.punto(w[a..b])`, `w[a..b].acumular(x, k)`. Fuera
+    de rango (o a > b) es panic, como v[i]."""
+    def __init__(self, obj, desde, hasta): self.obj = obj; self.desde = desde; self.hasta = hasta
 
 class StructLit(Node):
     def __init__(self, name, fields): self.name = name; self.fields = fields
@@ -771,12 +784,20 @@ class Parser:
         expr = self.parse_expr()
         if self.check("sym", "="):
             self.advance()
+            if isinstance(expr, IndexExpr) and self._is_place(expr.obj):
+                # `v[i] = x` es `v.set(i, x)`: misma regla en los dos backends (panic fuera de rango, libera
+                # lo que había). La marca deja al checker decir el error con la
+                # forma que escribió el programa (sobre un str, por ejemplo).
+                value = self.parse_expr()
+                llamada = MethodCall(expr.obj, "set", [expr.index, value]).at(start_tok)
+                llamada.desde_indice = True
+                return ExprStmt(llamada).at(start_tok)
             if not self._is_place(expr):
                 t = self.peek(-1)
                 raise ParseError(
-                    "el lado izquierdo de '=' debe ser una variable o un "
-                    f"acceso a campo (ej. 'x' o 'x.campo'), no una llamada u "
-                    f"otra expresión, en línea {t.line}",
+                    "el lado izquierdo de '=' debe ser una variable, un "
+                    f"acceso a campo o un elemento de un Vec (ej. 'x', 'x.campo' o "
+                    f"'v[i]'), no una llamada u otra expresión, en línea {t.line}",
                     t.line, t.col,
                 )
             value = self.parse_expr()
@@ -785,6 +806,7 @@ class Parser:
 
     @staticmethod
     def _is_place(expr):
+        # (también v[i] sobre un lugar: `m[i][j] = x`, `red[i].peso = x`)
         """Ver GRAMMAR.md §5.1: solo Ident y cadenas de FieldAccess sobre un
         Ident son targets válidos de asignación. Antes esto era 'cualquier
         Expr' a nivel de gramática y solo fallaba en runtime, con un error
@@ -792,6 +814,8 @@ class Parser:
         if isinstance(expr, Ident):
             return True
         if isinstance(expr, FieldAccess):
+            return Parser._is_place(expr.obj)
+        if isinstance(expr, IndexExpr):
             return Parser._is_place(expr.obj)
         return False
 
@@ -1036,10 +1060,18 @@ class Parser:
                 self.no_struct_literal = False
                 try:
                     idx = self.parse_expr()
+                    hasta = None
+                    if self.check("sym", ".."):
+                        # v[a..b]: un pedazo
+                        self.advance()
+                        hasta = self.parse_expr()
                 finally:
                     self.no_struct_literal = prev
                 self.expect("sym", "]")
-                expr = IndexExpr(expr, idx).at(start_tok)
+                if hasta is not None:
+                    expr = SliceExpr(expr, idx, hasta).at(start_tok)
+                else:
+                    expr = IndexExpr(expr, idx).at(start_tok)
             else:
                 break
         return expr
@@ -1188,7 +1220,8 @@ def _if_como_expr(st):
 # otra forma, se agrega acá y lo ven todos.
 _ATRIBUTOS_NO_HIJOS = ("line", "col", "promover_f64", "promover_i64", "tipo_int",
                        "literal_plegado", "tipo_origen", "tipo_var", "archivo", "tipo_lugar",
-                       "devuelve_str", "tipo_elem", "tipo_if", "tipo_visto", "tipo_replace")
+                       "devuelve_str", "tipo_elem", "tipo_if", "tipo_visto", "tipo_replace",
+                       "lit_f32")
 
 
 def hijos(node):

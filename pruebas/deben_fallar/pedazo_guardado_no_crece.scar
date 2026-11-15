@@ -1,0 +1,7 @@
+# espera: un pedazo no se agranda ni se achica: no se le puede hacer .push()
+# Un pedazo guardado es una vista de otro Vec: se lee y se escribe, no crece.
+fn main() {
+    let v = [1, 2, 3]
+    let p = v[0..2]
+    p.push(4)
+}

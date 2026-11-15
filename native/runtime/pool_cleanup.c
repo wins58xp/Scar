@@ -12,6 +12,15 @@ static void scar_pool_reclaim(void *unused) {
             node = next;
         }
         scar_pool_freelist[i] = NULL;
+        scar_pool_n[i] = 0;
+        node = scar_pool_previo[i];
+        while (node != NULL) {
+            ScarPoolNode *next = node->next;
+            free(node);
+            node = next;
+        }
+        scar_pool_previo[i] = NULL;
+        scar_pool_previo_n[i] = 0;
     }
 }
 

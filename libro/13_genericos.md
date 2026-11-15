@@ -90,7 +90,7 @@ es.
 ## 13.3 `T: Numeric`
 
 Para hacer cuentas con un `T`, se le pone el *bound* `Numeric`: entonces `T`
-solo puede ser `i32`, `i64` o `f64`, y valen `+ - * /` y `< > <= >=`:
+solo puede ser `i32`, `i64`, `f64` o `f32`, y valen `+ - * /` y `< > <= >=`:
 
 ```scar
 fn suma<T: Numeric>(v: Vec<T>, cero: T) -> T {

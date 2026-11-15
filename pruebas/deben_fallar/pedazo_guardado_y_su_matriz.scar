@@ -1,0 +1,10 @@
+# espera: 'm[0]' no puede cambiar de largo mientras se usa el pedazo 'fila'
+# espera: acá se cambia el elemento 'm[0]', y eso suelta el que había
+# Cambiar una fila de la matriz suelta la fila vieja, que el pedazo mira.
+fn main() {
+    let m: Vec<Vec<f64>> = [[1.0, 2.0], [3.0]]
+    let fila = m[0][0..2]
+    let otra: Vec<f64> = [9.0]
+    m[0] = otra
+    print(fila)
+}

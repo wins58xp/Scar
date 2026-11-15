@@ -9,7 +9,7 @@ fn main() {
     total = total + precio * 3
     print("total:", total)
 
-    # los cinco tipos básicos
+    # los tipos básicos
     let entero = 42
     let grande: i64 = 9000000000
     let real = 3.5
@@ -23,6 +23,10 @@ fn main() {
     # lo que puede perder algo se convierte a mano
     let promedio = to_f64(total) / to_f64(3)
     print("promedio:", promedio, "redondeado hacia cero:", to_i32(promedio))
+
+    # f32: la mitad de memoria que un f64, unas 7 cifras
+    let peso: f32 = 0.1
+    print("f32:", peso + 0.2, "f64:", 0.1 + 0.2, "f32 a f64:", to_f64(peso))
 
     # bits: separar los tres bytes de un color 0xFF8800
     let color = 16746496

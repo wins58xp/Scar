@@ -1,0 +1,9 @@
+# espera: a agrega() no se le puede pasar un pedazo en 'v': puede cambiarle el largo
+# Un pedazo no se agranda: no va a una fn que le hace push.
+fn agrega(v: Vec<f32>) {
+    v.push(1.0)
+}
+fn main() {
+    let w: Vec<f32> = [1.0, 2.0]
+    agrega(w[0..1])
+}

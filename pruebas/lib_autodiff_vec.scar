@@ -1,0 +1,620 @@
+# lib/autodiff, la cinta de vectores en f32 (CintaV): cada operación y una red
+# de dos capas, contra la cinta de números en f64 haciendo la misma cuenta
+# número por número (una implementación independiente). La diferencia que
+# queda es la de redondear a f32.
+use "autodiff"
+use "prueba"
+
+fn datos(n: i32, semilla: i32) -> Vec<f32> {
+    # números entre -1 y 1, siempre los mismos
+    let mut v: Vec<f32> = vec_new()
+    let mut s = semilla
+    let mut i = 0
+    while i < n {
+        s = (s * 1103 + 12345) % 65536
+        v.push(to_f32(s) / 32768.0 - 1.0)
+        i = i + 1
+    }
+    return v
+}
+
+# La misma cuenta en las dos cintas. `cual`: 1 suma, 2 resta, 3 mul, 4 escalar,
+# 5 tanh, 6 sigmoide, 7 relu, 8 punto, 9 ecm, 0 la red de dos capas.
+# En la de vectores, devuelve el índice del resultado; en la de números, deja
+# en `sal` los índices de cada número de cada entrada (para leer gradientes).
+fn armar_v(c: autodiff.CintaV, a: i32, b: i32, w: i32, bias: i32, v2: i32, cual: i32) -> i32 {
+    if cual == 1 {
+        return autodiff.v_total(c, autodiff.v_suma(c, a, b))
+    }
+    if cual == 2 {
+        return autodiff.v_punto(c, autodiff.v_resta(c, a, b), b)
+    }
+    if cual == 3 {
+        return autodiff.v_punto(c, autodiff.v_mul(c, a, b), a)
+    }
+    if cual == 4 {
+        return autodiff.v_punto(c, autodiff.v_escalar(c, a, 2.5), b)
+    }
+    if cual == 5 {
+        return autodiff.v_punto(c, autodiff.v_tanh(c, a), b)
+    }
+    if cual == 6 {
+        return autodiff.v_punto(c, autodiff.v_sigmoide(c, a), b)
+    }
+    if cual == 7 {
+        return autodiff.v_punto(c, autodiff.v_relu(c, a), b)
+    }
+    if cual == 8 {
+        return autodiff.v_punto(c, a, b)
+    }
+    if cual == 9 {
+        return autodiff.v_ecm(c, a, b)
+    }
+    # y = tanh(W·a + bias); z = sigmoide(V·y); pérdida = ecm(z, b[0..2])
+    let y = autodiff.v_tanh(c, autodiff.v_suma(c, autodiff.v_matvec(c, w, a), bias))
+    let z = autodiff.v_sigmoide(c, autodiff.v_matvec(c, v2, y))
+    let objetivo = autodiff.v_constante(c, [0.25, 0.75])
+    return autodiff.v_ecm(c, z, objetivo)
+}
+
+fn nombre_de(k: i32) -> str {
+    if k == 1 { return "suma" }
+    if k == 2 { return "resta" }
+    if k == 3 { return "mul" }
+    if k == 4 { return "escalar" }
+    if k == 5 { return "tanh" }
+    if k == 6 { return "sigmoide" }
+    if k == 7 { return "relu" }
+    if k == 8 { return "punto" }
+    if k == 9 { return "ecm" }
+    return "red de dos capas"
+}
+
+fn cargar(c: autodiff.Cinta, v: Vec<f32>) -> Vec<i32> {
+    let mut ids: Vec<i32> = vec_new()
+    let mut i = 0
+    while i < v.len() {
+        ids.push(autodiff.variable(c, v[i]))
+        i = i + 1
+    }
+    return ids
+}
+
+fn punto_s(c: autodiff.Cinta, a: Vec<i32>, b: Vec<i32>) -> i32 {
+    let mut s = autodiff.mul(c, a[0], b[0])
+    let mut i = 1
+    while i < a.len() {
+        s = autodiff.suma(c, s, autodiff.mul(c, a[i], b[i]))
+        i = i + 1
+    }
+    return s
+}
+
+fn matvec_s(c: autodiff.Cinta, w: Vec<i32>, filas: i32, x: Vec<i32>) -> Vec<i32> {
+    let n = x.len()
+    let mut r: Vec<i32> = vec_new()
+    let mut f = 0
+    while f < filas {
+        let mut s = autodiff.mul(c, w[f * n], x[0])
+        let mut j = 1
+        while j < n {
+            s = autodiff.suma(c, s, autodiff.mul(c, w[f * n + j], x[j]))
+            j = j + 1
+        }
+        r.push(s)
+        f = f + 1
+    }
+    return r
+}
+
+fn armar_s(c: autodiff.Cinta, a: Vec<i32>, b: Vec<i32>, w: Vec<i32>, bias: Vec<i32>, v2: Vec<i32>, cual: i32) -> i32 {
+    let n = a.len()
+    let mut r: Vec<i32> = vec_new()
+    let mut i = 0
+    if cual == 1 {
+        while i < n {
+            r.push(autodiff.suma(c, a[i], b[i]))
+            i = i + 1
+        }
+        let mut s = r[0]
+        let mut k = 1
+        while k < n {
+            s = autodiff.suma(c, s, r[k])
+            k = k + 1
+        }
+        return s
+    }
+    if cual == 8 {
+        return punto_s(c, a, b)
+    }
+    if cual == 9 {
+        let mut s = autodiff.cuadrado(c, autodiff.resta(c, a[0], b[0]))
+        let mut k = 1
+        while k < n {
+            s = autodiff.suma(c, s, autodiff.cuadrado(c, autodiff.resta(c, a[k], b[k])))
+            k = k + 1
+        }
+        return autodiff.escalar(c, s, 1.0 / to_f64(n))
+    }
+    if cual >= 2 and cual <= 7 {
+        while i < n {
+            if cual == 2 {
+                r.push(autodiff.resta(c, a[i], b[i]))
+            } else if cual == 3 {
+                r.push(autodiff.mul(c, a[i], b[i]))
+            } else if cual == 4 {
+                r.push(autodiff.escalar(c, a[i], 2.5))
+            } else if cual == 5 {
+                r.push(autodiff.tanh(c, a[i]))
+            } else if cual == 6 {
+                r.push(autodiff.sigmoide(c, a[i]))
+            } else {
+                r.push(autodiff.relu(c, a[i]))
+            }
+            i = i + 1
+        }
+        if cual == 3 {
+            return punto_s(c, r, a)
+        }
+        return punto_s(c, r, b)
+    }
+    let wx = matvec_s(c, w, 3, a)
+    let mut y: Vec<i32> = vec_new()
+    while i < 3 {
+        y.push(autodiff.tanh(c, autodiff.suma(c, wx[i], bias[i])))
+        i = i + 1
+    }
+    let vy = matvec_s(c, v2, 2, y)
+    let z0 = autodiff.sigmoide(c, vy[0])
+    let z1 = autodiff.sigmoide(c, vy[1])
+    let e0 = autodiff.cuadrado(c, autodiff.resta(c, z0, autodiff.constante(c, 0.25)))
+    let e1 = autodiff.cuadrado(c, autodiff.resta(c, z1, autodiff.constante(c, 0.75)))
+    return autodiff.escalar(c, autodiff.suma(c, e0, e1), 0.5)
+}
+
+fn comparar(t: prueba.Prueba, cv: autodiff.CintaV, iv: i32, cs: autodiff.Cinta, ids: Vec<i32>, que: str) {
+    let mut k = 0
+    while k < ids.len() {
+        let gv = to_f64(autodiff.v_gradiente_en(cv, iv, k))
+        let gs = autodiff.gradiente(cs, ids[k])
+        prueba.afirmar_cerca(t, gv, gs, 0.00002 * (1.0 + abs(gs)), que + " [" + a_texto(k) + "]")
+        k = k + 1
+    }
+}
+
+fn probar(t: prueba.Prueba, cual: i32, nombre: str, semilla: i32) {
+    let va = datos(4, semilla)
+    let vb = datos(4, semilla + 7)
+    let vw = datos(12, semilla + 13)
+    let vbias = datos(3, semilla + 19)
+    let vv = datos(6, semilla + 23)
+    let cv = autodiff.cinta_v()
+    let a = autodiff.v_variable(cv, va)
+    let b = autodiff.v_variable(cv, vb)
+    let w = autodiff.v_matriz(cv, 3, 4, vw)
+    let bias = autodiff.v_variable(cv, vbias)
+    let v2 = autodiff.v_matriz(cv, 2, 3, vv)
+    let rv = armar_v(cv, a, b, w, bias, v2, cual)
+    autodiff.v_derivar(cv, rv)
+    let cs = autodiff.cinta()
+    let sa = cargar(cs, va)
+    let sb = cargar(cs, vb)
+    let sw = cargar(cs, vw)
+    let sbias = cargar(cs, vbias)
+    let sv = cargar(cs, vv)
+    let rs = armar_s(cs, sa, sb, sw, sbias, sv, cual)
+    autodiff.derivar(cs, rs)
+    let valor = autodiff.valor(cs, rs)
+    prueba.afirmar_cerca(t, to_f64(autodiff.v_valor_en(cv, rv, 0)), valor, 0.00002 * (1.0 + abs(valor)), nombre + ": valor")
+    comparar(t, cv, a, cs, sa, nombre + ": d/da")
+    comparar(t, cv, b, cs, sb, nombre + ": d/db")
+    if cual == 0 {
+        comparar(t, cv, w, cs, sw, nombre + ": d/dW")
+        comparar(t, cv, bias, cs, sbias, nombre + ": d/dbias")
+        comparar(t, cv, v2, cs, sv, nombre + ": d/dV")
+    }
+}
+
+fn main() -> i32 {
+    let t = prueba.nueva("autodiff de vectores")
+
+    prueba.seccion(t, "una capa a mano")
+    let c = autodiff.cinta_v()
+    let w = autodiff.v_matriz(c, 2, 3, [0.5, -1.0, 2.0, 0.0, 1.0, 1.0])
+    let x = autodiff.v_variable(c, [1.0, 2.0, 3.0])
+    let y = autodiff.v_matvec(c, w, x)
+    let p = autodiff.v_total(c, y)
+    autodiff.v_derivar(c, p)
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_valor_en(c, y, 0)), 4.5, "W·x [0]")
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_valor_en(c, y, 1)), 5.0, "W·x [1]")
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(c, w, 4)), 2.0, "dW = x en cada fila")
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(c, x, 0)), 0.5, "dx = suma de las columnas de W")
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(c, x, 2)), 3.0, "dx [2]")
+    prueba.afirmar_igual_i32(t, autodiff.v_largo(c), 4, "la cinta tiene cuatro vectores")
+    autodiff.v_derivar(c, p)
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(c, x, 2)), 3.0, "derivar dos veces no acumula")
+    autodiff.v_limpiar(c)
+    prueba.afirmar_igual_i32(t, autodiff.v_largo(c), 0, "v_limpiar vacía la cinta")
+
+    prueba.seccion(t, "cada operación contra la cinta de números")
+    let mut k = 0
+    while k < 10 {
+        let mut s = 1
+        while s <= 3 {
+            probar(t, k, nombre_de(k), s * 101)
+            s = s + 1
+        }
+        k = k + 1
+    }
+
+    prueba.seccion(t, "aprender: una capa que separa dos clases")
+    # entrada (x, y); clase 1 si x + y > 0. Pérdida: ecm de sigmoide(w·p + b).
+    let cv = autodiff.cinta_v()
+    let mut pesos: Vec<f32> = [0.0, 0.0]
+    let mut sesgo: Vec<f32> = [0.0]
+    let px = datos(40, 5)
+    let mut vuelta = 0
+    while vuelta < 60 {
+        let mut i = 0
+        while i < 20 {
+            let a = px[2 * i]
+            let b = px[2 * i + 1]
+            let mut clase: f32 = 0.0
+            if a + b > 0.0 {
+                clase = 1.0
+            }
+            autodiff.v_limpiar(cv)
+            let vw = autodiff.v_matriz(cv, 1, 2, pesos)
+            let vb = autodiff.v_variable(cv, sesgo)
+            let entrada = autodiff.v_constante(cv, [a, b])
+            let z = autodiff.v_sigmoide(cv, autodiff.v_suma(cv, autodiff.v_matvec(cv, vw, entrada), vb))
+            let perdida = autodiff.v_ecm(cv, z, autodiff.v_constante(cv, [clase]))
+            autodiff.v_derivar(cv, perdida)
+            pesos = autodiff.v_paso(cv, vw, 2.0)
+            sesgo = autodiff.v_paso(cv, vb, 2.0)
+            i = i + 1
+        }
+        vuelta = vuelta + 1
+    }
+    let mut bien = 0
+    let mut i = 0
+    while i < 20 {
+        let a = px[2 * i]
+        let b = px[2 * i + 1]
+        let z = pesos[0] * a + pesos[1] * b + sesgo[0]
+        if (z > 0.0) == (a + b > 0.0) {
+            bien = bien + 1
+        }
+        i = i + 1
+    }
+    prueba.afirmar(t, bien >= 19, "clasifica bien " + a_texto(bien) + " de 20")
+    prueba.afirmar(t, pesos[0] > 0.0 and pesos[1] > 0.0, "los dos pesos quedan positivos")
+
+    prueba.seccion(t, "parámetros: lo mismo bit a bit que copiar los pesos")
+    let distintos = parametros_contra_copias(3, 5, 2, 40)
+    prueba.afirmar_igual_i32(t, distintos, 0, "3 x 5 x 2, 40 pasos: pesos y pérdidas iguales")
+    prueba.afirmar_igual_i32(t, parametros_contra_copias(16, 33, 1, 25), 0, "16 x 33 x 1, 25 pasos")
+
+    prueba.seccion(t, "parámetros: v_reiniciar y las constantes")
+    let cp = autodiff.cinta_v()
+    let pw = autodiff.v_parametro(cp, 2, 3, [0.5, -1.0, 2.0, 0.0, 1.0, 1.0])
+    let pb = autodiff.v_parametro(cp, 1, 2, [0.25, -0.25])
+    let ex = autodiff.v_constante(cp, [1.0, 2.0, 3.0])
+    let py = autodiff.v_total(cp, autodiff.v_suma(cp, autodiff.v_matvec(cp, pw, ex), pb))
+    autodiff.v_derivar(cp, py)
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(cp, pw, 4)), 2.0, "dW = x en cada fila")
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(cp, pb, 1)), 1.0, "db = 1")
+    prueba.afirmar_igual_i32(t, autodiff.v_gradiente(cp, ex).len(), 0, "una constante no lleva gradiente")
+    autodiff.v_aprender(cp, 0.5)
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_valor_en(cp, pw, 4)), 0.0, "v_aprender: W[4] = 1 - 0.5·2")
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_valor_en(cp, pb, 0)), -0.25, "v_aprender: b[0] = 0.25 - 0.5·1")
+    autodiff.v_reiniciar(cp)
+    prueba.afirmar_igual_i32(t, autodiff.v_largo(cp), 2, "v_reiniciar deja solo los dos parámetros")
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_valor_en(cp, pw, 4)), 0.0, "y sus valores")
+    let ex2 = autodiff.v_constante(cp, [1.0, 1.0, 1.0])
+    let py2 = autodiff.v_total(cp, autodiff.v_matvec(cp, pw, ex2))
+    autodiff.v_derivar(cp, py2)
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(cp, pw, 4)), 1.0, "derivar después de reiniciar no acumula lo del paso anterior")
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(cp, pb, 1)), 0.0, "un parámetro que no se usó queda con gradiente 0")
+    autodiff.v_limpiar(cp)
+    prueba.afirmar_igual_i32(t, autodiff.v_largo(cp), 0, "v_limpiar saca también los parámetros")
+    let pw3 = autodiff.v_parametro(cp, 1, 1, [3.0])
+    prueba.afirmar_igual_i32(t, pw3, 0, "y se pueden volver a declarar")
+
+    prueba.seccion(t, "gradiente diferido: lo mismo bit a bit que armarlo entero")
+    prueba.afirmar_igual_i32(t, diferidos_contra_copias(5, 12), 0,
+                             "matriz usada dos veces, matriz usada una vez, sesgo, parámetro sin usar, entrada variable")
+    let cd = autodiff.cinta_v()
+    let dw = autodiff.v_parametro(cd, 2, 3, [0.5, -1.0, 2.0, 0.0, 1.0, 1.0])
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(cd, dw, 4)), 0.0, "antes de derivar, el gradiente es 0")
+    prueba.afirmar_igual_i32(t, autodiff.v_gradiente(cd, dw).len(), 6, "y v_gradiente da un vector de su largo")
+    let dx = autodiff.v_constante(cd, [1.0, 2.0, 3.0])
+    let dy = autodiff.v_total(cd, autodiff.v_matvec(cd, dw, dx))
+    autodiff.v_derivar(cd, dy)
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(cd, dw, 4)), 2.0, "diferido: dW[1][1] = x[1]")
+    let gd = autodiff.v_gradiente(cd, dw)
+    prueba.afirmar_igual_f64(t, to_f64(gd[2]), 3.0, "diferido: v_gradiente lo arma")
+    autodiff.v_reiniciar(cd)
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_gradiente_en(cd, dw, 5)), 3.0,
+                             "el gradiente diferido sigue después de v_reiniciar")
+    let pd = autodiff.v_paso(cd, dw, 0.5)
+    prueba.afirmar_igual_f64(t, to_f64(pd[5]), -0.5, "v_paso de un diferido: 1 - 0.5·3")
+    autodiff.v_aprender(cd, 0.5)
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_valor_en(cd, dw, 0)), 0.0, "v_aprender de un diferido: 0.5 - 0.5·1")
+
+    prueba.seccion(t, "reserva: reusar los vectores de un paso a otro da lo mismo")
+    prueba.afirmar_igual_i32(t, reuso_contra_cinta_nueva(16), 0,
+                             "dos formas de red alternadas, con largos distintos, contra una cinta armada de cero")
+    let cr = autodiff.cinta_v()
+    let rw = autodiff.v_parametro(cr, 1, 3, [1.0, 2.0, 3.0])
+    let r1 = autodiff.v_constante(cr, [1.0, 1.0, 1.0])
+    let r2 = autodiff.v_total(cr, autodiff.v_mul(cr, rw, r1))
+    prueba.afirmar_igual_i32(t, autodiff.v_largo(cr), 4, "v_largo cuenta lo que está en uso")
+    autodiff.v_reiniciar(cr)
+    prueba.afirmar_igual_i32(t, autodiff.v_largo(cr), 1, "después de v_reiniciar, solo el parámetro")
+    let r3 = autodiff.v_constante(cr, [5.0, 6.0])
+    prueba.afirmar_igual_i32(t, r3, 1, "el valor siguiente toma el primer lugar de la reserva")
+    let r4 = autodiff.v_total(cr, r3)
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_valor_en(cr, r4, 0)), 11.0, "un largo distinto en ese lugar")
+    autodiff.v_reiniciar(cr)
+    let rw2 = autodiff.v_parametro(cr, 1, 2, [7.0, 8.0])
+    prueba.afirmar_igual_i32(t, rw2, 1, "un parámetro nuevo después de v_reiniciar toma el lugar de la reserva")
+    prueba.afirmar_igual_f64(t, to_f64(autodiff.v_valor_en(cr, rw2, 1)), 8.0, "con sus pesos")
+    prueba.afirmar_igual_i32(t, cero_negativo(), 0, "gradiente diferido con -0.0 en la entrada y en g: lo mismo que armarlo")
+
+    return prueba.terminar(t)
+}
+
+# Entrena dos veces la misma red con dos formas que se alternan paso a paso (largos y
+# operaciones distintos en los mismos lugares): con una cinta que reusa su reserva
+# (v_reiniciar) y con una que se arma de cero en cada paso (v_limpiar y los
+# parámetros declarados de nuevo con los pesos del paso anterior). Devuelve cuántos
+# números no son iguales bit a bit.
+fn reuso_contra_cinta_nueva(pasos: i32) -> i32 {
+    let cr = autodiff.cinta_v()
+    let rw = autodiff.v_parametro(cr, 4, 3, datos(12, 51))
+    let rb = autodiff.v_parametro(cr, 1, 4, datos(4, 52))
+    let cn = autodiff.cinta_v()
+    let mut w = datos(12, 51)
+    let mut b = datos(4, 52)
+    let mut distintos = 0
+    let mut paso = 0
+    while paso < pasos {
+        let x = datos(3, 600 + paso)
+        let y = datos(4, 700 + paso)
+        autodiff.v_reiniciar(cr)
+        autodiff.v_limpiar(cn)
+        let nw = autodiff.v_parametro(cn, 4, 3, w)
+        let nb = autodiff.v_parametro(cn, 1, 4, b)
+        let mut lr = 0
+        let mut ln = 0
+        if paso % 2 == 0 {
+            let rx = autodiff.v_constante(cr, x)
+            let rh = autodiff.v_tanh(cr, autodiff.v_matvec(cr, rw, rx))
+            let rs = autodiff.v_suma(cr, rh, rb)
+            let ry = autodiff.v_constante(cr, y)
+            lr = autodiff.v_ecm(cr, rs, ry)
+            let nx = autodiff.v_constante(cn, x)
+            let nh = autodiff.v_tanh(cn, autodiff.v_matvec(cn, nw, nx))
+            let ns = autodiff.v_suma(cn, nh, nb)
+            let ny = autodiff.v_constante(cn, y)
+            ln = autodiff.v_ecm(cn, ns, ny)
+        } else {
+            let rx = autodiff.v_variable(cr, x)
+            let rs = autodiff.v_sigmoide(cr, autodiff.v_matvec(cr, rw, rx))
+            let rm = autodiff.v_mul(cr, rs, rb)
+            lr = autodiff.v_total(cr, autodiff.v_escalar(cr, rm, 0.5))
+            let nx = autodiff.v_variable(cn, x)
+            let ns = autodiff.v_sigmoide(cn, autodiff.v_matvec(cn, nw, nx))
+            let nm = autodiff.v_mul(cn, ns, nb)
+            ln = autodiff.v_total(cn, autodiff.v_escalar(cn, nm, 0.5))
+        }
+        autodiff.v_derivar(cr, lr)
+        autodiff.v_derivar(cn, ln)
+        if autodiff.v_valor_en(cr, lr, 0) != autodiff.v_valor_en(cn, ln, 0) {
+            distintos = distintos + 1
+        }
+        distintos = distintos + distintos_de(autodiff.v_gradiente(cr, rw), autodiff.v_gradiente(cn, nw))
+        distintos = distintos + distintos_de(autodiff.v_gradiente(cr, rb), autodiff.v_gradiente(cn, nb))
+        autodiff.v_aprender(cr, 0.5)
+        autodiff.v_aprender(cn, 0.5)
+        w = autodiff.v_valor(cn, nw)
+        b = autodiff.v_valor(cn, nb)
+        paso = paso + 1
+    }
+    distintos = distintos + distintos_de(w, autodiff.v_valor(cr, rw))
+    distintos = distintos + distintos_de(b, autodiff.v_valor(cr, rb))
+    return distintos
+}
+
+# Una red con los casos de un gradiente diferido, entrenada `pasos` pasos con copias
+# (v_matriz, v_variable, v_paso: todo armado entero) y con parámetros (v_parametro,
+# v_aprender): W de n x n usada dos veces (se arma entera), V de 1 x n usada una vez
+# (queda diferida), un sesgo b en una v_suma, U sin usar, y la entrada como
+# v_variable. Compara cada pérdida, cada gradiente (con v_gradiente, también de la
+# entrada), un número suelto con v_gradiente_en, v_paso de V, y los pesos del final.
+# Devuelve cuántos números no son iguales bit a bit.
+fn diferidos_contra_copias(n: i32, pasos: i32) -> i32 {
+    let mut w = datos(n * n, 31)
+    let mut vv = datos(n, 32)
+    let mut b = datos(n, 33)
+    let mut u = datos(4, 34)
+    let cp = autodiff.cinta_v()
+    let pw = autodiff.v_parametro(cp, n, n, datos(n * n, 31))
+    let pv = autodiff.v_parametro(cp, 1, n, datos(n, 32))
+    let pb = autodiff.v_parametro(cp, 1, n, datos(n, 33))
+    let pu = autodiff.v_parametro(cp, 2, 2, datos(4, 34))
+    let cc = autodiff.cinta_v()
+    let mut distintos = 0
+    let mut paso = 0
+    while paso < pasos {
+        let x = datos(n, 300 + paso)
+        let y = datos(1, 400 + paso)
+        # con copias
+        autodiff.v_limpiar(cc)
+        let cw = autodiff.v_matriz(cc, n, n, w)
+        let cv = autodiff.v_matriz(cc, 1, n, vv)
+        let cb = autodiff.v_variable(cc, b)
+        let cu = autodiff.v_matriz(cc, 2, 2, u)
+        let cx = autodiff.v_variable(cc, x)
+        let ch1 = autodiff.v_tanh(cc, autodiff.v_matvec(cc, cw, cx))
+        let ch2 = autodiff.v_tanh(cc, autodiff.v_matvec(cc, cw, ch1))
+        let cz = autodiff.v_suma(cc, ch2, cb)
+        let cs = autodiff.v_sigmoide(cc, autodiff.v_matvec(cc, cv, cz))
+        let cy = autodiff.v_constante(cc, y)
+        let cl = autodiff.v_ecm(cc, cs, cy)
+        autodiff.v_derivar(cc, cl)
+        # con parámetros
+        autodiff.v_reiniciar(cp)
+        let px = autodiff.v_variable(cp, x)
+        let ph1 = autodiff.v_tanh(cp, autodiff.v_matvec(cp, pw, px))
+        let ph2 = autodiff.v_tanh(cp, autodiff.v_matvec(cp, pw, ph1))
+        let pz = autodiff.v_suma(cp, ph2, pb)
+        let ps = autodiff.v_sigmoide(cp, autodiff.v_matvec(cp, pv, pz))
+        let py = autodiff.v_constante(cp, y)
+        let pl = autodiff.v_ecm(cp, ps, py)
+        autodiff.v_derivar(cp, pl)
+        if autodiff.v_valor_en(cc, cl, 0) != autodiff.v_valor_en(cp, pl, 0) {
+            distintos = distintos + 1
+        }
+        distintos = distintos + distintos_de(autodiff.v_gradiente(cc, cw), autodiff.v_gradiente(cp, pw))
+        distintos = distintos + distintos_de(autodiff.v_gradiente(cc, cv), autodiff.v_gradiente(cp, pv))
+        distintos = distintos + distintos_de(autodiff.v_gradiente(cc, cb), autodiff.v_gradiente(cp, pb))
+        distintos = distintos + distintos_de(autodiff.v_gradiente(cc, cu), autodiff.v_gradiente(cp, pu))
+        distintos = distintos + distintos_de(autodiff.v_gradiente(cc, cx), autodiff.v_gradiente(cp, px))
+        let k = paso % n
+        if autodiff.v_gradiente_en(cc, cv, k) != autodiff.v_gradiente_en(cp, pv, k) {
+            distintos = distintos + 1
+        }
+        distintos = distintos + distintos_de(autodiff.v_paso(cc, cv, 0.25), autodiff.v_paso(cp, pv, 0.25))
+        w = autodiff.v_paso(cc, cw, 0.5)
+        vv = autodiff.v_paso(cc, cv, 0.5)
+        b = autodiff.v_paso(cc, cb, 0.5)
+        u = autodiff.v_paso(cc, cu, 0.5)
+        autodiff.v_aprender(cp, 0.5)
+        paso = paso + 1
+    }
+    distintos = distintos + distintos_de(w, autodiff.v_valor(cp, pw))
+    distintos = distintos + distintos_de(vv, autodiff.v_valor(cp, pv))
+    distintos = distintos + distintos_de(b, autodiff.v_valor(cp, pb))
+    distintos = distintos + distintos_de(u, autodiff.v_valor(cp, pu))
+    return distintos
+}
+
+# Entrena la misma red (entradas x ocultas x salidas, tanh y sigmoide, ecm) dos
+# veces, `pasos` pasos: copiando los pesos a la cinta en cada paso (v_matriz,
+# v_paso) y con parámetros (v_parametro, v_aprender). Devuelve cuántos números
+# (pérdidas de cada paso y pesos del final) no son iguales bit a bit.
+fn parametros_contra_copias(entradas: i32, ocultas: i32, salidas: i32, pasos: i32) -> i32 {
+    let mut w1 = datos(ocultas * entradas, 11)
+    let mut b1 = datos(ocultas, 12)
+    let mut w2 = datos(salidas * ocultas, 13)
+    let mut b2 = datos(salidas, 14)
+    let cp = autodiff.cinta_v()
+    let pw1 = autodiff.v_parametro(cp, ocultas, entradas, datos(ocultas * entradas, 11))
+    let pb1 = autodiff.v_parametro(cp, 1, ocultas, datos(ocultas, 12))
+    let pw2 = autodiff.v_parametro(cp, salidas, ocultas, datos(salidas * ocultas, 13))
+    let pb2 = autodiff.v_parametro(cp, 1, salidas, datos(salidas, 14))
+    let cc = autodiff.cinta_v()
+    let mut distintos = 0
+    let mut paso = 0
+    while paso < pasos {
+        let x = datos(entradas, 100 + paso)
+        let y = datos(salidas, 200 + paso)
+        # con copias
+        autodiff.v_limpiar(cc)
+        let cw1 = autodiff.v_matriz(cc, ocultas, entradas, w1)
+        let cb1 = autodiff.v_variable(cc, b1)
+        let cw2 = autodiff.v_matriz(cc, salidas, ocultas, w2)
+        let cb2 = autodiff.v_variable(cc, b2)
+        let cx = autodiff.v_constante(cc, x)
+        let ch = autodiff.v_tanh(cc, autodiff.v_suma(cc, autodiff.v_matvec(cc, cw1, cx), cb1))
+        let cs = autodiff.v_sigmoide(cc, autodiff.v_suma(cc, autodiff.v_matvec(cc, cw2, ch), cb2))
+        let cy = autodiff.v_constante(cc, y)
+        let cl = autodiff.v_ecm(cc, cs, cy)
+        autodiff.v_derivar(cc, cl)
+        w1 = autodiff.v_paso(cc, cw1, 0.5)
+        b1 = autodiff.v_paso(cc, cb1, 0.5)
+        w2 = autodiff.v_paso(cc, cw2, 0.5)
+        b2 = autodiff.v_paso(cc, cb2, 0.5)
+        # con parámetros
+        autodiff.v_reiniciar(cp)
+        let px = autodiff.v_constante(cp, x)
+        let ph = autodiff.v_tanh(cp, autodiff.v_suma(cp, autodiff.v_matvec(cp, pw1, px), pb1))
+        let ps = autodiff.v_sigmoide(cp, autodiff.v_suma(cp, autodiff.v_matvec(cp, pw2, ph), pb2))
+        let py = autodiff.v_constante(cp, y)
+        let pl = autodiff.v_ecm(cp, ps, py)
+        autodiff.v_derivar(cp, pl)
+        autodiff.v_aprender(cp, 0.5)
+        if autodiff.v_valor_en(cc, cl, 0) != autodiff.v_valor_en(cp, pl, 0) {
+            distintos = distintos + 1
+        }
+        paso = paso + 1
+    }
+    distintos = distintos + distintos_de(w1, autodiff.v_valor(cp, pw1))
+    distintos = distintos + distintos_de(b1, autodiff.v_valor(cp, pb1))
+    distintos = distintos + distintos_de(w2, autodiff.v_valor(cp, pw2))
+    distintos = distintos + distintos_de(b2, autodiff.v_valor(cp, pb2))
+    return distintos
+}
+
+# Cuántas posiciones de `a` y `b` no son iguales bit a bit (un largo distinto
+# cuenta como todas).
+fn distintos_de(a: Vec<f32>, b: Vec<f32>) -> i32 {
+    if a.len() != b.len() {
+        return a.len() + b.len()
+    }
+    let mut n = 0
+    let mut i = 0
+    while i < a.len() {
+        if a[i] != b[i] {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+# Un gradiente diferido cuya entrada x y cuyo g tienen -0.0 (g = 0 por la salida
+# de la capa multiplicada por -0.0): con copias y con parámetros, el gradiente y los
+# pesos después del paso tienen que ser iguales bit a bit (también el signo de cada
+# cero). Devuelve cuántos números son distintos (comparando sus bits con 1/x para
+# separar +0.0 de -0.0).
+fn cero_negativo() -> i32 {
+    let menos_cero: f32 = -0.0
+    let x: Vec<f32> = [menos_cero, 1.0, menos_cero]
+    let pesos: Vec<f32> = [menos_cero, 0.5, 0.0, 2.0, menos_cero, -1.0]
+    let factor: Vec<f32> = [menos_cero, 3.0]
+    let cc = autodiff.cinta_v()
+    let cw = autodiff.v_matriz(cc, 2, 3, pesos)
+    let cx = autodiff.v_constante(cc, x)
+    let cf = autodiff.v_constante(cc, factor)
+    let cl = autodiff.v_total(cc, autodiff.v_mul(cc, autodiff.v_matvec(cc, cw, cx), cf))
+    autodiff.v_derivar(cc, cl)
+    let pc = autodiff.v_paso(cc, cw, 0.5)
+    let gc = autodiff.v_gradiente(cc, cw)
+    let cp = autodiff.cinta_v()
+    let pw = autodiff.v_parametro(cp, 2, 3, [menos_cero, 0.5, 0.0, 2.0, menos_cero, -1.0])
+    let px = autodiff.v_constante(cp, x)
+    let pf = autodiff.v_constante(cp, factor)
+    let pl = autodiff.v_total(cp, autodiff.v_mul(cp, autodiff.v_matvec(cp, pw, px), pf))
+    autodiff.v_derivar(cp, pl)
+    let gp = autodiff.v_gradiente(cp, pw)
+    autodiff.v_aprender(cp, 0.5)
+    let pp = autodiff.v_valor(cp, pw)
+    let mut n = 0
+    let mut i = 0
+    while i < 6 {
+        if gc[i] != gp[i] or 1.0 / gc[i] != 1.0 / gp[i] {
+            n = n + 1
+        }
+        if pc[i] != pp[i] or 1.0 / pc[i] != 1.0 / pp[i] {
+            n = n + 1
+        }
+        if autodiff.v_gradiente_en(cc, cw, i) != autodiff.v_gradiente_en(cp, pw, i) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}

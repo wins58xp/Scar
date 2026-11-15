@@ -34,7 +34,8 @@ no está: getenv devolvió NULL
 - Los tipos que cruzan son los números (`i32` como `int32_t`, `i64` como
   `int64_t`, `f64` como `double`), `bool`, `str` (como `const char*`), un struct
   de SCAR con campos numéricos (por valor) y, como parámetro, un `Vec` de
-  números.
+  números. `f32` todavía no cruza: el compilador lo rechaza con un mensaje
+  claro (está en el plan, como `float`).
 - Un `str` que devuelve C se copia: el programa tiene su propia copia, y C
   sigue siendo dueño del original.
 - Si la función puede devolver `NULL`, se declara con `Result<str>`: el `NULL`

@@ -1,0 +1,15 @@
+# espera: no se puede pasar 'c.pesos' y, en la misma llamada, lo que lo contiene
+# f() reemplaza c.pesos mientras 'p' es ese mismo campo prestado: el binario vería
+# el valor nuevo y el intérprete el viejo.
+struct Capa {
+    pesos: Vec<f64>
+    n: i32
+}
+fn f(c: Capa, p: Vec<f64>) -> f64 {
+    c.pesos = [9.0, 9.0, 9.0]
+    return p.suma()
+}
+fn main() {
+    let c = Capa { pesos: [1.0, 2.0], n: 0 }
+    print(f(c, c.pesos))
+}

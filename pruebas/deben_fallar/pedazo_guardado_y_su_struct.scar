@@ -1,0 +1,16 @@
+# espera: 'c.pesos' no puede cambiar de largo mientras se usa el pedazo 'fila'
+# espera: acá 'c' se le pasa a crece(), que podría cambiarlo (le hace .push() a 'c.pesos'
+# Mientras un pedazo mira un Vec de c, c solo va a una fn que no le cambia el
+# largo a nada de lo que tiene adentro.
+struct Capa {
+    pesos: Vec<f32>
+}
+fn crece(c: Capa) {
+    c.pesos.push(1.0)
+}
+fn main() {
+    let c = Capa { pesos: [1.0, 2.0] }
+    let fila = c.pesos[0..1]
+    crece(c)
+    print(fila)
+}

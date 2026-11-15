@@ -1,0 +1,8 @@
+# espera: un pedazo guardado no lleva 'mut'
+# espera: no se reasigna: para otro pedazo, usa otro 'let'
+fn main() {
+    let v = [1, 2, 3]
+    let mut p = v[0..2]
+    p = v[1..3]
+    print(p)
+}

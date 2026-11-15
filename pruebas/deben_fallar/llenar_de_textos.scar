@@ -1,0 +1,5 @@
+# espera: '.llenar()' es para un Vec de números o bool
+fn main() {
+    let t: Vec<str> = ["a", "b"]
+    t.llenar("c")
+}

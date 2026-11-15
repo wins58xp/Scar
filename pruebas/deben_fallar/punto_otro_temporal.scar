@@ -1,0 +1,20 @@
+# espera: tiene que estar en una variable o en un campo
+struct N {
+    peso: f32
+    pesos: Vec<f32>
+    nombre: str
+}
+fn usar(n: N) -> f32 {
+    return n.peso
+}
+fn crear() -> Vec<f32> {
+    return [1.0, 2.0]
+}
+fn main() {
+    let mut red: Vec<N> = vec_new()
+    red.push(N { peso: 1.0, pesos: [1.0], nombre: "a" })
+    let mut m: Vec<Vec<f32>> = vec_new()
+    m.push([1.0])
+    let a: Vec<f32> = [1.0, 2.0]
+    print(a.punto(crear()))
+}

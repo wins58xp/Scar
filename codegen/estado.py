@@ -77,6 +77,8 @@ class Estado:
         self.needs_rand = False  # rand(): scar_rand() y la siembra de main
         self.needs_now = False   # now(): scar_now(), propio (no depende de si hay tasks)
         self.needs_fmt_f64 = False   # %g de C no agrega ".0"; Python sí (str(5.0) == "5.0")
+        self.needs_fmt_f32 = False   # scar_fmt_f32: un f32 con sus cifras (0.1, no 0.10000000149011612)
+        self.needs_min_max_f32 = False  # scar_min_f32/scar_max_f32 (solo si el programa los usa)
         self.needs_repr_str = False  # repr() de Python: comillas simples o dobles según el texto
         self.tmp_counter = 0
         self.cur_ret_ty = None   # tipo de retorno de la fn que se está generando
@@ -153,6 +155,11 @@ class Estado:
         # que van después de struct_typedefs (sizeof y copia necesitan el struct
         # completo). El typedef de Vec_<Struct> va antes, en vec_typedefs.
         self.vec_struct_defs = []
+        # Funciones de Vec que salen solo si el programa las usa, al final de los
+        # tipos: scar_vec_trozo_<T> de los Vec que no son de números (los de números
+        # lo traen con suma y punto), scar_vec_acumular_<T> de los de enteros y
+        # scar_vec_llenar_<T>
+        self.vec_trozo_defs = {}
         # Prototipos de scar_vec_free_<Struct>: {Struct}_free los llama para un
         # campo Vec<Struct>, y la definición recién viene en vec_struct_defs.
         self.vec_struct_free_fwd_decls = []
@@ -225,6 +232,11 @@ class Estado:
         self.fresh_owned_fns = {}
         self.fn_ownership = {}  # nombre -> fresh_owned.FnOwnership
         self.consumed_params = {}  # nombre -> índices de params struct consumidos
+        # nombre -> índices de params Vec/Map que la fn recibe prestados
+        # (fresh_owned.resolve_contenedores_prestados)
+        self.contenedores_prestados = {}
+        self._vecs_prestados_de = {}  # fn -> nombres de sus parámetros Vec prestados
+        self._prestar_tarde = {}  # id(Call) -> temporales de Vec/Map prestados sin sentencia que los suelte
         # nombre -> índices de params Option<Struct> cuyo contenido la fn puede
         # quedarse (fresh_owned.resolve_consumed_option_params)
         self.consumed_option_params = {}

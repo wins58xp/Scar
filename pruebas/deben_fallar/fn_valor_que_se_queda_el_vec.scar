@@ -1,0 +1,9 @@
+# espera: 'guarda' no se puede usar como valor: se queda con su parámetro 'v'
+# Un valor fn presta sus Vec: no se puede guardar una fn que se queda con el suyo.
+fn guarda(v: Vec<i32>) -> Vec<i32> {
+    return v
+}
+fn main() {
+    let f = guarda
+    print(f([1]))
+}

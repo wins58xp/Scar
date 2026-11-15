@@ -96,67 +96,105 @@ fn main() {
 ... Se movió en la línea 12: encolar() se queda con su parámetro 'p' porque guarda 'p' con .push() (línea 6) (línea 13)
 ```
 
-## 8.3 Un `Vec` o un `Map` se entrega
+## 8.3 Un `Vec` o un `Map` también se presta
 
-Con las colecciones es al revés: un `Vec` o un `Map` que le pasas directo a una
-función **se mueve** a la función. Si la necesitas de vuelta, la función la
-devuelve:
+Con las colecciones es igual: un `Vec` o un `Map` que le pasas a una función se
+presta. La función puede leerlo, agrandarlo o cambiar sus elementos, y lo que
+haga se ve afuera:
 
 ```scar
-fn agregar(v: Vec<i32>, x: i32) -> Vec<i32> {
+fn agregar(v: Vec<i32>, x: i32) {
     v.push(x)
-    return v
+}
+
+fn contar(m: Map<str, i32>, palabra: str) {
+    match m.get(palabra) {
+        Some(n) => m.set(palabra, n + 1),
+        None => m.set(palabra, 1),
+    }
 }
 
 fn main() {
-    let mut numeros: Vec<i32> = vec_new()
-    numeros = agregar(numeros, 1)
-    numeros = agregar(numeros, 2)
+    let numeros: Vec<i32> = vec_new()
+    agregar(numeros, 1)
+    agregar(numeros, 2)
     print(numeros)
+    let veces: Map<str, i32> = map_new()
+    contar(veces, "hola")
+    contar(veces, "hola")
+    print(veces.get("hola"))
 }
 ```
 
 ```
 [1, 2]
+Some(2)
 ```
 
-Usarla después de pasarla, sin recibirla de vuelta, es un error:
+También se presta un campo (`agregar(inv.items, 3)`), un elemento de una lista
+de listas (`agregar(filas[0], 3)`) o una lista recién armada
+(`agregar([1, 2], 3)`, que se libera al terminar la línea).
+
+Lo que no se puede es pasar, en una misma llamada, una parte prestada y lo que la
+contiene, si la función podría cambiarle el lugar a esa parte por el otro lado:
+
+- una fila y su tabla (`f(filas[0], filas)`), si la función puede agrandar o
+  cambiar la tabla: la fila vive dentro de ella, y al crecer la tabla se muda;
+- un campo y su struct (`f(c.pesos, c)`), si la función puede **reasignar** ese
+  campo (`c.pesos = ...`), directo o a través de otra función: lo que recibió como
+  campo sería el valor de antes, que ya no está.
 
 ```scar-error
-fn largo(v: Vec<i32>) -> i32 {
-    return v.len()
+struct Capa {
+    pesos: Vec<f64>
+}
+
+fn rehacer(c: Capa, p: Vec<f64>) -> f64 {
+    c.pesos = [0.0, 0.0]
+    return p.suma()
 }
 
 fn main() {
+    let c = Capa { pesos: [1.0, 2.0] }
+    print(rehacer(c, c.pesos))
+}
+```
+
+```
+... no se puede pasar 'c.pesos' y, en la misma llamada, lo que lo contiene a rehacer(): rehacer() puede reasignar 'c.pesos' por el otro argumento, y lo que recibió como 'c.pesos' quedaría mirando el objeto de antes. Hazlo en dos pasos (línea 12)
+```
+
+Todo lo demás sí se puede: que la función solo lea, que cambie números, que
+agrande el campo (`c.pesos.push(x)` cambia lo de adentro, y eso se ve igual por
+los dos lados), o pasar dos partes distintas del mismo dato (`f(c.pesos, c.sesgos)`,
+`f(filas[0], filas[1])`).
+
+Y la excepción es la misma que con los structs: si la función **se queda** con
+la colección (la devuelve, la guarda en otra lista o en un struct, la manda a
+otra tarea), la recibe movida, y quien la llama ya no la tiene:
+
+```scar-error
+fn guardar(todas: Vec<Vec<i32>>, v: Vec<i32>) {
+    todas.push(v)
+}
+
+fn main() {
+    let todas: Vec<Vec<i32>> = vec_new()
     let w = [1, 2, 3]
-    print(largo(w))
+    guardar(todas, w)
     print(w)
 }
 ```
 
-Si una colección tiene que viajar prestada, va dentro de un struct: el struct
-se presta, y la lista con él.
-
-```scar
-struct Inventario {
-    items: Vec<str>
-}
-
-fn agregar_item(inv: Inventario, nombre: str) {
-    inv.items.push(nombre)
-}
-
-fn main() {
-    let inv = Inventario { items: vec_new() }
-    agregar_item(inv, "martillo")
-    agregar_item(inv, "llave")
-    print(inv.items)
-}
+```
+... Se movió en la línea 8: guardar() se queda con su parámetro 'v' porque se lo pasa a .push(), que se queda con él (línea 2) (línea 9)
 ```
 
-```
-["martillo", "llave"]
-```
+Dos casos reciben siempre la colección movida: una `task` (corre en otro hilo)
+y una función genérica (`fn largo<T>(v: Vec<T>)`). Una función que guardas en
+una variable (`let f = suma`) presta, como si la llamaras directo; por eso no
+puedes guardar una que se queda con lo que recibe: el compilador te dice cuál
+parámetro y por qué.
 
 ## 8.4 Devolver entrega
 
@@ -275,6 +313,12 @@ termina.
   devuelto.
 - Lo que está dentro de una colección o de un struct se libera con ella.
 - Un valor que reemplazas (`x = otro`) libera el que había.
+
+Liberar no siempre significa devolverle la memoria al sistema operativo: en el
+binario, lo que se libera queda en una lista del hilo y el próximo valor del
+mismo tamaño lo reusa, que es mucho más rápido que pedir memoria nueva. La
+lista tiene un tope, así que un programa que corre mucho no crece. Para ti no
+cambia nada: cada valor se libera en el mismo momento de siempre.
 
 Esto vale igual en el intérprete y en el binario. En el binario se puede
 comprobar con las herramientas de C que detectan pérdidas de memoria

@@ -1,9 +1,13 @@
 # espera: uso de 'w' después de haber sido
-fn quedarse(v: Vec<i32>) -> i32 {
-    return v.len()
+# quedarse() guarda el Vec en otro: lo recibe movido, así que
+# quien llama ya no lo tiene
+fn quedarse(v: Vec<i32>) -> Vec<Vec<i32>> {
+    let mut todo: Vec<Vec<i32>> = vec_new()
+    todo.push(v)
+    return todo
 }
 fn main() {
     let w = [1, 2, 3]
-    print(quedarse(w))
+    print(quedarse(w).len())
     print(w.len())
 }

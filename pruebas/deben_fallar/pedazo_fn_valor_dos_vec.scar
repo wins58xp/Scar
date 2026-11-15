@@ -1,0 +1,13 @@
+# espera: 'mezcla' no se puede usar como valor: toma un pedazo de su parámetro 'a'
+# A través de un valor fn el compilador no ve si los dos Vec son el mismo.
+fn mezcla(a: Vec<i32>, b: Vec<i32>) -> i32 {
+    let p = a[0..1]
+    b.push(1)
+    return p[0]
+}
+fn main() {
+    let f = mezcla
+    let v = [1, 2, 3]
+    let w = [4]
+    print(f(v, w))
+}

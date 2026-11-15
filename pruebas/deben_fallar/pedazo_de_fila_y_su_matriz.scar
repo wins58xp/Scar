@@ -1,0 +1,11 @@
+# espera: no se puede pasar un pedazo de 'm' y, en la misma llamada, 'm' de otra forma
+# La fn cambia una fila de m: la fila vieja se suelta y el pedazo quedaría colgando.
+fn pisa(a: Vec<f64>, m: Vec<Vec<f64>>) -> f64 {
+    let n: Vec<f64> = [9.0]
+    m.set(0, n)
+    return a[0]
+}
+fn main() {
+    let m: Vec<Vec<f64>> = [[1.0, 1.0, 2.0], [3.0, 1.0, 0.0]]
+    print(pisa(m[0][0..2], m))
+}

@@ -467,7 +467,8 @@ class Programa:
                 decls.append(f"{self._main_sig()};")
                 continue
             params, ret = self.fn_sigs[decl.name]
-            param_list = ", ".join(self.c_type(t) for t in params) or "void"
+            param_list = ", ".join(self._c_tipo_param(decl.name, j, t)
+                                   for j, t in enumerate(params)) or "void"
             # `static` también acá: el prototipo y la definición tienen que
             # coincidir en linkage.
             decls.append(f"static {self.c_type(ret)} {decl.name}({param_list});")
@@ -929,8 +930,9 @@ class Programa:
         # struct chico en la arena ocupaba el doble). scar_blk_release() libera
         # solo si es de malloc. Los structs embebidos (slots de Vec<Struct>) no
         # son bloques: solo se les llama {T}_free_fields.
-        # Hoy todo bloque es de malloc (nadie escribe SCAR_BLK_ARENA); el
-        # encabezado sigue.
+        # Hoy todo bloque es del heap (nadie escribe SCAR_BLK_ARENA); el
+        # encabezado sigue, y su segunda mitad guarda la clase del bloque en el
+        # reciclador por hilo (pool_allocator.c), de donde salen los bloques.
         blk_runtime = runtime_c.texto("blk")
         preamble = ""
         if needs_gnu_source:
@@ -989,6 +991,7 @@ class Programa:
             self.needs_str_index
             or self.needs_str_concat
             or self.needs_fmt_f64
+            or self.needs_fmt_f32
             or self.needs_repr_str
             or bool(self.fmt_defs)
             or self.needs_builtin_int
@@ -1000,6 +1003,7 @@ class Programa:
             or self.needs_task_str_free
             or self._extern_str_en_proceso()  # scar_ffi_str_propia() copia con scar_malloc()
             or bool(self.pipe_isolated_libs)  # scar_ffi_read_str() usa scar_malloc()
+            or bool(self.structs)             # blk.c: los bloques de struct salen del pool
         )
         # Con tasks, el freelist _Thread_local de un hilo que termina quedaba
         # huérfano (un programa que lanza muchas tareas lo acumula sin límite).
@@ -1012,10 +1016,14 @@ class Programa:
             if needs_pthread else ""
         )
         scar_pool_touch = "    scar_pool_touch_thread();\n" if needs_pthread else ""
+        # Con varios hilos, lo que pasa del tope va en lotes a un depósito común
+        # (pool_allocator.c) en vez de a free().
+        scar_pool_deposito = "#define SCAR_POOL_DEPOSITO 1" if needs_pthread else ""
         scar_pool_allocator = runtime_c.texto(
             "pool_allocator",
             SCAR_POOL_CLEANUP=str(scar_pool_cleanup),
             SCAR_POOL_TOUCH=str(scar_pool_touch),
+            SCAR_POOL_DEPOSITO=scar_pool_deposito,
             TEXTO_SIN_TOPE_C=_TEXTO_SIN_TOPE_C,
         )
         return (str_concat_helper, blk_runtime, preamble, needs_scar_malloc,
@@ -1031,12 +1039,12 @@ class Programa:
         rand_rt = _rand_runtime_c(self.needs_rand, self.has_tasks)
         if rand_rt:
             parts.append(rand_rt)  # antes de scar_ctx_new, que lo usa
-        if self.structs:
-            parts.append(blk_runtime)
         # Si ningún flag lo pidió, el lugar queda reservado y al final se
         # decide por lo que el C de verdad llama (ver el return).
         lugar_pool = len(parts)
         parts.append(scar_pool_allocator if needs_scar_malloc else None)
+        if self.structs:
+            parts.append(blk_runtime)  # después del pool, que usa
         if self.has_tasks:
             parts.append(arena_support)
             # el planificador de tareas livianas y la condvar que lo conoce
@@ -1070,7 +1078,7 @@ class Programa:
         if self.needs_i64:
             parts.append(_i64_helpers_c(self.has_tasks))
         if self.needs_abs_min_max:
-            parts.append(_abs_min_max_helpers_c(self.has_tasks))
+            parts.append(_abs_min_max_helpers_c(self.has_tasks, self.needs_min_max_f32))
         if self.needs_imod:
             parts.append(imod_helper)
         if self.needs_now:
@@ -1216,6 +1224,8 @@ class Programa:
             parts.append("\n\n".join(struct_clones))
         if self.clone_defs:
             parts.append("\n\n".join(self.clone_defs))
+        if self.vec_trozo_defs:
+            parts.append("".join(self.vec_trozo_defs.values()).rstrip("\n"))
 
     def _armar_funciones(self, fns, decls, extern_guarded_wrappers, task_args_typedefs,
                          task_thread_defs, injected_slots_typedefs, bodies,
@@ -1241,6 +1251,8 @@ class Programa:
             parts.append(self._read_bytes_helpers_c())
         if self.needs_fmt_f64:
             parts.append(fmt_f64_helper)
+        if self.needs_fmt_f32:
+            parts.append(runtime_c.texto("fmt_f32"))
         if self.needs_repr_str:
             parts.append(repr_str_helper)
         if self._imprime_fns:

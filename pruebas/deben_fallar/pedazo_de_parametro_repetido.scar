@@ -1,0 +1,11 @@
+# espera: no se puede pasar 'v' a mezcla() por 'a' y, en la misma llamada, de otra forma
+# mezcla() toma un pedazo de 'a' y agranda 'b': no pueden ser el mismo Vec.
+fn mezcla(a: Vec<i32>, b: Vec<i32>) -> i32 {
+    let p = a[0..1]
+    b.push(1)
+    return p[0]
+}
+fn main() {
+    let v = [1, 2, 3]
+    print(mezcla(v, v))
+}

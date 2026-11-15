@@ -27,22 +27,24 @@ Sin `expected_ty`, o si no es un `Option<T>` con parámetro, queda
 `Option<i32>`, como en un `let` sin anotación.
 """
 
-from parser import (marca_new_generico, elemento_de_pop,
+from parser import (marca_new_generico, elemento_de_pop, Parser,
     Program, StructDecl, FnDecl, ExternFnDecl, ExternTypeDecl, ExternLibDecl, Block, LetStmt, ReturnStmt, ExprStmt, IfStmt,
     WhileStmt, WhileLetStmt, ForStmt, AssignStmt, NumLit, StrLit, BoolLit, Ident,
-    BinOp, UnaryOp, Call, MethodCall, FieldAccess, IndexExpr, StructLit, SpawnExpr, ArrayLit, IfExpr, es_panic,
+    BinOp, UnaryOp, Call, MethodCall, FieldAccess, IndexExpr, SliceExpr, StructLit, SpawnExpr, ArrayLit, IfExpr, es_panic,
     TryExpr, OkExpr, ErrExpr, SomeExpr, NoneExpr, PrintExpr, block_always_returns,
     BreakStmt, ContinueStmt, block_never_falls_through, Node, hijos,
 )
-from types_ import (TypeAnn, T_I32, T_I64, T_F64, T_STR, T_BOOL, T_VOID,
-                    int_literal_type, numeric_result, numeric_mix_ok,
+from types_ import (TypeAnn, T_I32, T_I64, T_F32, T_F64, T_STR, T_BOOL, T_VOID,
+                    int_literal_type, numeric_result, numeric_mix_ok, literal_f32,
                     RESULT, OPTION_MARK, TASK_MARK, CHAN_MARK, VEC_MARK, MAP_MARK, PIPE_MARK,
                     FILE_MARK, SOCKET_MARK, FN_MARK, LISTENER_MARK, FFI_SUPPORTED_TYPES)
-from fresh_owned import es_compuesto_de_struct, resolve_consumed_option_params, resolve_consumed_params, resolve_returned_params
+from fresh_owned import (es_compuesto_de_struct, resolve_consumed_option_params, resolve_consumed_params,
+                         resolve_contenedores_prestados, resolve_returned_params, resolve_vec_fijos)
 from enum_match import bajar_enums, bajar_main_result
 from if_expr import bajar as bajar_if_expr, hay_if_expr
 from continuar import bajar as bajar_continue
 import lugares
+import pedazos
 import re
 import types_
 
@@ -124,6 +126,9 @@ BUILTIN_FN_TYPES = {
     "to_i32": ([T_F64], T_I32),
     "to_i64": ([T_F64], T_I64),
     "to_f64": ([T_I32], T_F64),
+    # to_f32(x): de un f64 redondea al f32 más cercano (lo que no cabe es
+    # ±inf, como en C); de un entero, lo mismo.
+    "to_f32": ([T_F64], T_F32),
     # chr(n): el carácter de código Unicode n, como str (propio); ord(s): el
     # código del primer carácter de s. Código inválido (0, sustituto o mayor
     # que 0x10FFFF) o un str vacío son un panic.
@@ -459,9 +464,31 @@ class Checker:
             for item in program.items
             if isinstance(item, FnDecl) and not item.is_task and not item.type_params
         }
+        # Qué parámetros Vec/Map recibe prestados cada fn normal
+        # (la MISMA tabla que usa codegen/). Los demás se mueven.
+        self.prestados_motivos = {}
+        self.contenedores_prestados = resolve_contenedores_prestados(program.items, NOMBRES_BUILTIN,
+                                                                     motivos=self.prestados_motivos)
+        # Qué parámetros Vec prestados nunca cambian de largo: a esos se les puede
+        # pasar un pedazo v[a..b]
+        self.fijos_motivos = {}
+        self.vec_fijos = resolve_vec_fijos(program.items, self.contenedores_prestados,
+                                           motivos=self.fijos_motivos)
+        # De qué parámetros toma un pedazo cada fn (o se los pasa a otra que lo
+        # hace): en una llamada, ese Vec no puede llegar además por otro lado que
+        # le cambie el largo
+        self.vistas_hondas = {}
+        self.vistas = pedazos.resolve_vistas(program.items, self.structs, self.struct_type_params,
+                                             hondas=self.vistas_hondas)
+        # Qué parámetros no cambian de largo ni sueltan nada de lo que tienen
+        # adentro: mientras un pedazo mira un Vec de `c`, `c` solo va a esos
+        self.quietos_motivos = {}
+        self.quietos = pedazos.resolve_quietos(program.items, self.structs, self.struct_type_params,
+                                               motivos=self.quietos_motivos)
         self.consumed_motivos = {}
         self.consumed_params = resolve_consumed_params(fns, lambda t: t.name in self.structs, self.structs,
-                                                       motivos=self.consumed_motivos)
+                                                       motivos=self.consumed_motivos,
+                                                       prestados=self.contenedores_prestados)
         # Dónde y por qué se movió cada variable (la última vez), para
         # que el error de usarla después (o en la vuelta siguiente de un
         # loop) señale esa línea y diga el motivo.
@@ -512,13 +539,22 @@ class Checker:
         segundo caso, y no copiarlo lee memoria liberada en el primero. Es
         un error en los dos backends; con un número o un str no lo es (se lee
         antes, y vale lo mismo en los dos). Qué fn puede reasignar qué campo
-        lo dice lugares.py, el mismo análisis que usa el codegen."""
+        lo dice lugares.py, el mismo análisis que usa el codegen.
+
+        Lo mismo con la llamada que recibe el campo: `f(c, c.pesos)` con una f
+        que hace `p.pesos = ...` por su primer parámetro reemplaza el objeto que
+        recibió por el segundo (el intérprete se queda con el viejo, el nativo lo
+        libera). Solo importa reasignar el campo o algo que lo contiene:
+        agrandarlo o cambiarle lo de adentro lo ven igual los dos. Con un elemento
+        (`m[i]`) la regla es otra (Checker._revisar_alias_de_vistas)."""
         conocidas = set(NOMBRES_BUILTIN) | set(self.extern_functions)
         efecto = lugares.reasignaciones(program.items, conocidas)
         for item in program.items:
             if not isinstance(item, FnDecl):
                 continue
             for n in lugares._recorrer(item.body):
+                if isinstance(n, Call) and isinstance(n.callee, Ident):
+                    self._revisar_llamada_que_reasigna(n, efecto, conocidas)
                 partes = lugares.en_orden(n)
                 for i, h in enumerate(partes):
                     c = lugares.camino(h)
@@ -536,6 +572,31 @@ class Checker:
                             h,
                         )
                         break
+
+    def _revisar_llamada_que_reasigna(self, llamada, efecto, conocidas):
+        """Un campo struct, Vec o Map pasado a una llamada que, por otro de sus
+        argumentos, puede reasignar ese campo (ver _revisar_orden_de_lugares)."""
+        fname = llamada.callee.name
+        for h in llamada.args:
+            c = lugares.camino(h)
+            if c is None or not c[1] or not self._es_referencia(getattr(h, "tipo_lugar", None)):
+                continue
+            quien = lugares.llamada_puede_reemplazar(efecto, conocidas, fname, llamada.args, h,
+                                                     lambda x, r=c[0]: x == r)
+            if quien is None:
+                continue
+            texto = ".".join((c[0],) + c[1])
+            if quien == fname:
+                porque = f"{fname}() puede reasignar '{texto}' por el otro argumento"
+            else:
+                porque = f"no se sabe qué hace {fname}() con lo que recibe ({quien})"
+            self._fail(
+                f"no se puede pasar '{texto}' y, en la misma llamada, lo que lo contiene a {fname}(): "
+                f"{porque}, y lo que recibió como '{texto}' quedaría mirando el objeto de antes. "
+                f"Hazlo en dos pasos",
+                h,
+            )
+            return
 
     def _resolve_fresh_result_str_fns(self, program: Program):
         """Contrato único de str (ver codegen._str_return_propio): toda
@@ -661,7 +722,7 @@ class Checker:
                 decl,
             )
             return
-        _RESERVED = ({"i32", "i64", "f64", "str", "bool", "void", "Option", "Result"}
+        _RESERVED = ({"i32", "i64", "f32", "f64", "str", "bool", "void", "Option", "Result"}
                      | {TASK_MARK, CHAN_MARK, VEC_MARK, MAP_MARK, PIPE_MARK,
                         FILE_MARK, SOCKET_MARK, LISTENER_MARK})
         if decl.name in _RESERVED:
@@ -951,6 +1012,11 @@ class Checker:
             self._no_tapar_builtin(p.name, p.type_ann or T_I32, p if getattr(p, "line", None) else decl)
             env.define(p.name, p.type_ann or T_I32, mut=False, kind="param")  # sin anotación -> asume i32 (prototipo)
         ret_ty = decl.return_type or T_VOID
+        # los pedazos guardados en una variable (`let p = v[a..b]`): su vida y la
+        # del Vec que miran (pedazos.py)
+        pedazos.Revisor(self.functions, getattr(self, "vec_fijos", {}), getattr(self, "fijos_motivos", {}),
+                        getattr(self, "contenedores_prestados", {}), getattr(self, "quietos", {}),
+                        getattr(self, "quietos_motivos", {}), self._fail).revisar_fn(decl)
         try:
             self._check_block(decl.body, env, decl, ret_ty)
         except TypeError_ as e:
@@ -971,13 +1037,49 @@ class Checker:
 
     def _chequear_contrato_fn_valor(self, expr, target):
         """el tipo `fn(...)` tiene un contrato fijo, porque quien
-        llama a través de él no sabe a qué fn llama: un Vec/Map que recibe se
-        mueve (como en toda fn), un struct se PRESTA, y lo que devuelve es
-        nuevo. Una fn que se queda con un struct que recibe, o que devuelve un
+        llama a través de él no sabe a qué fn llama: un Vec, un Map o un struct
+        que recibe se PRESTA (un Option de ellos se mueve), y lo que
+        devuelve es nuevo. Una fn que se queda con un struct que recibe, o que devuelve un
         struct que recibió, hace otra cosa según cuál sea: no se puede usar
         como valor (en una llamada directa el checker sí sabe y mueve el
         argumento)."""
         nombre = target.name
+        # los Vec/Map: un valor fn los presta, así que la fn tiene que
+        # recibirlos prestados (una que se queda con uno hace otra cosa)
+        prestados = getattr(self, "contenedores_prestados", {}).get(nombre, ())
+        for k, p in enumerate(target.params):
+            if getattr(p.type_ann, "name", None) in (VEC_MARK, MAP_MARK) and k not in prestados:
+                motivo = getattr(self, "prestados_motivos", {}).get(nombre, {}).get(k)
+                self._fail(
+                    f"'{nombre}' no se puede usar como valor: se queda con su parámetro '{p.name}'"
+                    + (f" (porque {motivo})" if motivo else "")
+                    + f". Una función guardada en una variable presta los Vec, los Map y los structs "
+                    f"que recibe; llámala directo (`{nombre}(...)`), o haz que trabaje sobre una copia",
+                    expr,
+                )
+                return
+        # una fn que toma un pedazo de un parámetro: en una
+        # llamada directa el checker mira que ese Vec no llegue además por otro
+        # parámetro que le cambie el largo; a través de un valor fn no se sabe a
+        # cuál se llama, así que los demás parámetros no pueden ser de los que
+        # podrían cambiarlo
+        vistas = getattr(self, "vistas", {}).get(nombre, ())
+        fijos = getattr(self, "vec_fijos", {}).get(nombre, ())
+        for j in sorted(vistas):
+            for k, p in enumerate(target.params):
+                t = p.type_ann
+                if k == j or t is None or t.name in ("i32", "i64", "f32", "f64", "bool", "str", CHAN_MARK, FN_MARK):
+                    continue
+                if t.name == VEC_MARK and k in fijos and t.args and \
+                        t.args[0].name in ("i32", "i64", "f32", "f64", "bool"):
+                    continue
+                self._fail(
+                    f"'{nombre}' no se puede usar como valor: toma un pedazo de su parámetro "
+                    f"'{target.params[j].name}', y por '{p.name}' podría llegarle el mismo Vec y cambiarle "
+                    f"el largo. Llámala directo (`{nombre}(...)`): ahí el compilador ve qué se le pasa",
+                    expr,
+                )
+                return
         consumidos = set(getattr(self, "consumed_params", {}).get(nombre, ()))
         consumidos |= set(getattr(self, "consumed_option_params", {}).get(nombre, ()))
         devueltos = set(getattr(self, "returned_params", {}).get(nombre, ()))
@@ -1115,8 +1217,7 @@ class Checker:
         if tipo is None:
             tipo = valores[0][1]
             for _e, t in valores[1:]:
-                if (tipo != t and tipo.name in ("i32", "i64", "f64") and t.name in ("i32", "i64", "f64")
-                        and numeric_mix_ok(tipo, t)):
+                if tipo != t and tipo.is_numeric() and t.is_numeric() and numeric_mix_ok(tipo, t):
                     tipo = numeric_result(tipo, t)
         if tipo == T_VOID:
             self._fail("las ramas de este if no dan ningún valor (terminan en algo que "
@@ -1807,12 +1908,59 @@ class Checker:
             return " (convierte con to_i64(...), que trunca hacia cero)"
         if par == ("f64", "i64"):
             return " (convierte con to_f64(...); de i64 a f64 se puede perder precisión)"
+        if par == ("f32", "f64"):
+            return " (convierte con to_f32(...), que redondea al f32 más cercano)"
+        if par in (("f32", "i32"), ("f32", "i64")):
+            return (" (convierte con to_f32(...); un f32 guarda enteros exactos solo "
+                    "hasta 16777216)")
+        if par in (("i32", "f32"), ("i64", "f32")):
+            return f" (convierte con to_{esperado.name}(...), que trunca hacia cero)"
         return ""
 
-    def _fallo_i64_f64(self, expr):
+    def _fallo_i64_f64(self, expr, l=None, r=None, que=None):
+        """Dos números que no se mezclan solos: i64 con f64, o f32 con un entero."""
+        que = que or f"'{expr.op}'"
+        if l is not None and r is not None and "f32" in (l.name, r.name):
+            entero = r.name if l.name == "f32" else l.name
+            self._fail(
+                f"{que} entre f32 y {entero}: convierte el entero con to_f32() (un f32 "
+                f"guarda enteros exactos solo hasta 16777216)", expr)
+            return
         self._fail(
-            f"'{expr.op}' entre i64 y f64: convierte uno de los dos con to_f64() o "
+            f"{que} entre i64 y f64: convierte uno de los dos con to_f64() o "
             f"to_i64() (de i64 a f64 se puede perder precisión)", expr)
+
+    def _literal_a_f32(self, expr):
+        """Un literal toma el tipo que se espera: si `expr` es un número escrito
+        (`0.5`, `2`, `-1.5`), queda marcado como f32 con su valor ya redondeado
+        (Node.lit_f32) y devuelve True. Uno entero tiene que caber exacto."""
+        if isinstance(expr, NumLit):
+            v = expr.value
+        elif (isinstance(expr, UnaryOp) and expr.op == "-" and isinstance(expr.expr, NumLit)):
+            v = -expr.expr.value
+        else:
+            return False
+        r = literal_f32(v)
+        if r is None:
+            if isinstance(v, float):
+                self._fail(f"literal fuera de rango: {v} no entra en un f32 (el máximo "
+                           f"es 3.4028235e+38)", expr)
+            else:
+                self._fail(f"el entero {v} no se puede escribir exacto como f32 (un f32 "
+                           f"guarda enteros exactos solo hasta 16777216)", expr)
+            r = 0.0
+        expr.lit_f32 = r
+        expr.tipo_int = None
+        return True
+
+    def _literales_a_f32(self, expr, l, r):
+        """En `a op b` con un lado f32 y el otro un número escrito, el literal
+        es f32 (`x * 0.5` con x: f32 no se va a f64). Devuelve (l, r)."""
+        if l == T_F32 and r != T_F32 and r.is_numeric() and self._literal_a_f32(expr.right):
+            return l, T_F32
+        if r == T_F32 and l != T_F32 and l.is_numeric() and self._literal_a_f32(expr.left):
+            return T_F32, r
+        return l, r
 
     def _resultado_numerico(self, expr, l, r):
         """Tipo de una cuenta entre dos números (ver numeric_result).
@@ -1820,8 +1968,8 @@ class Checker:
         nativo desbordan con el rango de ESE tipo."""
         ty = numeric_result(l, r)
         if ty is None:
-            self._fallo_i64_f64(expr)
-            return T_I64
+            self._fallo_i64_f64(expr, l, r)
+            return T_F32 if "f32" in (l.name, r.name) else T_I64
         if ty.is_integer():
             expr.tipo_int = ty.name
         return ty
@@ -1846,6 +1994,15 @@ class Checker:
             if expr is not None:
                 expr.promover_f64 = True
             return True
+        if expected == T_F64 and actual == T_F32:
+            # f32 -> f64 no pierde nada: todo f32 es exactamente un f64.
+            if expr is not None:
+                expr.promover_f64 = True
+            return True
+        if expected == T_F32 and actual in (T_F64, T_I32, T_I64) and expr is not None:
+            # un número escrito toma el tipo que se espera (`let x: f32 = 0.5`)
+            if self._literal_a_f32(expr):
+                return True
         # La misma ampliación adentro de un Some/Ok recién armado
         # (`let o: Option<i64> = Some(5)`, `return Ok(0)` en una fn -> Result<f64>):
         # lo que se amplía es el valor de adentro, y el Some/Ok toma el tipo
@@ -1995,7 +2152,8 @@ class Checker:
         ('let d = "x"') tampoco es fresco: sigue siendo Copy de verdad,
         vive en el binario, no en el heap."""
         if isinstance(expr, IndexExpr):
-            return True
+            # s[i] reserva un str nuevo; v[i] de un Vec de números da un número
+            return ty == T_STR
         if isinstance(expr, FieldAccess) and ty == T_STR:
             # Un campo str de un struct temporal
             # (`mk().s`, `E { .. }.s`) se saca de la raíz y queda fresco en
@@ -2151,10 +2309,10 @@ class Checker:
                 self._fail(f"{nombre}.{m}() no lleva argumentos", expr)
             return T_STR if m == "err" else T_BOOL
         if m == "unwrap_or":
-            if inner.name not in ("i32", "i64", "f64", "bool") and not (
+            if inner.name not in ("i32", "i64", "f32", "f64", "bool") and not (
                     not inner.args and inner.name in types_.PARAMS_COPIA):
                 self._fail(
-                    f"{nombre}.unwrap_or() solo está para un valor i32, i64, f64 o bool "
+                    f"{nombre}.unwrap_or() solo está para un valor i32, i64, f32, f64 o bool "
                     f"(acá es {inner!r}): para uno con dueña, usa `?` o `while let`", expr)
                 return inner
             if len(arg_types) != 1 or not self._compatible(inner, arg_types[0], expr.args[0] if expr.args else None):
@@ -2466,6 +2624,8 @@ class Checker:
         if isinstance(expr, BinOp):
             l = self._infer(expr.left, env, fn, ret_ty)
             r = self._infer(expr.right, env, fn, ret_ty)
+            if expr.op in ("+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">="):
+                l, r = self._literales_a_f32(expr, l, r)
             if expr.op in ("and", "or"):
                 if l != T_BOOL or r != T_BOOL:
                     self._fail(f"'{expr.op}' requiere bool a ambos lados, se dio {l!r} y {r!r}", expr)
@@ -2494,7 +2654,7 @@ class Checker:
             if expr.op in ("<", ">", "<=", ">="):
                 if l.is_numeric() and r.is_numeric():
                     if not numeric_mix_ok(l, r):
-                        self._fallo_i64_f64(expr)
+                        self._fallo_i64_f64(expr, l, r)
                     return T_BOOL
                 # Mismo mecanismo que '+'/'-': un 'T' abstracto con bound
                 # Numeric habilita comparar dos valores del MISMO T. Sin
@@ -2578,8 +2738,8 @@ class Checker:
                 tipos.append(t)
                 if inner is None:
                     inner = t
-                elif (anotado is None and inner != t and inner.name in ("i32", "i64", "f64")
-                      and t.name in ("i32", "i64", "f64") and numeric_mix_ok(inner, t)):
+                elif (anotado is None and inner != t and inner.is_numeric()
+                      and t.is_numeric() and numeric_mix_ok(inner, t)):
                     inner = numeric_result(inner, t)
             for e, t in zip(expr.elems, tipos):
                 if not self._compatible(inner, t, e):
@@ -2671,6 +2831,9 @@ class Checker:
             return TypeAnn(expr.name, concrete_args)
 
         if isinstance(expr, FieldAccess):
+            if isinstance(expr.obj, (IndexExpr, FieldAccess)):
+                # `v[i].campo`: el elemento es un lugar, no un valor que se saca
+                expr.obj._en_lugar = True
             camino = self._camino_campo(expr)
             if camino is not None and not env.is_moved(camino.split(".")[0]):
                 conflicto = env.moved_conflict(camino)
@@ -2693,7 +2856,18 @@ class Checker:
             if expr.field not in fields:
                 self._fail(f"'{obj_ty.name}' no tiene campo '{expr.field}'", expr)
                 return T_I32
-            return self._substitute_type_params(fields[expr.field], obj_ty.name, obj_ty.args)
+            campo_ty = self._substitute_type_params(fields[expr.field], obj_ty.name, obj_ty.args)
+            if (self._pasa_por_indice(expr.obj) and not getattr(expr, "_en_lugar", False)
+                    and campo_ty.name not in self._ESCALARES_LUGAR):
+                # `let s = v[i].nombre`, `v[i].lista = otra`: sacaría (o pisaría) algo
+                # con dueño de adentro de un Vec sin decirlo
+                self._fail(
+                    f"de un elemento de un Vec, por ahora se leen y escriben campos de números o "
+                    f"bool, y '.{expr.field}' es {campo_ty!r}: se puede indexar o llamar len/get/"
+                    f"suma/punto/push/set sobre él, y para sacarlo entero usa 'v.replace(i, otro)'",
+                    expr,
+                )
+            return campo_ty
 
         if isinstance(expr, IndexExpr):
             # (ver docstring de IndexExpr en parser.py): solo 'str'
@@ -2702,14 +2876,89 @@ class Checker:
             # Mismo criterio que FieldAccess sobre un tipo sin ese campo: no es
             # un error "esperable" (no hay Option/Result de por medio), así que
             # se rechaza en el checker en vez de dejar que explote en runtime.
+            if isinstance(expr.obj, (IndexExpr, FieldAccess)):
+                # `m[i][j]`, `red[i].pesos[j]`: lo de adentro es un lugar
+                expr.obj._en_lugar = True
             obj_ty = self._infer(expr.obj, env, fn, ret_ty)
             idx_ty = self._infer(expr.index, env, fn, ret_ty)
+            if obj_ty.name == VEC_MARK:
+                # v[i]: por ahora sobre un
+                # Vec de números o bool, donde el elemento es un valor que se
+                # copia. Para elementos con dueño (struct, str, Vec, Map…) v[i]
+                # va a ser un lugar (v[i].campo), en un paso siguiente; hasta
+                # entonces, get() y replace().
+                elem = obj_ty.args[0] if obj_ty.args else T_I32
+                if idx_ty != T_I32:
+                    self._fail(f"el índice de '[...]' debe ser i32, se dio {idx_ty!r}{self._pista(T_I32, idx_ty)}", expr.index)
+                if not Parser._is_place(expr.obj):
+                    # un Vec temporal (`crear()[0]`) no tiene dueña que lo suelte
+                    # después de leerlo: por ahora, el Vec va en una variable
+                    self._fail("'v[i]' es sobre un Vec guardado en una variable o en un campo: "
+                               "guarda primero el resultado (`let v = ...`) y después indexa", expr)
+                    return elem
+                if elem.name not in ("i32", "i64", "f64", "f32", "bool") and not self._type_param_bound_ops(elem, fn):
+                    # (un T con bound Numeric siempre es un número: vale.) Un
+                    # elemento con dueño es un lugar: `v[i].campo`, `m[i][j]`,
+                    # `m[i].len()`; nunca un valor que se saca del Vec.
+                    if elem.name != VEC_MARK and (elem.name not in self.structs or elem.name in self.enums):
+                        self._fail(
+                            f"'v[i]' es para un Vec de números, bool, structs o Vec, y este es {obj_ty!r}: "
+                            f"para una copia del elemento usa 'v.get(i)', y para sacarlo 'v.replace(i, otro)'",
+                            expr,
+                        )
+                    elif not getattr(expr, "_en_lugar", False):
+                        self._fail(
+                            f"'v[i]' de un {obj_ty!r} es un lugar, no un valor: se usa como "
+                            f"'v[i].campo', 'v[i][j]' o 'v[i].len()'. Para una copia del elemento "
+                            f"usa 'v.get(i)', y para sacarlo 'v.replace(i, otro)'",
+                            expr,
+                        )
+                return elem
             if obj_ty != T_STR:
-                self._fail(f"'{obj_ty!r}' no es indexable con '[...]' (por ahora solo 'str' lo es)", expr)
+                self._fail(f"'{obj_ty!r}' no es indexable con '[...]' (solo un str o un Vec lo son)", expr)
                 return T_STR
             if idx_ty != T_I32:
                 self._fail(f"el índice de '[...]' debe ser i32, se dio {idx_ty!r}{self._pista(T_I32, idx_ty)}", expr.index)
             return T_STR
+
+        if isinstance(expr, SliceExpr):
+            # v[a..b]: el pedazo de un Vec de
+            # números, sin copiarlo. Por ahora solo con .suma(), .punto() y
+            # .acumular(); su tipo
+            # es el del Vec, así que lo demás (que .punto() pida dos del mismo tipo
+            # de elemento, el cero de la suma) sale igual que con el Vec entero.
+            if isinstance(expr.obj, (IndexExpr, FieldAccess)):
+                expr.obj._en_lugar = True  # `m[i][a..b]`, `c.pesos[a..b]`
+            obj_ty = self._infer(expr.obj, env, fn, ret_ty)
+            for lado in (expr.desde, expr.hasta):
+                lado_ty = self._infer(lado, env, fn, ret_ty)
+                if lado_ty != T_I32:
+                    self._fail(f"los bordes de un pedazo 'v[a..b]' son i32, se dio {lado_ty!r}"
+                               f"{self._pista(T_I32, lado_ty)}", lado)
+            if obj_ty.name != VEC_MARK:
+                self._fail(f"'v[a..b]' es un pedazo de un Vec, y esto es {obj_ty!r}"
+                           + (": para un pedazo de un str usa texto.subtexto(s, a, b)" if obj_ty == T_STR else ""),
+                           expr)
+                return obj_ty
+            elem = obj_ty.args[0] if obj_ty.args else T_I32
+            if not self._elemento_de_pedazo(elem):
+                self._fail(f"por ahora 'v[a..b]' es para un Vec de números, bool, str, structs o Vec, "
+                           f"y este es {obj_ty!r}", expr)
+                return obj_ty
+            if not Parser._is_place(expr.obj):
+                self._fail("'v[a..b]' es sobre un Vec guardado en una variable o en un campo: "
+                           "guarda primero el resultado (`let v = ...`) y después toma el pedazo", expr)
+                return obj_ty
+            if not getattr(expr, "_pedazo_ok", False) and getattr(expr, "_pedazo_no", None):
+                self._fail(expr._pedazo_no, expr)
+            elif not getattr(expr, "_pedazo_ok", False):
+                self._fail("un pedazo 'v[a..b]' se guarda con 'let p = v[a..b]', se usa con .suma(), .punto(), "
+                           ".acumular() y .llenar() ('v[a..b].suma()', 'w.punto(v[a..b])', "
+                           "'v[a..b].acumular(w, k)', 'v[a..b].llenar(0)') o se "
+                           "pasa a una fn que no le cambia el largo ('normalizar(v[a..b])'). Es una vista de "
+                           "otro Vec, no un Vec propio: no se devuelve, no se asigna ni se guarda en otro "
+                           "lado. Para una copia, arma un Vec nuevo con push", expr)
+            return obj_ty
 
         if isinstance(expr, SpawnExpr):
             call = expr.call
@@ -2756,6 +3005,8 @@ class Checker:
 
         if isinstance(expr, PrintExpr):
             for a in expr.args:
+                if isinstance(a, (IndexExpr, FieldAccess)):
+                    a._en_lugar = True  # print solo lee: print(m[i]), print(red[k].pesos)
                 self._infer(a, env, fn, ret_ty)
             return T_VOID
 
@@ -2804,6 +3055,12 @@ class Checker:
                         expr,
                     )
                     return ret_type
+                for pt, a in zip(param_types, expr.args):
+                    # un lugar (`p.lista`, `m[i]`) se presta en su sitio, como en una
+                    # llamada directa a una fn que presta
+                    if pt.name in (VEC_MARK, MAP_MARK) and isinstance(a, (IndexExpr, FieldAccess)) \
+                            and Parser._is_place(a):
+                        a._en_lugar = True
                 arg_types = [
                     self._infer(a, env, fn, ret_ty, expected_ty=pt)
                     for a, pt in zip(expr.args, param_types)
@@ -2815,14 +3072,12 @@ class Checker:
                             f"{self._pista(pt, at)}",
                             expr.args[i],
                         )
-                # un Vec/Map que se pasa a través de un valor
-                # fn se mueve, igual que en una llamada directa (la fn que lo recibe
-                # es su dueña). Antes `f(v)` dejaba seguir usando `v`.
-                for pt, arg_expr in zip(param_types, expr.args):
-                    if pt.name in (VEC_MARK, MAP_MARK):
-                        self._motivo_mov = f"'{fname}' (una función) se queda con lo que recibe"
-                        self._move_if_needed(arg_expr, pt, env)
-                        self._motivo_mov = None
+                # un Vec/Map que se pasa a través de un valor fn se PRESTA:
+                # la fn guardada lo recibe prestado (_chequear_contrato_fn_valor
+                # no deja guardar una que se quede con él), y quien llama lo sigue
+                # teniendo. Antes se movía.
+                expr._tipos_params = param_types
+                self._revisar_alias_de_vistas(fname, None, expr)
                 return ret_type
             if fname == "chan_new":
                 # Única builtin de aridad variable: 0 args (sin límite,
@@ -3019,17 +3274,19 @@ class Checker:
                 tys = [self._infer(a, env, fn, ret_ty) for a in expr.args]
                 for a, t in zip(expr.args, tys):
                     if not t.is_numeric():
-                        self._fail(f"'{fname}' espera un número (i32, i64 o f64), se dio {t!r}", a)
+                        self._fail(f"'{fname}' espera un número (i32, i64, f32 o f64), se dio {t!r}", a)
                         return T_F64
                 if fname == "abs":
                     res = tys[0]
                 else:
+                    if T_F32 in tys:
+                        # min(x, 0.0) con x: f32: el literal es f32
+                        tys = [T_F32 if (t != T_F32 and self._literal_a_f32(a)) else t
+                               for a, t in zip(expr.args, tys)]
                     res = numeric_result(tys[0], tys[1])
                     if res is None:
-                        self._fail(
-                            f"'{fname}' entre i64 y f64: convierte uno de los dos con to_f64() o "
-                            f"to_i64() (de i64 a f64 se puede perder precisión)", expr)
-                        return T_I64
+                        self._fallo_i64_f64(expr, tys[0], tys[1], que=f"'{fname}'")
+                        return T_F32 if T_F32 in tys else T_I64
                     for a, t in zip(expr.args, tys):
                         self._compatible(res, t, a)
                 if res.is_integer():
@@ -3040,19 +3297,19 @@ class Checker:
                     self._fail(f"'a_texto' espera 1 argumento, se dieron {len(expr.args)}", expr)
                     return T_STR
                 at = self._infer(expr.args[0], env, fn, ret_ty)
-                if at.name not in ("i32", "i64", "f64", "bool", "str") or at.args:
+                if at.name not in ("i32", "i64", "f32", "f64", "bool", "str") or at.args:
                     self._fail(f"'a_texto' convierte un número, un bool o un str; se dio {at!r}",
                                expr.args[0])
                 return T_STR
-            if fname in ("to_i32", "to_i64", "to_f64"):
-                # Conversiones explícitas entre los tres números.
-                destino = {"to_i32": T_I32, "to_i64": T_I64, "to_f64": T_F64}[fname]
+            if fname in ("to_i32", "to_i64", "to_f32", "to_f64"):
+                # Conversiones explícitas entre los números.
+                destino = {"to_i32": T_I32, "to_i64": T_I64, "to_f32": T_F32, "to_f64": T_F64}[fname]
                 if len(expr.args) != 1:
                     self._fail(f"'{fname}' espera 1 argumento, se dieron {len(expr.args)}", expr)
                     return destino
                 at = self._infer(expr.args[0], env, fn, ret_ty)
                 if not at.is_numeric():
-                    self._fail(f"'{fname}' espera un número (i32, i64 o f64), se dio {at!r}", expr.args[0])
+                    self._fail(f"'{fname}' espera un número (i32, i64, f32 o f64), se dio {at!r}", expr.args[0])
                 expr.tipo_origen = at.name
                 return destino
             if fname in BUILTIN_FN_TYPES:
@@ -3114,6 +3371,15 @@ class Checker:
             if target is None:
                 self._fail(f"función no definida: '{fname}'", expr)
                 return T_I32
+            for j, (p, arg_expr) in enumerate(zip(target.params, expr.args)):
+                # un lugar (`p.lista`, `m[i]`) pasado a un Vec/Map prestado se presta
+                # en su sitio
+                if (j in getattr(self, "contenedores_prestados", {}).get(fname, ())
+                        and isinstance(arg_expr, (IndexExpr, FieldAccess)) and Parser._is_place(arg_expr)):
+                    arg_expr._en_lugar = True
+                if isinstance(arg_expr, SliceExpr):
+                    self._revisar_pedazo_arg(fname, target, j, arg_expr, expr)
+            self._revisar_alias_de_vistas(fname, target, expr)
             generic_ret = self._check_call_args(target, expr.args, env, fn, ret_ty, call_node=expr)
             # Mismo mecanismo que usan spawn/chan.send()/.push()/.set()
             # (_move_if_needed) -- una `fn`/`task` normal (llamada directa,
@@ -3124,10 +3390,17 @@ class Checker:
             # recibiéndose por ALIAS en una `fn` normal (salvo los que la fn
             # consume, ver `consumed` abajo).
             consumed = getattr(self, "consumed_params", {}).get(fname, ())
+            prestados = getattr(self, "contenedores_prestados", {}).get(fname, ())
             for j, (p, arg_expr) in enumerate(zip(target.params, expr.args)):
                 p_ty = p.type_ann or T_I32
-                if p_ty.name in (VEC_MARK, MAP_MARK):
+                if p_ty.name in (VEC_MARK, MAP_MARK) and j in prestados:
+                    pass  # la fn lo recibe prestado: quien llama lo sigue teniendo
+                elif p_ty.name in (VEC_MARK, MAP_MARK):
+                    porque = self.prestados_motivos.get(fname, {}).get(j)
+                    self._motivo_mov = (f"{fname}() se queda con su parámetro '{p.name}' porque {porque}"
+                                        if porque else None)
                     self._move_if_needed(arg_expr, p_ty, env)
+                    self._motivo_mov = None
                 elif (j in getattr(self, "consumed_option_params", {}).get(fname, ())
                         and p_ty.name == "Option" and p_ty.args and p_ty.args[0].name in self.structs):
                     # Gemelo para Option<Struct> (la fn se queda con
@@ -3151,7 +3424,33 @@ class Checker:
             return generic_ret if generic_ret is not None else (target.return_type or T_VOID)
 
         if isinstance(expr, MethodCall):
+            if isinstance(expr.obj, (IndexExpr, FieldAccess)) and expr.method in self._METODOS_DE_LUGAR:
+                # `m[i].len()`, `red[i].pesos.push(x)`: el método trabaja en el lugar
+                expr.obj._en_lugar = True
+            if isinstance(expr.obj, SliceExpr) and expr.method in ("suma", "punto", "acumular", "llenar"):
+                expr.obj._pedazo_ok = True  # w[a..b].suma(), .punto(x), .acumular(x, k), .llenar(x)
+            if expr.method in ("punto", "acumular") and expr.args:
+                a = expr.args[0]
+                if isinstance(a, (IndexExpr, FieldAccess)):
+                    a._en_lugar = True  # el otro Vec se presta
+                elif isinstance(a, SliceExpr):
+                    a._pedazo_ok = True
+            if expr.method == "punto":
+                for a in expr.args:
+                    if isinstance(a, (IndexExpr, FieldAccess)):
+                        a._en_lugar = True  # el otro Vec de punto se presta
+                    elif isinstance(a, SliceExpr):
+                        a._pedazo_ok = True  # x.punto(w[a..b])
             obj_ty = self._infer(expr.obj, env, fn, ret_ty)
+            if getattr(expr, "desde_indice", False) and obj_ty.name != VEC_MARK:
+                # `x[i] = valor` (el parser lo bajó a x.set(i, valor)) sobre algo
+                # que no es un Vec: el error con la forma que se escribió
+                if obj_ty == T_STR:
+                    self._fail("un str no se cambia por partes con 's[i] = ...': arma uno nuevo "
+                               "(por ejemplo con '+')", expr)
+                else:
+                    self._fail(f"'{obj_ty!r}' no es indexable con '[...] = ...' (solo un Vec lo es)", expr)
+                return T_VOID
             esperado_match = getattr(expr, "match_sobre", None)
             if esperado_match is not None and obj_ty.name != esperado_match:
                 # la condición que arma enum_match para un match
@@ -3286,10 +3585,12 @@ class Checker:
                     if len(arg_types) != 2:
                         self._fail(f"vec.set espera 2 argumentos (índice, valor), se dieron {len(arg_types)}", expr)
                     else:
+                        forma = "'v[i] = ...'" if getattr(expr, "desde_indice", False) else "vec.set"
                         if arg_types[0] != T_I32:
-                            self._fail(f"vec.set espera un índice i32, se dio {arg_types[0]!r}", expr.args[0])
+                            self._fail(f"{forma} espera un índice i32, se dio {arg_types[0]!r}"
+                                       f"{self._pista(T_I32, arg_types[0])}", expr.args[0])
                         if not self._compatible(inner, arg_types[1], expr.args[1]):
-                            self._fail(f"vec.set espera {inner!r}, se dio {arg_types[1]!r}"
+                            self._fail(f"{forma} espera {inner!r}, se dio {arg_types[1]!r}"
                                        f"{self._pista(inner, arg_types[1])}", expr.args[1])
                         else:
                             # Mismo razonamiento que vec.push(): el valor que
@@ -3319,6 +3620,89 @@ class Checker:
                     return inner
                 if expr.method == "len":
                     return T_I32
+                if expr.method == "llenar":
+                    # v.llenar(x): cada elemento queda en x, en su lugar; el largo no
+                    # cambia. Para números y bool: con
+                    # elementos con dueño habría que copiar x en cada lugar.
+                    if inner.name not in ("f64", "f32", "i32", "i64", "bool"):
+                        self._fail(f"'.llenar()' es para un Vec de números o bool (i32, i64, f32, f64 o bool), y "
+                                   f"este es {obj_ty!r}: para un Vec de textos, structs o Vec, recorre con un "
+                                   f"while y cambia cada elemento con set", expr)
+                        return T_VOID
+                    if len(arg_types) != 1:
+                        self._fail(f"vec.llenar(x) lleva 1 argumento, se dieron {len(arg_types)}", expr)
+                        return T_VOID
+                    if not self._compatible(inner, arg_types[0], expr.args[0]):
+                        self._fail(f"vec.llenar() espera {inner!r}, se dio {arg_types[0]!r}"
+                                   f"{self._pista(inner, arg_types[0])}", expr.args[0])
+                    elif not self._lectura_simple(expr.args[0]):
+                        # el valor se calcula antes de llenar: si una llamada cambiara
+                        # el mismo Vec, el binario y el intérprete no podrían dar lo mismo
+                        self._fail("el valor de vec.llenar(x) no puede llamar a una función: guárdalo primero "
+                                   "en una variable (`let x = ...`)", expr.args[0])
+                    if not Parser._is_place(expr.obj) and not isinstance(expr.obj, SliceExpr):
+                        self._fail("'.llenar()' cambia el Vec en su lugar: tiene que estar en una variable o en un campo",
+                                   expr)
+                    expr.tipo_llenar = inner.name
+                    return T_VOID
+                if expr.method == "acumular":
+                    # a.acumular(b, k): a[i] = a[i] + k * b[i] en su lugar.
+                    # Cada elemento se calcula solo, así que el binario lo hace con
+                    # SIMD y da lo mismo que el intérprete. Con enteros (i32, i64) la
+                    # cuenta de cada elemento es exacta, y si no cabe en el tipo es panic.
+                    if inner.name not in ("f64", "f32", "i32", "i64"):
+                        self._fail(f"'.acumular()' es para un Vec de números (i32, i64, f32 o f64), y este es "
+                                   f"{obj_ty!r}", expr)
+                        return T_VOID
+                    if len(arg_types) != 2:
+                        self._fail(f"vec.acumular(otro, k) lleva 2 argumentos, se dieron {len(arg_types)}", expr)
+                        return T_VOID
+                    if arg_types[0] != obj_ty:
+                        self._fail(f"vec.acumular() espera otro {obj_ty!r}, se dio {arg_types[0]!r}", expr.args[0])
+                    elif not Parser._is_place(expr.args[0]) and not isinstance(expr.args[0], SliceExpr):
+                        self._fail("el Vec de vec.acumular(otro, k) tiene que estar en una variable o en un campo: "
+                                   "guarda primero el resultado (`let otro = ...`)", expr.args[0])
+                    if not self._compatible(inner, arg_types[1], expr.args[1]):
+                        self._fail(f"el número de vec.acumular(otro, k) es {inner!r}, se dio {arg_types[1]!r}"
+                                   f"{self._pista(inner, arg_types[1])}", expr.args[1])
+                    if not Parser._is_place(expr.obj) and not isinstance(expr.obj, SliceExpr):
+                        self._fail("'.acumular()' cambia el Vec en su lugar: tiene que estar en una variable o en un campo",
+                                   expr)
+                    expr.tipo_reduccion = inner.name
+                    return T_VOID
+                if expr.method in ("suma", "punto"):
+                    # v.suma() y a.punto(b):
+                    # para un Vec de números; los decimales se suman en 16 carriles
+                    # con el orden fijo del diseño, los enteros dan la suma exacta
+                    # (panic si no cabe). Devuelven el tipo del elemento.
+                    if self._type_param_bound_ops(inner, fn):
+                        # un Vec<T> vacío en el intérprete no sabe si su suma es 0 o
+                        # 0.0 (no sabe qué es T); el binario sí: por ahora, solo con
+                        # el tipo concreto
+                        self._fail(f"'.{expr.method}()' todavía no está para un Vec<{inner!r}> de una fn genérica: "
+                                   f"recorre con v[i] (o llama desde donde el tipo es concreto)", expr)
+                        return inner
+                    if inner.name not in ("i32", "i64", "f64", "f32"):
+                        self._fail(f"'.{expr.method}()' es para un Vec de números (i32, i64, f64 o f32), "
+                                   f"y este es {obj_ty!r}", expr)
+                        return inner
+                    # el intérprete necesita el tipo para el cero de un Vec vacío
+                    expr.tipo_reduccion = inner.name
+                    if expr.method == "suma":
+                        if arg_types:
+                            self._fail(f"vec.suma() no lleva argumentos, se dieron {len(arg_types)}", expr)
+                        return inner
+                    if len(arg_types) != 1:
+                        self._fail(f"vec.punto(otro) lleva 1 argumento, se dieron {len(arg_types)}", expr)
+                        return inner
+                    if arg_types[0] != obj_ty:
+                        self._fail(f"vec.punto() espera otro {obj_ty!r}, se dio {arg_types[0]!r}", expr.args[0])
+                    elif not Parser._is_place(expr.args[0]) and not isinstance(expr.args[0], SliceExpr):
+                        # el otro Vec se presta, no se mueve: tiene que tener dueña
+                        # (un Vec temporal no lo soltaría nadie)
+                        self._fail("el Vec de vec.punto(otro) tiene que estar en una variable o en un campo: "
+                                   "guarda primero el resultado (`let otro = ...`)", expr.args[0])
+                    return inner
                 self._fail(f"Vec no tiene método '.{expr.method}()'", expr)
                 return T_I32
             if obj_ty.name == MAP_MARK:
@@ -3376,6 +3760,160 @@ class Checker:
 
         self._fail(f"expresión no soportada por el checker: {type(expr).__name__}", expr)
         return T_I32
+
+    def _elemento_de_pedazo(self, elem):
+        """De qué puede ser el Vec de un pedazo `v[a..b]`: números, bool, str, un
+        struct común (no genérico, no un enum) o un Vec de esas cosas."""
+        if elem.name in ("i32", "i64", "f32", "f64", "bool", "str") and not elem.args:
+            return True
+        if elem.name == VEC_MARK:
+            return bool(elem.args) and self._elemento_de_pedazo(elem.args[0])
+        return (elem.name in self.structs and elem.name not in self.enums and not elem.args
+                and not self.struct_type_params.get(elem.name))
+
+    def _revisar_pedazo_arg(self, fname, target, j, pedazo, llamada):
+        """Un pedazo v[a..b] pasado a una fn: vale si el
+        parámetro es un Vec prestado que la fn nunca agranda ni achica, y si
+        ningún otro argumento de la llamada puede cambiarle el largo al Vec de
+        origen antes o durante la llamada. Si vale, lo marca; si no, deja el
+        motivo para el error del pedazo."""
+        p = target.params[j]
+        if j not in getattr(self, "vec_fijos", {}).get(fname, ()):
+            if j in getattr(self, "contenedores_prestados", {}).get(fname, ()):
+                porque = self.fijos_motivos.get(fname, {}).get(j)
+                pedazo._pedazo_no = (f"a {fname}() no se le puede pasar un pedazo en '{p.name}': "
+                                     f"puede cambiarle el largo" + (f" ({porque})" if porque else "")
+                                     + ", y un pedazo no se agranda ni se achica")
+            else:
+                pedazo._pedazo_no = (f"a {fname}() no se le puede pasar un pedazo en '{p.name}': "
+                                     f"se queda con ese Vec (lo recibe movido), y un pedazo es una vista "
+                                     f"de otro Vec, no un Vec propio")
+            return
+        pedazo._pedazo_ok = True
+
+    def _revisar_alias_de_vistas(self, fname, target, llamada):
+        """En una llamada, un Vec que la fn va a mirar por un pedazo (el argumento
+        es un pedazo, o la fn toma uno de ese parámetro) no puede llegar además por
+        otro argumento que le cambie el largo o lo suelte: el pedazo quedaría
+        apuntando a nada. Valen, del mismo Vec: otro pedazo, el Vec mismo a un
+        parámetro que no cambia de largo, y un número leído sin llamadas
+        (`w.len()`, `w[0]`). Lo que contiene al Vec (`m` para un pedazo de `m[i]`,
+        `c` para uno de `c.pesos`) solo vale a un parámetro quieto (pedazos.py):
+        cambiarle un elemento suelta el Vec.
+
+        Lo mismo para un elemento prestado en su lugar (`agrega(m[i], m)`): la fn
+        recibe la dirección del elemento dentro del buffer de `m`, y si por el otro
+        parámetro agranda `m`, esa dirección queda apuntando al buffer viejo.
+        `target` es None en una llamada a través de un valor fn (no se sabe a cuál
+        se llama: no hay parámetros quietos)."""
+        fijos = self.vec_fijos.get(fname, ()) if target is not None else ()
+        vistas = self.vistas.get(fname, ()) if target is not None else ()
+        quietos = self.quietos.get(fname, ()) if target is not None else ()
+        hondas = self.vistas_hondas.get(fname, ()) if target is not None else ()
+        tipos = ([p.type_ann for p in target.params] if target is not None
+                 else list(getattr(llamada, "_tipos_params", ())))
+        for j, arg in enumerate(llamada.args):
+            es_pedazo = isinstance(arg, SliceExpr)
+            # (caminos reales: un pedazo guardado es otro nombre de un trozo de su Vec)
+            cam = pedazos.camino_real(arg.obj if es_pedazo else arg)
+            if cam is None:
+                continue
+            en_lugar = (not es_pedazo and getattr(arg, "_en_lugar", False) and pedazos.tiene_indice(cam))
+            if es_pedazo and not getattr(arg, "_pedazo_ok", False):
+                continue
+            if not es_pedazo and j not in vistas and not en_lugar:
+                continue
+            mirado = es_pedazo or j in vistas  # un pedazo lo mira: tampoco puede cambiar de largo
+            hondo = j in hondas
+            for k, otro in enumerate(llamada.args):
+                if k == j or not self._menciona(otro, cam[0]):
+                    continue
+                otro_pedazo = isinstance(otro, SliceExpr)
+                co = pedazos.camino_real(otro.obj if otro_pedazo else otro)
+                contiene = co is not None and len(co) < len(cam) and pedazos.es_prefijo(co, cam)
+                if co is not None and not pedazos.es_prefijo(co, cam) and not pedazos.es_prefijo(cam, co):
+                    continue  # otro lugar: otro campo (`c.pesos` y `c.sesgos`), otro elemento (`m[0]` y `m[1]`)
+                if hondo:
+                    # la fn mira algo de adentro de lo que recibe en j: por el otro
+                    # lado no puede cambiar nada de adentro (no alcanza con que no
+                    # le cambie el largo: `b[0].push(x)`)
+                    if co is not None and k in quietos:
+                        continue
+                else:
+                    if otro_pedazo and co is not None and not contiene:
+                        continue  # otro pedazo: tampoco cambia el largo
+                    if not otro_pedazo and co is not None and not contiene and (k in fijos or not mirado):
+                        continue  # el Vec mismo a un parámetro que no cambia de largo, u otro elemento
+                    if co is not None and k in quietos:
+                        continue  # a un parámetro que no le cambia el largo a nada de adentro
+                if self._lectura_simple(otro) and k < len(tipos) and \
+                        getattr(tipos[k], "name", None) in ("i32", "i64", "f32", "f64", "bool", "str"):
+                    continue  # un número leído antes de la llamada (v.len(), v[0])
+                if es_pedazo:
+                    arg._pedazo_ok = False
+                    arg._pedazo_no = (f"no se puede pasar un pedazo de '{cam[0]}' y, en la misma llamada, "
+                                      f"'{cam[0]}' de otra forma a {fname}(): la fn podría cambiarle el largo "
+                                      f"y el pedazo quedaría apuntando a nada")
+                elif mirado and hondo and not es_pedazo:
+                    self._fail(f"no se puede pasar '{cam[0]}' a {fname}() por '{target.params[j].name}' y, en la "
+                               f"misma llamada, de otra forma: {fname}() toma un pedazo de algo que está "
+                               f"adentro de '{target.params[j].name}', y por el otro lado podría agrandarlo o "
+                               f"soltarlo: el pedazo quedaría apuntando a nada", otro)
+                elif mirado:
+                    self._fail(f"no se puede pasar '{cam[0]}' a {fname}() por '{target.params[j].name}' y, en la "
+                               f"misma llamada, de otra forma: {fname}() toma un pedazo de "
+                               f"'{target.params[j].name}', y si por el otro lado le cambian el largo el pedazo "
+                               f"quedaría apuntando a nada", otro)
+                else:
+                    self._fail(f"no se puede pasar '{pedazos.texto_camino(cam)}' y, en la misma llamada, "
+                               f"'{cam[0]}' de otra forma a {fname}(): '{pedazos.texto_camino(cam)}' se presta "
+                               f"en su lugar, y si la fn agranda o cambia el Vec que lo contiene quedaría "
+                               f"apuntando a nada. Hazlo en dos pasos", otro)
+                break
+
+    @staticmethod
+    def _menciona(expr, nombre):
+        if isinstance(expr, Ident):
+            # (un pedazo guardado de `nombre` también lo nombra)
+            vista = getattr(expr, "_vista", None)
+            return (vista.fuente[0] if vista is not None else expr.name) == nombre
+        if isinstance(expr, Node):
+            return any(Checker._menciona(h, nombre) for h in hijos(expr))
+        if isinstance(expr, (list, tuple)):
+            return any(Checker._menciona(h, nombre) for h in expr)
+        if isinstance(expr, dict):
+            return any(Checker._menciona(h, nombre) for h in expr.values())
+        return False
+
+    @staticmethod
+    def _lectura_simple(expr):
+        """True si `expr` solo lee: variables, campos, índices, números,
+        operaciones, y los métodos que no cambian nada. Ninguna llamada."""
+        if isinstance(expr, (Ident, NumLit, StrLit, BoolLit)):
+            return True
+        if isinstance(expr, (FieldAccess, IndexExpr, SliceExpr)):
+            return all(Checker._lectura_simple(h) for h in hijos(expr) if isinstance(h, Node))
+        if isinstance(expr, BinOp):
+            return Checker._lectura_simple(expr.left) and Checker._lectura_simple(expr.right)
+        if isinstance(expr, UnaryOp):
+            return Checker._lectura_simple(expr.expr)
+        if isinstance(expr, MethodCall) and expr.method in ("len", "suma", "punto"):
+            return Checker._lectura_simple(expr.obj) and all(Checker._lectura_simple(a) for a in expr.args)
+        return False
+
+    # lo que se puede leer o escribir directo de un elemento de un Vec (v[i].campo)
+    _ESCALARES_LUGAR = ("i32", "i64", "f64", "f32", "bool")
+    # los métodos que trabajan sobre un lugar sin sacarlo del Vec (m[i].len())
+    _METODOS_DE_LUGAR = ("len", "get", "suma", "punto", "acumular", "llenar", "set", "push", "pop", "replace")
+
+    @staticmethod
+    def _pasa_por_indice(expr):
+        """True si la cadena de campos e índices `expr` pasa por un v[i]."""
+        while isinstance(expr, (FieldAccess, IndexExpr)):
+            if isinstance(expr, IndexExpr):
+                return True
+            expr = expr.obj
+        return False
 
     def _camino_campo(self, expr):
         """"r.a.b" para una cadena de campos que arranca en una

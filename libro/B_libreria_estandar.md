@@ -8,7 +8,7 @@ Esta lista sale del código: cada función pública de cada librería, con su fi
 real y el comentario que tiene encima en el `.scar`. El comentario del principio
 de cada archivo de `lib/` cuenta además cómo usarla, con ejemplos.
 
-35 librerías, 1105 funciones públicas: [`algebra`](#algebra) (24), [`animacion`](#animacion) (27), [`ansi`](#ansi) (27), [`audio`](#audio) (21), [`autodiff`](#autodiff) (20), [`buffer`](#buffer) (45), [`codigos`](#codigos) (34), [`colecciones`](#colecciones) (56), [`colores`](#colores) (58), [`config`](#config) (23), [`csv`](#csv) (20), [`editor`](#editor) (22), [`estadistica`](#estadistica) (41), [`fecha`](#fecha) (29), [`fisica`](#fisica) (20), [`grafico`](#grafico) (30), [`grafos`](#grafos) (29), [`gui`](#gui) (97), [`https`](#https) (10), [`imagen`](#imagen) (11), [`json`](#json) (69), [`juego`](#juego) (51), [`lienzo`](#lienzo) (37), [`mate`](#mate) (78), [`motor3d`](#motor3d) (17), [`neuronalgames`](#neuronalgames) (34), [`pantalla`](#pantalla) (2), [`parlante`](#parlante) (5), [`patron`](#patron) (31), [`prueba`](#prueba) (12), [`senal`](#senal) (33), [`tablero`](#tablero) (24), [`texto`](#texto) (31), [`web`](#web) (28), [`zlib`](#zlib) (9).
+35 librerías, 1132 funciones públicas: [`algebra`](#algebra) (24), [`animacion`](#animacion) (27), [`ansi`](#ansi) (27), [`audio`](#audio) (21), [`autodiff`](#autodiff) (47), [`buffer`](#buffer) (45), [`codigos`](#codigos) (34), [`colecciones`](#colecciones) (56), [`colores`](#colores) (58), [`config`](#config) (23), [`csv`](#csv) (20), [`editor`](#editor) (22), [`estadistica`](#estadistica) (41), [`fecha`](#fecha) (29), [`fisica`](#fisica) (20), [`grafico`](#grafico) (30), [`grafos`](#grafos) (29), [`gui`](#gui) (97), [`https`](#https) (10), [`imagen`](#imagen) (11), [`json`](#json) (69), [`juego`](#juego) (51), [`lienzo`](#lienzo) (37), [`mate`](#mate) (78), [`motor3d`](#motor3d) (17), [`neuronalgames`](#neuronalgames) (34), [`pantalla`](#pantalla) (2), [`parlante`](#parlante) (5), [`patron`](#patron) (31), [`prueba`](#prueba) (12), [`senal`](#senal) (33), [`tablero`](#tablero) (24), [`texto`](#texto) (31), [`web`](#web) (28), [`zlib`](#zlib) (9).
 
 ## `algebra`
 
@@ -139,7 +139,7 @@ Tipos: `audio.Sonido`, `audio.Bytes`.
 
 derivadas automáticas (use "autodiff").
 
-Tipos: `autodiff.Cinta`.
+Tipos: `autodiff.Cinta`, `autodiff.CintaV`.
 
 - `autodiff.cinta() -> Cinta` — Una cinta vacía.
 - `autodiff.limpiar(c: Cinta)` — Vacía la cinta (para el paso siguiente de un entrenamiento).
@@ -161,6 +161,33 @@ Tipos: `autodiff.Cinta`.
 - `autodiff.sigmoide(c: Cinta, a: i32) -> i32`
 - `autodiff.relu(c: Cinta, a: i32) -> i32`
 - `autodiff.derivar(c: Cinta, salida: i32)` — Calcula la derivada de `salida` respecto de cada valor de la cinta. Los gradientes de una llamada anterior se borran antes.
+- `autodiff.cinta_v() -> CintaV` — Una cinta de vectores vacía.
+- `autodiff.v_limpiar(c: CintaV)` — Vacía la cinta, parámetros incluidos.
+- `autodiff.v_reiniciar(c: CintaV)` — Bota todo lo calculado y conserva los parámetros (v_parametro) con sus gradientes: para el paso siguiente de un entrenamiento.
+- `autodiff.v_largo(c: CintaV) -> i32` — Cuántos valores (vectores) tiene la cinta.
+- `autodiff.v_variable(c: CintaV, v: Vec<f32>) -> i32` — Un vector del que se quiere la derivada (pesos, una entrada). Se copia.
+- `autodiff.v_matriz(c: CintaV, filas: i32, columnas: i32, v: Vec<f32>) -> i32` — Una matriz de `filas` x `columnas`, guardada fila por fila en `v`.
+- `autodiff.v_constante(c: CintaV, v: Vec<f32>) -> i32` — Un vector fijo (una entrada, un objetivo). Se copia. No lleva gradiente: la vuelta hacia atrás no calcula nada hacia él, y v_gradiente da un vector vacío. Para la derivada respecto de una entrada, v_variable.
+- `autodiff.v_parametro(c: CintaV, filas: i32, columnas: i32, pesos: Vec<f32>) -> i32` — Un parámetro: pesos que se aprenden y que quedan en la cinta entre un paso y otro (v_reiniciar no los saca). La cinta se queda con `pesos` (no se copia), de `filas` x `columnas` guardados fila por fila (un vector: 1 x largo). Los parámetros van antes de cualquier otro valor. Devuelve su número, que no cambia entre pasos.
+- `autodiff.v_valor(c: CintaV, i: i32) -> Vec<f32>` — El valor de `i` (una copia).
+- `autodiff.v_gradiente(c: CintaV, i: i32) -> Vec<f32>` — La derivada del último resultado pasado a v_derivar respecto de `i` (una copia).
+- `autodiff.v_valor_en(c: CintaV, i: i32, k: i32) -> f32` — El número `k` del valor `i` (sin copiar el vector).
+- `autodiff.v_gradiente_en(c: CintaV, i: i32, k: i32) -> f32` — El número `k` de la derivada de `i`.
+- `autodiff.v_copia(v: Vec<f32>) -> Vec<f32>` — Una copia de `v` (un Vec<f32> nuevo con los mismos números).
+- `autodiff.v_suma(c: CintaV, a: i32, b: i32) -> i32` — a + b, número a número.
+- `autodiff.v_resta(c: CintaV, a: i32, b: i32) -> i32` — a - b, número a número.
+- `autodiff.v_mul(c: CintaV, a: i32, b: i32) -> i32` — a * b, número a número.
+- `autodiff.v_escalar(c: CintaV, a: i32, k: f32) -> i32` — a * k, con k un número fijo.
+- `autodiff.v_matvec(c: CintaV, w: i32, x: i32) -> i32` — W · x: W una matriz de f x n (v_matriz), x un vector de largo n. Da un vector de largo f.
+- `autodiff.v_tanh(c: CintaV, a: i32) -> i32` — tanh de cada número.
+- `autodiff.v_sigmoide(c: CintaV, a: i32) -> i32` — sigmoide de cada número.
+- `autodiff.v_relu(c: CintaV, a: i32) -> i32` — relu de cada número (los negativos pasan a 0).
+- `autodiff.v_total(c: CintaV, a: i32) -> i32` — La suma de todos los números de `a` (un vector de largo 1).
+- `autodiff.v_punto(c: CintaV, a: i32, b: i32) -> i32` — El producto punto de a y b (un vector de largo 1).
+- `autodiff.v_ecm(c: CintaV, a: i32, b: i32) -> i32` — El error cuadrático medio entre a (lo calculado) y b (lo esperado): la media de (a - b)², un vector de largo 1.
+- `autodiff.v_derivar(c: CintaV, salida: i32)` — Calcula la derivada de `salida` (un vector de largo 1) respecto de cada valor de la cinta. Los gradientes de una llamada anterior se borran antes.
+- `autodiff.v_paso(c: CintaV, i: i32, tasa: f32) -> Vec<f32>` — Resta a los pesos de `i` su gradiente por `tasa` (un paso de descenso por el gradiente) y devuelve los pesos nuevos, para volver a cargarlos en la cinta del paso siguiente.
+- `autodiff.v_aprender(c: CintaV, tasa: f32)` — Un paso de descenso por el gradiente sobre todos los parámetros (v_parametro), en su lugar: w = w - tasa·dw. La misma cuenta que v_paso, sin copiar.
 
 ## `buffer`
 

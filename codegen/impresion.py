@@ -21,7 +21,7 @@ class Impresion:
             return "%d"
         if ty.name == "i64":
             return "%lld"  # el argumento va como (long long), ver print_arg
-        if ty.name == "f64":
+        if ty.name in ("f64", "f32"):
             return "%s"  # ver scar_fmt_f64: %g de C no agrega ".0" como Python
         if ty.name == "str":
             return "%s"
@@ -57,10 +57,10 @@ class Impresion:
             return "%d", code
         if ty.name == "i64":
             return "%lld", f"(long long)({code})"
-        if ty.name == "f64":
-            self.needs_fmt_f64 = True
+        if ty.name in ("f64", "f32"):
+            setattr(self, f"needs_fmt_{ty.name}", True)
             tmp = self._new_tmp()
-            pre.append(f"char* {tmp} = scar_fmt_f64({code});")
+            pre.append(f"char* {tmp} = scar_fmt_{ty.name}({code});")
             post.append(f"scar_free({tmp});")
             return "%s", tmp
         if ty.name == "str":
@@ -238,7 +238,7 @@ class Impresion:
         cuándo entró su clave (`orden`): actualizar una clave no la mueve, y
         sacarla y volver a ponerla la deja al final, como en un dict."""
         entry, suffix, key_ty, val_ty = self.map_nombres[c_name]
-        if val_ty.name not in ("i32", "i64", "f64", "str", "bool", CHAN_MARK, VEC_MARK, MAP_MARK, "Option", "Result",
+        if val_ty.name not in ("i32", "i64", "f32", "f64", "str", "bool", CHAN_MARK, VEC_MARK, MAP_MARK, "Option", "Result",
                                PIPE_MARK, FN_MARK, TASK_MARK) and val_ty.name not in self.structs:
             raise CodegenError(f"print() todavía no soporta {ty!r} en el backend de C")
         pre, post = [], []
@@ -285,7 +285,7 @@ class Impresion:
         formateador recibe un puntero."""
         inner = ty.args[0] if ty.args else T_I32
         # también Vec<Vec<T>> (_value_fmt formatea el de adentro)
-        if inner.name not in ("i32", "i64", "f64", "str", "bool", CHAN_MARK, VEC_MARK, "Option", "Result", MAP_MARK,
+        if inner.name not in ("i32", "i64", "f32", "f64", "str", "bool", CHAN_MARK, VEC_MARK, "Option", "Result", MAP_MARK,
                               PIPE_MARK, FN_MARK, TASK_MARK) and inner.name not in self.structs:
             raise CodegenError(f"print() todavía no soporta {ty!r} en el backend de C")
         elem = "&v.data[__scar_i]" if inner.name in self.structs else "v.data[__scar_i]"
@@ -324,9 +324,9 @@ class Impresion:
             return f"(long long)({code})", None
         if ty.name == "bool":
             return f'({code} ? "true" : "false")', None
-        if ty.name == "f64":
-            self.needs_fmt_f64 = True
-            return self._malloc_fmt_tmp(f"scar_fmt_f64({code})", out, pad)
+        if ty.name in ("f64", "f32"):
+            setattr(self, f"needs_fmt_{ty.name}", True)
+            return self._malloc_fmt_tmp(f"scar_fmt_{ty.name}({code})", out, pad)
         if ty.name == "Option":
             owned_kind = self._option_fresh_owned_kind(expr, env)
             if owned_kind is not None:
@@ -460,7 +460,7 @@ class Impresion:
                     # tiene en su lugar. Si un argumento de la derecha se la lleva (un Vec
                     # que f consume), formatearla al final leía memoria liberada: se
                     # formatea ya.
-                    if (t.name not in ("i32", "i64", "f64", "bool", "str")
+                    if (t.name not in ("i32", "i64", "f32", "f64", "bool", "str")
                             and any(not self._expr_simple(b) for b in expr.args[i + 1:])):
                         formateados[i] = self.print_arg(a, t, env, out, pad)
                     continue

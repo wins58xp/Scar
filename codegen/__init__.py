@@ -7,7 +7,7 @@ por programa (paridad) y la foto del C (scripts/foto_c.py) fija el C de todo
 el corpus.
 
 Cómo se representa cada tipo en C:
-- i32/i64/f64/bool: int32_t/int64_t/double/bool. Cada operación de f64 se
+- i32/i64/f32/f64/bool: int32_t/int64_t/float/double/bool. Cada operación de f64 se
   redondea por separado, como en Python (gcc con -ffp-contract=off). El
   overflow de i32/i64 y la división por cero son un panic.
 - str: char* terminado en 0, en UTF-8.

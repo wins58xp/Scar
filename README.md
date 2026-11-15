@@ -9,13 +9,22 @@ tarea falla, cancela a las que creó y el error sube hasta quien la espera:
 nada queda corriendo suelto (concurrencia estructurada).
 
 Las tareas son livianas: el programa reparte todas las que lances entre los
-núcleos del procesador, así que puede tener cien mil vivas a la vez.
+núcleos del procesador, así que puede tener cien mil vivas a la vez. Y la
+memoria que se suelta no vuelve al sistema operativo cada vez: queda en una
+lista del hilo para reusarla, con un tope, así que un programa que corre horas
+no crece.
+
+Además de enteros (`i32`, `i64`) y decimales de 64 bits (`f64`), tiene `f32`:
+la mitad de memoria, el formato de las GPU y de las librerías de IA. Para la IA
+también trae `v[i]`, `v.suma()` y `a.punto(b)` (sumas en 16 carriles con SIMD y
+el mismo resultado bit a bit en las dos maneras de correr), y en `lib/autodiff`
+una cinta de derivadas sobre vectores en `f32`, un nodo por capa y no por número.
 
 Cada programa corre de dos maneras, con la misma salida: con un intérprete
 (`scar run`) o compilado a C y a un binario nativo (`scar build`).
 
-> **Esto es un alfa (0.2.1).** El lenguaje funciona y está probado, pero
-> todavía puede cambiar. Qué trae y qué no: [`SCAR_0.1.0.md`](SCAR_0.1.0.md);
+> **Esto es un alfa (0.3.0).** El lenguaje funciona y está probado, pero
+> todavía puede cambiar. Qué trajo la primera versión: [`SCAR_0.1.0.md`](SCAR_0.1.0.md);
 > lo que cambió después: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Instalar

@@ -1,0 +1,14 @@
+# espera: no se puede pasar 'm[0]' y, en la misma llamada, 'm' de otra forma
+# m[0] se presta en su lugar (una dirección dentro del buffer de m): si la fn
+# agranda m, esa dirección queda apuntando al buffer viejo.
+fn llena(fila: Vec<i32>, m: Vec<Vec<i32>>) -> i32 {
+    for i in 0..100 {
+        let n: Vec<i32> = [i]
+        m.push(n)
+    }
+    return fila[0]
+}
+fn main() {
+    let m: Vec<Vec<i32>> = [[1, 2], [3]]
+    print(llena(m[0], m))
+}

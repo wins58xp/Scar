@@ -48,8 +48,10 @@ criterios va inyectado, igual que en `fresh_result_str.py`:
     ciclos)."""
 
 from parser import (
-    AssignStmt, BreakStmt, Call, ErrExpr, FieldAccess, ForStmt, Ident, IfStmt, LetStmt, MethodCall, NoneExpr, OkExpr,
-    ReturnStmt, SomeExpr, SpawnExpr, StructLit, ArrayLit, WhileLetStmt, WhileStmt, hijos, Node,
+    AssignStmt, BinOp, BreakStmt, Call, ErrExpr, ExprStmt, ExternFnDecl, FieldAccess, FnDecl, ForStmt, Ident, IfStmt,
+    IndexExpr, LetStmt, MethodCall, NoneExpr, OkExpr, PrintExpr, ReturnStmt, SliceExpr, SomeExpr, SpawnExpr, StructLit,
+    ArrayLit,
+    UnaryOp, WhileLetStmt, WhileStmt, hijos, Node,
 )
 
 FRESH = "F"
@@ -75,9 +77,11 @@ def _option_payload(ty):
 
 
 def _es_contenedor_movido(ty):
-    """Vec<T>, Map<K,V> u Option de ellos. Una fn los
-    recibe siempre MOVIDOS (es su dueña), así que todo valor de estos tipos
-    que la fn puede nombrar es suyo, y devolver cualquiera -- un parámetro,
+    """Vec<T>, Map<K,V> u Option de ellos. Una fn es dueña de
+    todo valor de estos tipos que puede nombrar, salvo los parámetros que
+    recibe prestados (resolve_contenedores_prestados), y esos nunca llegan a un
+    return ni a otra variable (si no, no serían prestados). Así que devolver
+    cualquiera -- un parámetro,
     un local, un alias de otro (`let mut w = v`) -- entrega la propiedad al
     llamador (también `let mut w = v; if c { w = otra }; return w`)."""
     nombre = getattr(ty, "name", None)
@@ -250,7 +254,7 @@ class _Analyzer:
                 return None
             return p
         if (type(expr).__name__ == "FieldAccess" and isinstance(expr.obj, Ident)
-                and ret_ty is not None and ret_ty.name not in ("str", "i32", "f64", "bool")):
+                and ret_ty is not None and ret_ty.name not in ("str", "i32", "f32", "f64", "bool")):
             # No solo en el `return`: `let x = a.campo` también saca
             # el campo de la dueña local (Codegen._try_neutralize_extracted_field),
             # así que `x` queda propia.
@@ -261,7 +265,7 @@ class _Analyzer:
             if p is not None and p and p <= _FRESH_ATOMS:
                 return frozenset([FRESH])
         if (type(expr).__name__ == "FieldAccess"
-                and ret_ty is not None and ret_ty.name not in ("i32", "i64", "f64", "bool")):
+                and ret_ty is not None and ret_ty.name not in ("i32", "i64", "f32", "f64", "bool")):
             # El campo de un temporal fresco
             # (`mk().dato`, `F { .. }.e`) lo saca el codegen del temporal
             # (Codegen._sacar_campo_de_temporal): es propio.
@@ -500,8 +504,12 @@ _CONSUMING_METHODS_LAST_ARG = {"push": 0, "set": -1, "insert": -1, "send": 0, "r
 
 
 class _ConsumeFinder:
-    def __init__(self, fns, is_struct_type, option_payload=False, struct_fields=None):
+    def __init__(self, fns, is_struct_type, option_payload=False, struct_fields=None, prestados=None):
         self.fns = fns  # nombre -> (decl, tipos de params)
+        # nombre -> índices de los parámetros Vec/Map que la fn recibe
+        # prestados (resolve_contenedores_prestados): pasarle `p.lista` en uno
+        # de esos no se lleva nada de p.
+        self.prestados = prestados or {}
         self.is_struct_type = is_struct_type
         # nombre de struct -> {campo: TypeAnn}. Con esto, mover un campo
         # no-Copy de un parámetro ('let s = p.serie', push(p.serie), return
@@ -580,9 +588,10 @@ class _ConsumeFinder:
             return None
         return k
 
-    def _campo_contenedor_de_param(self, expr, alias):
+    def _campo_contenedor_de_param(self, expr, alias, solo_option=False):
         """Como _param_field_moved, pero solo si el campo es un Vec/Map (u
-        Option de ellos): el índice del parámetro, o None."""
+        Option de ellos; con solo_option, solo un Option de ellos): el índice del
+        parámetro, o None."""
         if self.struct_fields is None or not isinstance(expr, FieldAccess):
             return None
         campos = []
@@ -599,6 +608,8 @@ class _ConsumeFinder:
                 return None
             ty = self.struct_fields.get(ty.name, {}).get(c)
         if ty is None or not _es_contenedor_movido(ty):
+            return None
+        if solo_option and ty.name != "Option":
             return None
         return k
 
@@ -720,16 +731,17 @@ class _ConsumeFinder:
                     if k is not None:
                         self._consume(found, k, expr, f"le pasa '{self._nombres.get(k)}' a {expr.callee.name}(), que se queda con él")
                 elif (destino is None and expr.callee.name in getattr(self, "_vars_fn", ())
-                        and self._campo_contenedor_de_param(a, alias) is not None):
-                    # una llamada a través de un valor fn (`g(p.lista)`)
-                    # se queda con un Vec/Map que recibe, como cualquier fn: si es
-                    # un campo de un parámetro, consume ese parámetro (el gemelo
-                    # del caso de abajo, que mira la firma de una fn conocida).
-                    kc = self._campo_contenedor_de_param(a, alias)
+                        and self._campo_contenedor_de_param(a, alias, solo_option=True) is not None):
+                    # una llamada a través de un valor fn (`g(p.lista)`) presta un
+                    # Vec/Map, pero se queda con un Option de ellos,
+                    # como cualquier fn: si es un campo de un parámetro, consume ese
+                    # parámetro (el gemelo del caso de abajo).
+                    kc = self._campo_contenedor_de_param(a, alias, solo_option=True)
                     self._consume(found, kc, expr, f"le pasa {_texto_campo(a)}, un campo de '{self._nombres.get(kc)}', "
                                                    f"a {expr.callee.name}() (una función guardada en una variable), "
                                                    f"que se queda con él")
-                elif j < len(tipos) and _es_contenedor_movido(tipos[j]):
+                elif (j < len(tipos) and _es_contenedor_movido(tipos[j])
+                        and j not in self.prestados.get(expr.callee.name, ())):
                     # Un Vec/Map (u Option de ellos) que se pasa a una fn normal es de
                     # esa fn (lo libera al terminar). Si el argumento es un campo de un
                     # parámetro, `f(p.lista)`, la fn se lleva una parte de p: igual que
@@ -795,13 +807,13 @@ def resolve_consumed_option_params(fns, is_option_struct_type):
     return _ConsumeFinder(fns, is_option_struct_type, option_payload=True).run()
 
 
-def resolve_consumed_params(fns, is_struct_type, struct_fields=None, motivos=None):
+def resolve_consumed_params(fns, is_struct_type, struct_fields=None, motivos=None, prestados=None):
     """`fns`: nombre -> (decl, tipos de los parámetros) de las fn normales
     (no task, no genéricas). Devuelve nombre -> frozenset de índices de los
     parámetros struct que la fn consume en algún camino. Si se pasa
     `motivos` (un dict), se llena con nombre -> {índice: por qué} (
     para el mensaje de error del llamador)."""
-    f = _ConsumeFinder(fns, is_struct_type, struct_fields=struct_fields)
+    f = _ConsumeFinder(fns, is_struct_type, struct_fields=struct_fields, prestados=prestados)
     r = f.run()
     if motivos is not None:
         motivos.update(f.motivos)
@@ -816,6 +828,332 @@ def _texto_campo(expr):
         expr = expr.obj
     raiz = getattr(expr, "name", "?")
     return ".".join([raiz] + list(reversed(partes)))
+
+
+# ---------------------------------------------------------------------------
+# Vec y Map prestados
+# ---------------------------------------------------------------------------
+#
+# Una fn normal recibe un Vec o un Map PRESTADO, como un struct: quien llama
+# lo sigue teniendo después (y ve lo que la fn le cambió). Antes se movía
+# siempre, y pasar una lista a `norma(v)` obligaba a devolverla o a clonarla.
+#
+# La fn se queda con el parámetro (lo recibe movido, como antes) si en algún
+# camino hace con él algo que no sea prestarlo: devolverlo, guardarlo en una
+# variable, en un campo o en otro contenedor, envolverlo, mandarlo a una task,
+# pasarlo a una fn que se queda con él, asignarle otro valor o declarar otra
+# variable con el mismo nombre. La regla es una lista blanca a propósito: lo
+# que no está en ella cuenta como quedarse. Así, si alguna vez el análisis se
+# equivoca, se equivoca hacia lo de antes (mover), nunca hacia liberar algo
+# ajeno.
+#
+# Lo que cuenta como prestar: usarlo para llamar un método (`v.push(x)`,
+# `m.get(k)`), indexarlo (`v[i]`) o tomarle un pedazo (`v[a..b]`), pasarlo a una builtin o a print, al otro
+# lado de `a.punto(v)` o de `a.acumular(v, k)`, a un parámetro prestado de otra fn, a una extern fn
+# sin `own`, o leerlo en una operación.
+#
+# Las task, las fn genéricas y las export fn siguen recibiendo sus Vec/Map
+# movidos. Un valor fn presta, y por eso una fn que se queda con un Vec/Map que
+# recibe no se puede usar como valor (type_checker._chequear_contrato_fn_valor).
+
+_BUILTINS_QUE_MUEVEN = frozenset(["inject_chan"])
+
+
+def _es_vec_o_map(ty):
+    return getattr(ty, "name", None) in ("Vec", "Map")
+
+
+class _PrestamoFinder:
+    def __init__(self, items, builtins):
+        self.builtins = frozenset(builtins) - _BUILTINS_QUE_MUEVEN
+        self.fns = {it.name: it for it in items
+                    if isinstance(it, FnDecl) and not it.is_task and not it.type_params}
+        # quien recibe todo movido: las task y las fn genéricas
+        self.mueven_todo = {it.name for it in items
+                            if isinstance(it, FnDecl) and (it.is_task or it.type_params)}
+        self.extern_own = {it.name: {i for i, p in enumerate(it.params) if p.consumes}
+                           for it in items if isinstance(it, ExternFnDecl)}
+        self.consumidos = {}
+        self.motivos = {name: {} for name in self.fns}
+        self.candidatos = {}
+        for name, decl in self.fns.items():
+            idx = {p.name: i for i, p in enumerate(decl.params) if _es_vec_o_map(p.type_ann)}
+            self.candidatos[name] = idx
+            self.consumidos[name] = set()
+            if idx and getattr(decl, "exportada", False):
+                # el envoltorio de C de una export fn arma el Vec y se lo entrega
+                for p, i in idx.items():
+                    self._quedarse(name, i, None, "es una export fn")
+
+    def _quedarse(self, fn, k, nodo, que):
+        if k in self.consumidos[fn]:
+            return False
+        self.consumidos[fn].add(k)
+        linea = getattr(nodo, "line", None)
+        donde = f" (línea {linea})" if linea else ""
+        self.motivos[fn].setdefault(k, f"{que}{donde}")
+        return True
+
+    def presta(self, callee, j):
+        """True si la fn `callee` recibe prestado su parámetro j (hoy)."""
+        decl = self.fns.get(callee)
+        return (decl is not None and j < len(decl.params)
+                and j in self.candidatos.get(callee, {}).values() and j not in self.consumidos[callee])
+
+    def run(self):
+        cambio = True
+        while cambio:
+            cambio = False
+            for name, decl in self.fns.items():
+                idx = {p: i for p, i in self.candidatos[name].items() if i not in self.consumidos[name]}
+                if not idx:
+                    continue
+                self._actual = name
+                self._idx = idx
+                self._vars_fn = _variables_de_fn(decl, self.fns)
+                self._cambio = False
+                self._ver(decl.body, False, None)
+                cambio = cambio or self._cambio
+        return {name: frozenset(i for i in idx.values() if i not in self.consumidos[name])
+                for name, idx in self.candidatos.items()}
+
+    def _marca(self, k, nodo, que):
+        if self._quedarse(self._actual, k, nodo, que):
+            self._cambio = True
+
+    def _args_de_llamada(self, expr):
+        """Para cada argumento de `expr` (un Call), si ese lugar presta."""
+        callee = expr.callee.name
+        out = []
+        for j, _ in enumerate(expr.args):
+            if callee in self._vars_fn:
+                # un valor fn presta sus Vec/Map, como una llamada directa a una fn
+                # que presta (el checker exige que la fn usada como valor preste)
+                out.append(True)
+            elif callee in self.mueven_todo or callee in _BUILTINS_QUE_MUEVEN:
+                out.append(False)
+            elif callee in self.fns:
+                out.append(self.presta(callee, j))
+            elif callee in self.extern_own:
+                out.append(j not in self.extern_own[callee])
+            else:
+                # una builtin nunca se queda con un Vec/Map; cualquier otra cosa
+                # (la instancia de una fn genérica, que el codegen renombra) sí
+                out.append(callee in self.builtins)
+        return out
+
+    def _ver(self, node, presta, padre):
+        if isinstance(node, Ident):
+            k = self._idx.get(node.name)
+            if k is not None and not presta:
+                self._marca(k, padre if padre is not None else node, self._motivo(node.name, padre))
+            return
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple, dict)):
+            for h in hijos(node):
+                self._ver(h, False, padre)
+            return
+        if isinstance(node, (LetStmt, ForStmt, WhileLetStmt)):
+            nombre = (node.name if isinstance(node, LetStmt)
+                      else node.var if isinstance(node, ForStmt) else node.pattern)
+            k = self._idx.get(nombre) if isinstance(nombre, str) else None
+            if k is not None:
+                self._marca(k, node, f"declara otra variable '{nombre}' con el mismo nombre")
+        if isinstance(node, AssignStmt) and isinstance(node.target, Ident):
+            k = self._idx.get(node.target.name)
+            if k is not None:
+                self._marca(k, node, f"le asigna otro valor a '{node.target.name}'")
+            self._ver(node.expr, False, node)
+            return
+        if isinstance(node, MethodCall):
+            self._ver(node.obj, True, node)
+            for j, a in enumerate(node.args):
+                # el otro Vec de punto y de acumular solo se lee
+                self._ver(a, j == 0 and node.method in ("punto", "acumular"), node)
+            return
+        if isinstance(node, (IndexExpr, SliceExpr)):
+            # indexar o tomar un pedazo (v[a..b]) solo lee
+            for k, v in vars(node).items():
+                if k == "obj":
+                    self._ver(v, True, node)
+                elif k not in ("line", "col"):
+                    self._ver(v, False, node)
+            return
+        if isinstance(node, SpawnExpr):
+            for a in getattr(node.call, "args", ()):
+                self._ver(a, False, node)  # una task se queda con todo lo que recibe
+            return
+        if isinstance(node, Call):
+            if isinstance(node.callee, Ident):
+                for a, ok in zip(node.args, self._args_de_llamada(node)):
+                    self._ver(a, ok, node)
+                return
+            self._ver(node.callee, False, node)
+            for a in node.args:
+                self._ver(a, False, node)
+            return
+        if isinstance(node, (PrintExpr, BinOp, UnaryOp, ExprStmt)):
+            for h in hijos(node):
+                self._ver(h, True, node)
+            return
+        if isinstance(node, (IfStmt, WhileStmt)):
+            self._ver(node.cond, True, node)
+            for k, v in vars(node).items():
+                if k not in ("cond", "line", "col"):
+                    self._ver(v, False, node)
+            return
+        if not isinstance(node, Node):
+            return
+        for h in hijos(node):
+            self._ver(h, False, node)
+
+    def _motivo(self, nombre, padre):
+        if isinstance(padre, ReturnStmt):
+            return f"devuelve '{nombre}'"
+        if isinstance(padre, LetStmt):
+            return f"lo guarda en la variable '{padre.name}'"
+        if isinstance(padre, AssignStmt):
+            return f"lo guarda en otro lado con una asignación"
+        if isinstance(padre, MethodCall):
+            return f"se lo pasa a .{padre.method}(), que se queda con él"
+        if isinstance(padre, Call) and isinstance(padre.callee, Ident):
+            n = padre.callee.name
+            if n in self._vars_fn:
+                return f"se lo pasa a {n}() (una función guardada en una variable), que se queda con él"
+            return f"se lo pasa a {n}(), que se queda con él"
+        if isinstance(padre, StructLit):
+            return f"lo pone adentro de un {padre.name} nuevo"
+        if isinstance(padre, (SomeExpr, OkExpr, ErrExpr)):
+            return "lo envuelve en un Some/Ok/Err"
+        if isinstance(padre, SpawnExpr):
+            return f"se lo pasa a una task con spawn"
+        if isinstance(padre, ArrayLit):
+            return "lo pone adentro de un arreglo [..]"
+        return f"usa '{nombre}' de una forma que se lo lleva"
+
+
+# ---------------------------------------------------------------------------
+# Parámetros Vec que nunca cambian de largo (pedazos como argumento)
+# ---------------------------------------------------------------------------
+#
+# A un parámetro Vec prestado se le puede pasar un pedazo `v[a..b]` (una vista
+# del buffer de v, sin copiar) solo si la fn nunca lo agranda ni lo achica: un
+# push en una vista haría realloc de un puntero que no es del comienzo del
+# buffer. La fn puede leerlo y escribir sus elementos: len, get, set, replace,
+# suma, punto, acumular, llenar, v[i], v[a..b], imprimirlo, compararlo, y pasarlo a otro
+# parámetro que tampoco cambia de largo. Cualquier otra cosa (push, pop, una
+# builtin, una fn que lo agranda) lo saca de la lista. Lista blanca, como la de
+# los préstamos: un error del análisis rechaza un programa, nunca deja pasar uno
+# que libere o agrande una vista.
+
+_METODOS_FIJOS = frozenset(["len", "get", "set", "replace", "suma", "punto", "acumular", "llenar"])
+
+
+class _FijoFinder:
+    def __init__(self, items, prestados):
+        self.fns = {it.name: it for it in items
+                    if isinstance(it, FnDecl) and not it.is_task and not it.type_params}
+        self.fijos = {}
+        self.motivos = {name: {} for name in self.fns}
+        for name, decl in self.fns.items():
+            self.fijos[name] = {i for i in prestados.get(name, ())
+                                if getattr(decl.params[i].type_ann, "name", None) == "Vec"}
+
+    def run(self):
+        cambio = True
+        while cambio:
+            cambio = False
+            for name, decl in self.fns.items():
+                if not self.fijos[name]:
+                    continue
+                self._actual = name
+                self._idx = {decl.params[i].name: i for i in self.fijos[name]}
+                self._cambio = False
+                self._ver(decl.body, False, None)
+                cambio = cambio or self._cambio
+        return {name: frozenset(v) for name, v in self.fijos.items()}
+
+    def _sacar(self, k, nodo, que):
+        if k in self.fijos[self._actual]:
+            self.fijos[self._actual].discard(k)
+            linea = getattr(nodo, "line", None)
+            self.motivos[self._actual].setdefault(k, que + (f" (línea {linea})" if linea else ""))
+            self._cambio = True
+
+    def _ver(self, node, ok, padre):
+        if isinstance(node, Ident):
+            k = self._idx.get(node.name)
+            if k is not None and not ok and k in self.fijos[self._actual]:
+                if isinstance(padre, MethodCall):
+                    que = f"le hace .{padre.method}()"
+                elif isinstance(padre, Call) and isinstance(padre.callee, Ident):
+                    que = f"se lo pasa a {padre.callee.name}(), que puede cambiarle el largo"
+                else:
+                    que = "lo usa de una forma que puede cambiarle el largo"
+                self._sacar(k, padre if padre is not None else node, que)
+            return
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, (list, tuple, dict)):
+            for h in hijos(node):
+                self._ver(h, False, padre)
+            return
+        if isinstance(node, MethodCall):
+            self._ver(node.obj, node.method in _METODOS_FIJOS, node)
+            for j, a in enumerate(node.args):
+                self._ver(a, j == 0 and node.method in ("punto", "acumular"), node)
+            return
+        if isinstance(node, (IndexExpr, SliceExpr)):
+            for k, v in vars(node).items():
+                if k == "obj":
+                    self._ver(v, True, node)
+                elif k not in ("line", "col"):
+                    self._ver(v, False, node)
+            return
+        if isinstance(node, Call):
+            if isinstance(node.callee, Ident) and node.callee.name in self.fns:
+                for j, a in enumerate(node.args):
+                    self._ver(a, j in self.fijos.get(node.callee.name, ()), node)
+                return
+            self._ver(node.callee, False, node)
+            for a in node.args:
+                self._ver(a, False, node)
+            return
+        if isinstance(node, (PrintExpr, BinOp, UnaryOp, ExprStmt)):
+            for h in hijos(node):
+                self._ver(h, True, node)
+            return
+        if not isinstance(node, Node):
+            return
+        for h in hijos(node):
+            self._ver(h, False, node)
+
+
+def resolve_vec_fijos(items, prestados, motivos=None):
+    """nombre -> frozenset de los índices de los parámetros Vec prestados que la
+    fn nunca agranda ni achica: a esos se les puede pasar un pedazo v[a..b].
+    `prestados`: lo que dio resolve_contenedores_prestados. Si se pasa `motivos`,
+    se llena con nombre -> {índice: por qué ese parámetro puede cambiar de largo}."""
+    f = _FijoFinder(items, prestados)
+    r = f.run()
+    if motivos is not None:
+        motivos.update(f.motivos)
+    return r
+
+
+def resolve_contenedores_prestados(items, builtins, motivos=None):
+    """`items`: los items del programa. Devuelve nombre -> frozenset de los
+    índices de los parámetros Vec/Map que cada fn normal recibe prestados (los
+    demás los recibe movidos). El checker y el codegen usan esta misma
+    función: no pueden desacordar. `builtins`: los nombres de las builtins
+    (type_checker.NOMBRES_BUILTIN). Si se pasa `motivos` (un dict), se llena
+    con nombre -> {índice: por qué la fn se queda con ese parámetro}."""
+    f = _PrestamoFinder(items, builtins)
+    r = f.run()
+    if motivos is not None:
+        motivos.update(f.motivos)
+    return r
 
 
 # ---------------------------------------------------------------------------

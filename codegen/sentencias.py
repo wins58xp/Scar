@@ -7,7 +7,7 @@ import copy
 
 from parser import (marca_new_generico, 
     FnDecl, LetStmt, ReturnStmt, ExprStmt, IfStmt, StrLit, Ident, Call, PrintExpr,
-    WhileStmt, WhileLetStmt, ForStmt, AssignStmt, FieldAccess, TryExpr, OkExpr,
+    WhileStmt, WhileLetStmt, ForStmt, AssignStmt, FieldAccess, IndexExpr, TryExpr, OkExpr,
     ErrExpr, SomeExpr, NoneExpr, MethodCall, Node, hijos, block_always_returns,
     BreakStmt, block_never_falls_through,
 )
@@ -64,9 +64,19 @@ class Sentencias:
         return recorrer(list(stmts), None)
 
     # ---- lvalues (destino de asignación): variable o campo encadenado ----
+    @staticmethod
+    def _destino_pasa_por_indice(target):
+        """True si el destino de una asignación pasa por un v[i] (v[i].campo)."""
+        node = target
+        while isinstance(node, (FieldAccess, IndexExpr)):
+            if isinstance(node, IndexExpr):
+                return True
+            node = node.obj
+        return False
+
     def _assign_root(self, target):
         node = target
-        while isinstance(node, FieldAccess):
+        while isinstance(node, (FieldAccess, IndexExpr)):  # v[i].campo: la raíz es v
             node = node.obj
         if not isinstance(node, Ident):
             raise CodegenError(
@@ -942,6 +952,20 @@ class Sentencias:
         out.append(f"{pad}{target_code} = {tmp};")
 
     def _gen_assign_stmt(self, stmt, env, out, indent, rest, pad):
+        if isinstance(stmt.target, FieldAccess) and self._destino_pasa_por_indice(stmt.target):
+            # `v[i].campo = x`: el checker
+            # solo lo deja con un campo de números o bool. El valor va primero a un
+            # temporal y recién después se calcula la dirección del elemento: si
+            # el valor agrandara el Vec, una dirección calculada antes quedaría
+            # apuntando al buffer viejo.
+            campo_ty = self.infer(stmt.target, env)
+            expr_code = self.gen_expr(stmt.expr, env, out, pad, expected_ty=campo_ty)
+            tmp = self._new_tmp()
+            out.append(f"{pad}{self.c_type(campo_ty)} {tmp} = {expr_code};")
+            target_code = self.gen_expr(stmt.target, env, out, pad)
+            out.append(f"{pad}{target_code} = {tmp};")
+            self._flush_pending_expr_temps(out, pad)
+            return
         root = self._assign_root(stmt.target)
         if root.name not in env:
             raise CodegenError(f"variable no declarada: {root.name}")
@@ -1539,7 +1563,11 @@ class Sentencias:
         if decl.is_task:
             param_list = self._task_c_param_list(decl, params)
         else:
-            param_list = ", ".join(f"{self.c_type(t)} {p.name}" for p, t in zip(decl.params, params))
+            param_list = ", ".join(f"{self._c_tipo_param(decl.name, j, t)} {p.name}"
+                                   for j, (p, t) in enumerate(zip(decl.params, params)))
+            self._vecs_prestados_de[decl.name] = {
+                p.name for j, (p, t) in enumerate(zip(decl.params, params))
+                if self._vec_prestado(decl.name, j, t)}
         out = []
         prev_tbind = self._tbind
         self._tbind = self.generic_fn_bindings.get(decl.name)
@@ -1582,8 +1610,9 @@ class Sentencias:
     def _fn_parametros(self, decl, params, env, out):
         """Qué parámetros recibe la fn como dueña, y el safepoint de prólogo."""
         # Qué parámetros recibe esta fn como dueña:
-        #   - Vec, Map y Option de ellos: siempre (fn o task); quien llama los
-        #     movió (_is_moved_container_type).
+        #   - Vec, Map y Option de ellos: en una task siempre; en una fn, salvo un
+        #     Vec/Map que recibe prestado (resolve_contenedores_prestados); quien
+        #     llama los movió (_is_moved_container_type).
         #   - En una task: str (dueña si la llamada movió un str propio, flag
         #     oculto de _gen_spawn), Chan (la referencia que _gen_spawn
         #     incrementó), struct y Option<Struct> (movidos por spawn).
@@ -1591,8 +1620,11 @@ class Sentencias:
         #     (lo recibe por valor).
         # Un struct que una fn no consume se recibe prestado: quien llama lo
         # sigue usando y liberando.
-        for p, t in zip(decl.params, params):
-            if self._is_moved_container_type(t):
+        for j, (p, t) in enumerate(zip(decl.params, params)):
+            if not decl.is_task and self._contenedor_prestado(decl.name, j, t):
+                # prestado: es de quien llama, que lo libera
+                pass
+            elif self._is_moved_container_type(t):
                 # Si este callee no se queda con el Vec/Map, nadie lo libera: quien
                 # llama ya soltó la propiedad (_note_owner_transfer).
                 self._mark_owner(p.name, "plain")

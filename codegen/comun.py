@@ -7,7 +7,7 @@ un Codegen. Cada mixin importa de acá lo que usa.
 import re
 
 from parser import FieldAccess, Ident, hijos
-from types_ import (TypeAnn, T_I32, T_I64, T_F64, T_STR, T_VOID, TASK_MARK, CHAN_MARK, FN_MARK,
+from types_ import (TypeAnn, T_I32, T_I64, T_F32, T_F64, T_STR, T_VOID, TASK_MARK, CHAN_MARK, FN_MARK,
                     PIPE_MARK, FILE_MARK, SOCKET_MARK, LISTENER_MARK, VEC_MARK, MAP_MARK,
                     FFI_SUPPORTED_TYPES)
 
@@ -54,7 +54,7 @@ class CodegenError(Exception):
     pass
 
 
-_RE_USA_POOL = re.compile(r"\bscar_(?:malloc|free|aprintf|sb_\w+)\s*\(")
+_RE_USA_POOL = re.compile(r"\bscar_(?:malloc|free|aprintf|sb_\w+|vbuf_\w+)\s*\(")
 
 # Texto sin tope: scar_aprintf mide primero y reserva lo justo, y
 # ScarSb es un texto que crece (para un Vec, que no tiene largo máximo). Nada
@@ -65,6 +65,7 @@ _TEXTO_SIN_TOPE_C = runtime_c.texto("texto_sin_tope")
 C_TYPE = {
     "i32": "int32_t",
     "i64": "int64_t",
+    "f32": "float",
     "f64": "double",
     "str": "const char*",
     "bool": "bool",
@@ -136,7 +137,7 @@ def _i64_helpers_c(has_tasks):
     )
 
 
-def _abs_min_max_helpers_c(has_tasks):
+def _abs_min_max_helpers_c(has_tasks, con_f32=False):
     """abs/min/max, iguales al intérprete (_abs_min_max). abs de un entero es
     exacto, y el del mínimo (que no tiene positivo) es un panic. min/max
     devuelven el primero salvo que el segundo sea menor (mayor): con NaN, el
@@ -150,7 +151,8 @@ def _abs_min_max_helpers_c(has_tasks):
             "    return x < 0 ? -x : x;\n"
             "}\n"
         )
-    for t, ct in (("i32", "int32_t"), ("i64", "int64_t"), ("f64", "double")):
+    for t, ct in (("i32", "int32_t"), ("i64", "int64_t"), ("f64", "double")) + (
+            (("f32", "float"),) if con_f32 else ()):
         s += (
             f"static inline {ct} scar_min_{t}({ct} a, {ct} b) {{ return (b < a) ? b : a; }}\n"
             f"static inline {ct} scar_max_{t}({ct} a, {ct} b) {{ return (b > a) ? b : a; }}\n"
@@ -235,6 +237,7 @@ BUILTIN_SIGS = {
     "to_i32": ([T_F64], T_I32),
     "to_i64": ([T_F64], T_I64),
     "to_f64": ([T_I32], T_F64),
+    "to_f32": ([T_F64], T_F32),
     "chr": ([T_I32], T_STR),
     "a_texto": ([T_STR], T_STR),  # ver el sitio de Call
     "ord": ([T_STR], T_I32),

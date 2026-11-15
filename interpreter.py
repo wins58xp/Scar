@@ -52,12 +52,12 @@ import time
 
 import ffi_worker as _ffi_worker_mod  # noqa: E402
 from ffi_worker import FfiWorkerPool, ScarFfiWorkerError
-from types_ import FN_MARK, mensaje_movida
+from types_ import FN_MARK, mensaje_movida, redondear_f32, fmt_f32
 
 from parser import (
     Program, StructDecl, FnDecl, ExternFnDecl, ExternTypeDecl, ExternLibDecl, Block, LetStmt, ReturnStmt, BreakStmt, ExprStmt, IfStmt,
     WhileStmt, WhileLetStmt, ForStmt, AssignStmt, NumLit, StrLit, BoolLit, Ident,
-    BinOp, UnaryOp, Call, MethodCall, FieldAccess, IndexExpr, StructLit, SpawnExpr, ArrayLit,
+    BinOp, UnaryOp, Call, MethodCall, FieldAccess, IndexExpr, SliceExpr, StructLit, SpawnExpr, ArrayLit,
     TryExpr, OkExpr, ErrExpr, SomeExpr, NoneExpr, PrintExpr,
 )
 
@@ -297,6 +297,44 @@ class ScarChan:
 
     def receiver(self):
         return self
+
+
+class _VistaLista:
+    """Los elementos de un pedazo v[a..b]: una vista sobre la
+    lista de v, sin copiar. Leer y escribir un elemento va a la lista original,
+    como la vista de C del nativo (scar_vec_trozo_*). No crece ni se achica: el
+    checker solo deja pasar un pedazo a un parámetro que no cambia de largo."""
+    __slots__ = ("base", "desde", "largo")
+
+    def __init__(self, base, desde, largo):
+        self.base = base
+        self.desde = desde
+        self.largo = largo
+
+    def __len__(self):
+        return self.largo
+
+    def _pos(self, i):
+        if i < 0:
+            i += self.largo
+        if not (0 <= i < self.largo):
+            raise IndexError(i)
+        return self.desde + i
+
+    def __getitem__(self, i):
+        if isinstance(i, slice):
+            return [self.base[self.desde + k] for k in range(*i.indices(self.largo))]
+        return self.base[self._pos(i)]
+
+    def __setitem__(self, i, valor):
+        self.base[self._pos(i)] = valor
+
+    def __iter__(self):
+        for k in range(self.largo):
+            yield self.base[self.desde + k]
+
+    def __eq__(self, otro):
+        return list(self) == list(otro)
 
 
 class ScarVec:
@@ -1532,6 +1570,8 @@ class Interpreter:
         return handler(self, expr, env)
 
     def _eval_NumLit(self, expr, env: Environment):
+        if expr.lit_f32 is not None:
+            return F32(expr.lit_f32)
         if expr.tipo_int == "i64":
             return I64(expr.value)
         return expr.value
@@ -1572,6 +1612,8 @@ class Interpreter:
         return Err(self.eval(expr.expr, env))
 
     def _eval_UnaryOp(self, expr, env: Environment):
+        if expr.lit_f32 is not None:
+            return F32(expr.lit_f32)  # `-0.5` usado como f32: un literal
         if expr.literal_plegado is not None:
             # `-N` con N literal es un literal negativo con su tipo.
             v = expr.literal_plegado
@@ -1583,7 +1625,7 @@ class Interpreter:
                 if -v < (I64_MIN if kind == "i64" else I32_MIN) or -v > (I64_MAX if kind == "i64" else I32_MAX):
                     raise ScarRuntimeError(f"desbordamiento de {kind}: 0 - {v}")
                 return I64(-v) if kind == "i64" else -v
-            return -v
+            return F32(-v) if isinstance(v, F32) else -v
         if expr.op == "not":
             return not truthy(v)
         # Mismo comportamiento que la cadena de isinstance original: un
@@ -1627,6 +1669,25 @@ class Interpreter:
             return obj.fields[expr.field]
         raise ScarRuntimeError(f"acceso a campo inválido: {expr.field}")
 
+    def _eval_SliceExpr(self, expr, env: Environment):
+        # v[a..b]: el checker solo lo deja como lado de suma/punto,
+        # que solo leen: basta una lista con los mismos elementos. Mismo panic
+        # que el nativo (scar_vec_trozo_*).
+        obj = self.eval(expr.obj, env)
+        a = self.eval(expr.desde, env)
+        b = self.eval(expr.hasta, env)
+        n = len(obj.items)
+        if not (0 <= a <= b <= n):
+            raise ScarRuntimeError(f"pedazo fuera de rango: [{a}..{b}] (longitud {n})")
+        # una vista: lo que una fn le escriba a un pedazo cambia el Vec original
+        # (un pedazo de un pedazo apunta a la lista de más afuera)
+        base, desde = obj.items, 0
+        if isinstance(base, _VistaLista):
+            base, desde = base.base, base.desde
+        trozo = ScarVec()
+        trozo.items = _VistaLista(base, desde + a, b - a)
+        return trozo
+
     def _eval_IndexExpr(self, expr, env: Environment):
         # El checker ya garantiza obj: str e índice: i32 en
         # programas que pasan type-check -- lo que queda para runtime es
@@ -1637,6 +1698,15 @@ class Interpreter:
         # "esperable" que el programa deba manejar con Option/Result).
         obj = self.eval(expr.obj, env)
         idx = self.eval(expr.index, env)
+        if isinstance(obj, ScarVec):
+            # v[i] de un Vec de números o bool (el checker no deja otro): el
+            # elemento, que es un valor inmutable; panic fuera de rango, con el
+            # mismo mensaje que set() y que el nativo
+            if not (0 <= idx < len(obj.items)):
+                raise ScarRuntimeError(
+                    f"índice fuera de rango: {idx} (longitud {len(obj.items)})"
+                )
+            return obj.items[idx]
         if not isinstance(obj, str):
             raise ScarRuntimeError(f"indexado inválido: se esperaba str, se dio {type(obj).__name__}")
         if idx < 0 or idx >= len(obj):
@@ -1720,9 +1790,50 @@ class Interpreter:
                 return self.call_function(fname, arg_values)
         raise ScarRuntimeError(f"llamada inválida a {expr.callee}")
 
+    def _lado_vivo(self, expr, env):
+        """(lista, desde, largo) de un Vec o de un pedazo v[a..b], sin copiar:
+        acumular escribe y lee en la lista misma, en el mismo orden que el C
+        (un pedazo que se pisa con otro del mismo Vec da lo mismo)."""
+        if isinstance(expr, SliceExpr):
+            v = self.eval(expr.obj, env)
+            a = self.eval(expr.desde, env)
+            b = self.eval(expr.hasta, env)
+            n = len(v.items)
+            if not (0 <= a <= b <= n):
+                raise ScarRuntimeError(f"pedazo fuera de rango: [{a}..{b}] (longitud {n})")
+            if isinstance(v.items, _VistaLista):
+                return v.items.base, v.items.desde + a, b - a
+            return v.items, a, b - a
+        v = self.eval(expr, env)
+        if isinstance(v.items, _VistaLista):
+            return v.items.base, v.items.desde, len(v.items)
+        return v.items, 0, len(v.items)
+
     def _eval_MethodCall(self, expr, env: Environment):
+        if expr.method == "acumular" and getattr(expr, "tipo_reduccion", None) in ("f32", "f64", "i32", "i64"):
+            # a.acumular(b, k): a[i] = a[i] + k * b[i]; en f32, cada
+            # producto y cada suma redondeados a 32 bits, como el nativo
+            xs, xa, xn = self._lado_vivo(expr.obj, env)
+            ys, ya, yn = self._lado_vivo(expr.args[0], env)
+            k = self.eval(expr.args[1], env)
+            if xn != yn:
+                raise ScarRuntimeError(f"acumular: los Vec tienen largos distintos ({xn} y {yn})")
+            _acumular(xs, xa, ys, ya, xn, k, expr.tipo_reduccion)
+            return None
+        if expr.method == "llenar" and getattr(expr, "tipo_llenar", None) is not None:
+            # v.llenar(x): cada elemento (de la lista o del pedazo) queda en x
+            #. El Vec se mira antes de calcular x, como el C
+            xs, xa, xn = self._lado_vivo(expr.obj, env)
+            x = self.eval(expr.args[0], env)
+            for i in range(xa, xa + xn):
+                xs[i] = x
+            return None
         obj = self.eval(expr.obj, env)
         arg_values = [self.eval(a, env) for a in expr.args]
+        if expr.method in ("suma", "punto") and isinstance(obj, ScarVec):
+            # el tipo del elemento lo anotó el checker (el cero de un Vec vacío)
+            return _reduccion(expr.method, obj, arg_values[0] if arg_values else None,
+                              getattr(expr, "tipo_reduccion", None))
         return self.call_method(obj, expr.method, arg_values)
 
     # Tablas de despacho por tipo de nodo AST, construidas una sola vez a
@@ -2000,6 +2111,7 @@ Interpreter._EVAL_DISPATCH = {
     ArrayLit: Interpreter._eval_ArrayLit,
     FieldAccess: Interpreter._eval_FieldAccess,
     IndexExpr: Interpreter._eval_IndexExpr,
+    SliceExpr: Interpreter._eval_SliceExpr,
     SpawnExpr: Interpreter._eval_SpawnExpr,
     PrintExpr: Interpreter._eval_PrintExpr,
     Call: Interpreter._eval_Call,
@@ -2032,6 +2144,104 @@ class I64(int):
 
 
 _ffi_worker_mod._VEC_CONV["vec_i64"] = I64  # un i64 que vuelve de C
+
+
+class F32(float):
+    """Un decimal de SCAR de tipo f32. Es un float de Python que vale
+    exactamente un f32 (ver types_.redondear_f32), y lleva su tipo: una cuenta
+    entre dos F32 se redondea a 32 bits y da otro F32. Se imprime con las
+    cifras de un f32 (`0.1`, no `0.10000000149011612`). Un float pelado es un
+    f64."""
+    __slots__ = ()
+
+    def __repr__(self):
+        return fmt_f32(self)
+
+    __str__ = __repr__
+
+
+def _entero_a_f32(n):
+    """to_f32 de un entero: el f32 más cercano, redondeando UNA vez (pasar por
+    f64 redondearía dos veces un i64 de más de 53 bits), como `(float)n` en C."""
+    a = abs(n)
+    sobran = a.bit_length() - 24
+    if sobran > 0:
+        q, resto, mitad = a >> sobran, a & ((1 << sobran) - 1), 1 << (sobran - 1)
+        if resto > mitad or (resto == mitad and q & 1):
+            q += 1
+        a = q << sobran
+    return F32(-float(a) if n < 0 else float(a))
+
+
+def _builtin_to_f32(x):
+    if isinstance(x, int):
+        return _entero_a_f32(x)
+    return F32(redondear_f32(float(x)))
+
+
+_LIMITES_ENTEROS = {"i32": (-2**31, 2**31 - 1), "i64": (-2**63, 2**63 - 1)}
+
+
+def _acumular(xs, xa, ys, ya, n, k, tipo):
+    """a.acumular(b, k) sobre las listas mismas: xs[xa + i] =
+    xs[xa + i] + k * ys[ya + i], en orden; en f32, cada producto y cada suma
+    redondeados a 32 bits, como scar_vec_acumular_* del nativo. Con enteros la
+    cuenta de cada elemento es exacta, y el primero que no cabe en el tipo es un
+    panic (los anteriores ya quedaron escritos, igual que en el nativo)."""
+    if tipo in ("i32", "i64"):
+        lo, hi = _LIMITES_ENTEROS[tipo]
+        k = int(k)
+        for i in range(n):
+            r = int(xs[xa + i]) + k * int(ys[ya + i])
+            if not (lo <= r <= hi):
+                raise ScarRuntimeError(f"acumular: el resultado no cabe en {tipo} (posición {i})")
+            xs[xa + i] = I64(r) if tipo == "i64" else r
+    elif tipo == "f32":
+        k = redondear_f32(float(k))
+        for i in range(n):
+            xs[xa + i] = F32(redondear_f32(float(xs[xa + i]) + redondear_f32(k * float(ys[ya + i]))))
+    else:
+        k = float(k)
+        for i in range(n):
+            xs[xa + i] = xs[xa + i] + k * ys[ya + i]
+
+
+def _reduccion(metodo, a, b, tipo):
+    """v.suma() y a.punto(b), con las mismas
+    cuentas que el nativo (scar_vec_suma_*/scar_vec_punto_*). Decimales: el
+    elemento i va al carril i % 16, cada carril suma en orden y al final se juntan
+    de a pares (k + 8, k + 4, k + 2, k + 1); en f32 cada producto y cada suma se
+    redondea a 32 bits. Enteros: la suma exacta, panic si no cabe en el tipo (en
+    i64.punto, también si una suma parcial pasa de 128 bits, como en el nativo)."""
+    xs = a.items
+    if metodo == "punto":
+        ys = b.items
+        if len(xs) != len(ys):
+            raise ScarRuntimeError(f"punto: los Vec tienen largos distintos ({len(xs)} y {len(ys)})")
+    if tipo in ("i32", "i64"):
+        s = 0
+        lim128 = (-2**127, 2**127 - 1)
+        for i in range(len(xs)):
+            s += xs[i] if metodo == "suma" else xs[i] * ys[i]
+            if tipo == "i64" and metodo == "punto" and not (lim128[0] <= s <= lim128[1]):
+                raise ScarRuntimeError("punto: la suma no cabe en 128 bits")
+        lo, hi = _LIMITES_ENTEROS[tipo]
+        if not (lo <= s <= hi):
+            raise ScarRuntimeError(f"{metodo}: el resultado no cabe en {tipo}")
+        return I64(s) if tipo == "i64" else s
+    es32 = tipo == "f32"
+    red = redondear_f32 if es32 else (lambda x: x)
+    s = [0.0] * 16
+    for i in range(len(xs)):
+        t = float(xs[i]) if metodo == "suma" else red(float(xs[i]) * float(ys[i]))
+        k = i % 16
+        s[k] = red(s[k] + t)
+    w = 8
+    while w >= 1:
+        for k in range(w):
+            s[k] = red(s[k] + s[k + w])
+        w //= 2
+    return F32(s[0]) if es32 else s[0]
 
 
 def _tipo_entero(v):
@@ -2103,6 +2313,13 @@ def apply_binop(op, l, r, kind=None):
     sin anotar (el cuerpo de una fn genérica), lo dicen los valores."""
     if op in ("&", "|", "^", "<<", ">>"):
         return _bits(op, l, r, kind)
+    if isinstance(l, F32) and isinstance(r, F32) and op in ("+", "-", "*", "/", "%"):
+        # la cuenta en 64 bits y redondeada a 32 da lo mismo que en 32
+        if op == "+": return F32(redondear_f32(float(l) + float(r)))
+        if op == "-": return F32(redondear_f32(float(l) - float(r)))
+        if op == "*": return F32(redondear_f32(float(l) * float(r)))
+        if op == "/": return F32(redondear_f32(_f64_div(float(l), float(r))))
+        return F32(_scar_mod(float(l), float(r)))  # el resto de dos f32 es un f32 exacto
     if op in ("+", "-", "*", "/", "%") and _es_i32(l) and _es_i32(r):
         if kind is None:
             kind = "i64" if "i64" in (_tipo_entero(l), _tipo_entero(r)) else "i32"
@@ -2328,7 +2545,8 @@ def _abs_min_max(fname, args, kind):
     if fname == "abs":
         x = args[0]
         if kind is None:
-            return BUILTINS["abs"](x)
+            r = BUILTINS["abs"](x)
+            return F32(r) if isinstance(x, F32) else r
         lo, hi = (I64_MIN, I64_MAX) if kind == "i64" else (I32_MIN, I32_MAX)
         if x == lo:
             raise ScarRuntimeError(f"abs: {x} no tiene valor absoluto en {kind}")
@@ -2374,6 +2592,7 @@ BUILTINS = {
     "a_texto": lambda v: scar_str(v),  # el mismo texto que print
     "ord": _builtin_ord,
     "to_f64": lambda n: float(n),
+    "to_f32": _builtin_to_f32,
     # rand()/seed() van por el generador de la tarea actual (ver
     # _ScarRand y _eval_Call), no por el random global de Python.
     # now(): reloj MONOTÓNICO (no time.time(), que puede saltar hacia atrás

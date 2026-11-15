@@ -597,8 +597,13 @@ class Propiedad:
             body = [
                 f"    {c_t} out;",
                 "    out.len = src.len;",
-                "    out.cap = src.len;",
-                f"    out.data = src.len ? malloc(sizeof({elem_c}) * (size_t)src.len) : NULL;",
+                "    out.cap = 0;",
+                "    out.data = NULL;",
+                "    if (src.len) {",
+                "        size_t util;",
+                f"        out.data = scar_vbuf_pedir(sizeof({elem_c}) * (size_t)src.len, &util);",
+                f"        out.cap = (int32_t)(util / sizeof({elem_c}));",
+                "    }",
                 "    for (int32_t i = 0; i < src.len; i++) {",
             ]
             if inner.name in self.structs:
@@ -807,7 +812,7 @@ class Propiedad:
             out.append(f"{pad}{self.c_type(ty)} {tmp} = {code};")
         return tmp
 
-    def _secuenciar(self, exprs, codes, env, out, pad, tys=None, bufs=None):
+    def _secuenciar(self, exprs, codes, env, out, pad, tys=None, bufs=None, fijos=()):
         """Evalúa los argumentos de izquierda a derecha, como el intérprete (C no
         fija el orden: gcc los evalúa de derecha a izquierda en x86-64). En
         orden, las sentencias previas de cada argumento y, si después viene algo
@@ -824,6 +829,8 @@ class Propiedad:
 
         for i in range(n):
             out.extend(bufs[i])
+            if i in fijos:
+                continue
             if (self._es_lugar(exprs[i]) and not self._RE_C_IDENT.fullmatch(codes[i])
                     and any(self._alcanza_lugar(exprs[j], exprs[i]) for j in range(i + 1, n))):
                 # un campo, antes de una llamada que lo puede reasignar
@@ -873,6 +880,26 @@ class Propiedad:
         self._try_neutralize_extracted_field(f_expr, f_ty, env, out, pad)
         return tmp
 
+    def _contenedor_prestado(self, fn_name, j, ty) -> bool:
+        """True si el parámetro j de la fn `fn_name` es un Vec/Map que la fn
+        recibe prestado: quien llama lo sigue teniendo."""
+        return (ty is not None and ty.name in (VEC_MARK, MAP_MARK)
+                and j in self.contenedores_prestados.get(fn_name, ()))
+
+    def _vec_prestado(self, fn_name, j, ty) -> bool:
+        """Un Vec prestado viaja por puntero (`Vec_T*`): la fn puede agrandarlo
+        y quien llama ve el cambio. Un Map ya es un puntero."""
+        return ty is not None and ty.name == VEC_MARK and self._contenedor_prestado(fn_name, j, ty)
+
+    def _c_tipo_param(self, fn_name, j, ty) -> str:
+        c = self.c_type(ty)
+        return c + "*" if self._vec_prestado(fn_name, j, ty) else c
+
+    def _es_vec_prestado_actual(self, nombre) -> bool:
+        """`nombre` es un parámetro Vec prestado de la fn que se está generando
+        (en C, un puntero: se lee como `(*nombre)`)."""
+        return nombre in self._vecs_prestados_de.get(self.cur_fn_name, ())
+
     def _is_moved_container_type(self, ty) -> bool:
         """Vec, Map y Option de uno de ellos: los tipos que una fn o task recibe
         siempre como dueña."""
@@ -886,15 +913,18 @@ class Propiedad:
                 and isinstance(arg_expr, FieldAccess) and isinstance(arg_expr.obj, Ident)
                 and self._is_owner(arg_expr.obj.name))
 
-    def _capture_args_reading_moved_fields(self, args, tys, args_code, env, out, pad):
+    def _capture_args_reading_moved_fields(self, args, tys, args_code, env, out, pad, prestados=()):
         """_move_arg_out vacía el campo antes de la llamada: si otro argumento de
         la misma llamada lo lee (`f(c.data.len(), c.data)`), se evalúa antes en
-        un temporal."""
-        paths = [_field_path(a) for a, t in zip(args, tys) if self._moves_owned_field(a, t)]
+        un temporal. Los argumentos de `prestados` (índices) no se mueven: un campo
+        prestado (`f(c.data, c.data[0..2])`) queda en su lugar, y su código ya es
+        una dirección que no se copia a un temporal."""
+        paths = [_field_path(a) for k, (a, t) in enumerate(zip(args, tys))
+                 if k not in prestados and self._moves_owned_field(a, t)]
         if not paths:
             return
         for k, (a, t) in enumerate(zip(args, tys)):
-            if self._moves_owned_field(a, t):
+            if k in prestados or self._moves_owned_field(a, t):
                 continue
             if any(_expr_mentions_path(a, pth) for pth in paths):
                 try:

@@ -62,7 +62,7 @@ from types_ import TypeAnn
 TAG = "tag"
 # los patrones de un match sobre Option o Result
 _PATRONES_OPCION = {"Some": "Option", "None": "Option", "Ok": "Result", "Err": "Result"}
-DATOS_OK = ("i32", "i64", "f64", "bool", "str")
+DATOS_OK = ("i32", "i64", "f32", "f64", "bool", "str")
 _ATRIBUTOS_POSICION = ("line", "col", "archivo")
 
 
@@ -194,7 +194,7 @@ class _Bajada:
                 globales[nombre] = it
             if isinstance(it, StructDecl):
                 self.structs[it.name] = it
-        tipos_reservados = {"i32", "i64", "f64", "bool", "str", "void", "Vec", "Map", "Option",
+        tipos_reservados = {"i32", "i64", "f32", "f64", "bool", "str", "void", "Vec", "Map", "Option",
                             "Result", "Chan", "File", "Socket", "Listener", "Pipe"}
         for it in self.program.items:
             if not isinstance(it, EnumDecl):
@@ -227,7 +227,7 @@ class _Bajada:
                     if t.name not in DATOS_OK or t.args:
                         self._err(f"la variante '{v.name}' lleva un dato de tipo '{t!r}': "
                                   f"por ahora los datos de una variante son i32, i64, "
-                                  f"f64, bool o str", v)
+                                  f"f32, f64, bool o str", v)
                 self.variantes[v.name] = (it.name, idx, list(v.types))
                 variantes.append((v.name, list(v.types)))
             self.enums[it.name] = variantes
@@ -263,8 +263,8 @@ class _Bajada:
         n = t.name
         if n in ("i32", "i64"):
             return _pos(NumLit(0), src)  # en un lugar i64, el checker lo amplía
-        if n == "f64":
-            return _pos(NumLit(0.0), src)
+        if n in ("f64", "f32"):
+            return _pos(NumLit(0.0), src)  # en un lugar f32, el checker lo marca f32
         if n == "bool":
             return _pos(BoolLit(False), src)
         if n == "str":

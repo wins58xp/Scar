@@ -1,0 +1,12 @@
+# espera: acá 'm' se le pasa a crece(), que podría cambiarlo
+# crece() no le cambia el largo a 'f', pero sí a una de sus filas.
+fn crece(f: Vec<Vec<f64>>) {
+    f[0].push(1.0)
+}
+fn main() {
+    let m: Vec<Vec<f64>> = [[1.0, 2.0], [3.0]]
+    let p = m[0..2]
+    let q = p[0][0..1]
+    crece(p)
+    print(q[0])
+}

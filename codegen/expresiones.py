@@ -4,12 +4,12 @@ falta, como en ?) y su tipo.
 """
 
 from parser import (marca_new_generico, 
-    NumLit, StrLit, BoolLit, Ident, BinOp, UnaryOp, Call, FieldAccess, IndexExpr,
+    NumLit, StrLit, BoolLit, Ident, BinOp, UnaryOp, Call, FieldAccess, IndexExpr, SliceExpr,
     StructLit, ArrayLit, TryExpr, OkExpr, ErrExpr, SomeExpr, NoneExpr, SpawnExpr,
-    MethodCall,
+    MethodCall, Parser,
 )
 from types_ import (
-    TypeAnn, T_I32, T_I64, T_F64, T_STR, T_BOOL, T_VOID, int_literal_type,
+    TypeAnn, T_I32, T_I64, T_F32, T_F64, T_STR, T_BOOL, T_VOID, int_literal_type,
     numeric_result,
 )
 
@@ -106,6 +106,7 @@ class Expresiones:
         StructLit: "_infer_struct_lit",
         FieldAccess: "_infer_field_access",
         IndexExpr: "_infer_index_expr",
+        SliceExpr: "_infer_slice_expr",
         SpawnExpr: "_infer_spawn_expr",
         MethodCall: "_infer_method_call",
     }
@@ -117,6 +118,8 @@ class Expresiones:
         return getattr(self, metodo)(expr, env, expected_ty)
 
     def _infer_num_lit(self, expr, env, expected_ty):
+        if expr.lit_f32 is not None:
+            return T_F32  # un literal que el checker marcó como f32
         if isinstance(expr.value, float):
             return T_F64
         return int_literal_type(expr.value) or T_I64
@@ -171,6 +174,8 @@ class Expresiones:
         return inner_ty.args[0] if inner_ty.args else T_I32
 
     def _infer_unary_op(self, expr, env, expected_ty):
+        if expr.lit_f32 is not None:
+            return T_F32
         if expr.literal_plegado is not None:
             return int_literal_type(expr.literal_plegado) or T_I64
         ty = self.infer(expr.expr, env)
@@ -264,11 +269,18 @@ class Expresiones:
 
     def _infer_index_expr(self, expr, env, expected_ty):
         obj_ty = self.infer(expr.obj, env)
+        if obj_ty.name == VEC_MARK:
+            # v[i] de un Vec de números o bool: el tipo del elemento
+            return obj_ty.args[0] if obj_ty.args else T_I32
         if obj_ty != T_STR:
             raise CodegenError(
                 f"'[...]' sobre un valor de tipo {obj_ty!r}, que no es str"
             )
         return T_STR
+
+    def _infer_slice_expr(self, expr, env, expected_ty):
+        # v[a..b]: el mismo tipo que el Vec
+        return self.infer(expr.obj, env)
 
     def _infer_spawn_expr(self, expr, env, expected_ty):
         call = expr.call
@@ -345,8 +357,10 @@ class Expresiones:
                 return T_VOID
             if expr.method in ("get", "pop"):
                 return TypeAnn("Option", [inner])
-            if expr.method == "replace":
+            if expr.method in ("replace", "suma", "punto"):
                 return inner
+            if expr.method in ("acumular", "llenar"):
+                return T_VOID
             if expr.method == "len":
                 return T_I32
             raise CodegenError(f"Vec no tiene método '.{expr.method}()' en el backend de C")
@@ -381,6 +395,12 @@ class Expresiones:
         if expr.promover_f64:
             return T_F64
         return self.infer(expr, env, expected_ty=expected_ty)
+
+    @staticmethod
+    def _literal_f32_c(v):
+        """Un literal float de C con exactamente el f32 `v` (hexadecimal: el
+        compilador de C no tiene nada que redondear)."""
+        return f"({v.hex()}f)"
 
     def _literal_entero_c(self, v):
         """Un literal entero de C con el tipo de SCAR (i32 si cabe, si no i64). Los
@@ -481,6 +501,7 @@ class Expresiones:
         Call: "_gen_call",
         FieldAccess: "_gen_field_access",
         IndexExpr: "_gen_index_expr",
+        SliceExpr: "_gen_slice_expr",
         ArrayLit: "_gen_array_lit_expr",
         StructLit: "_gen_struct_lit",
         SpawnExpr: "_gen_spawn_expr",
@@ -494,6 +515,8 @@ class Expresiones:
         return getattr(self, metodo)(expr, env, out, pad, expected_ty)
 
     def _gen_num_lit(self, expr, env, out, pad, expected_ty):
+        if expr.lit_f32 is not None:
+            return self._literal_f32_c(expr.lit_f32)
         return self._literal_entero_c(expr.value) if not isinstance(expr.value, float) else repr(expr.value)
 
     def _gen_str_lit(self, expr, env, out, pad, expected_ty):
@@ -515,6 +538,8 @@ class Expresiones:
             c_fn = self._envoltorio_fn_valor(expr.name)
             self._fns_como_valor[c_fn] = self.nombres.mostrar(expr.name)
             return c_fn
+        if self._es_vec_prestado_actual(expr.name):
+            return f"(*{expr.name})"  # un Vec prestado llega por puntero
         return expr.name
 
     def _gen_none_expr(self, expr, env, out, pad, expected_ty):
@@ -577,6 +602,8 @@ class Expresiones:
         return f"{tmp}.value"
 
     def _gen_unary_op(self, expr, env, out, pad, expected_ty):
+        if expr.lit_f32 is not None:
+            return self._literal_f32_c(expr.lit_f32)  # `-0.5` como f32
         if expr.literal_plegado is not None:
             # `-N` con N literal es un literal negativo con su tipo, como en el
             # checker. INT32_MIN/INT64_MIN se escriben con la macro: en C,
@@ -717,6 +744,8 @@ class Expresiones:
             # f64 % f64: fmod(), como math.fmod del intérprete (el % de C no acepta
             # double)
             return f"fmod({l}, {r})"
+        if expr.op == "%" and self.infer(expr, env).name == "f32":
+            return f"fmodf({l}, {r})"
         if (
             expr.op in ("==", "!=")
             and self.infer(expr.left, env).name == "str"
@@ -771,8 +800,7 @@ class Expresiones:
         if (name is not None and getattr(expr.callee, "es_valor_fn", False)
                 and name in env and env[name].name == FN_MARK and env[name].args):
             # una llamada a través de un valor fn tiene los tipos de su firma: un
-            # Vec/Map que recibe es suyo (se mueve) y un struct se presta (contrato del
-            # tipo fn)
+            # Vec/Map o un struct se presta (contrato del tipo fn)
             param_tys = env[name].args[:-1]
         elif name is not None:
             if name in ("abs", "min", "max") and len(expr.args) in (1, 2):
@@ -856,6 +884,10 @@ class Expresiones:
                     prestados_idx = set()  # todo lo que vuelve es prestado: como antes
         temps_prestados = []
         temps_devueltos = []
+        # Vec/Map prestados: su argumento ya es un puntero estable
+        # (o un temporal), no se vuelve a copiar al secuenciar
+        fijos = set()
+        tarde = []
         for i, a in enumerate(expr.args):
             b = []
             args_code.append(self._capture_fresh_struct_arg(
@@ -895,13 +927,19 @@ class Expresiones:
                 b.append(f"{pad}{self.c_type(self.infer(a, env))} {tmp} = {args_code[-1]};")
                 temps_prestados.append(tmp)
                 args_code[-1] = tmp
+            if param_tys and i < len(param_tys) and self._arg_va_prestado(expr, name, i, param_tys[i], env):
+                args_code[-1] = self._arg_contenedor_prestado(a, param_tys[i], args_code[-1], env, b, pad, tarde)
+                fijos.add(i)
             bufs.append(b)
+        if tarde:
+            self._prestar_tarde[id(expr)] = tarde
         if name not in self.extern_sigs or all(
                 t.name in ("i32", "i64", "f64", "bool", "str") for t in self.extern_sigs[name][0]):
             # el tipo del temporal es el del parámetro (un `None` o un literal no
             # dicen el suyo: `f(None, None)` con Option<str>)
             args_code = self._secuenciar(expr.args, args_code, env, out, pad,
-                                         tys=list(param_tys) if param_tys else None, bufs=bufs)
+                                         tys=list(param_tys) if param_tys else None, bufs=bufs,
+                                         fijos=fijos)
         else:
             for b in bufs:
                 out.extend(b)
@@ -916,7 +954,11 @@ class Expresiones:
             ty = self.infer(expr, env).name
             if name == "abs" and ty == "f64":
                 return f"fabs((double)({args_code[0]}))"
+            if name == "abs" and ty == "f32":
+                return f"fabsf({args_code[0]})"
             self.needs_abs_min_max = True
+            if ty == "f32":
+                self.needs_min_max_f32 = True
             if name == "abs":
                 return f"scar_abs_{ty}({args_code[0]})"
             return f"scar_{name}_{ty}({args_code[0]}, {args_code[1]})"
@@ -931,6 +973,9 @@ class Expresiones:
             if t == "f64":
                 self.needs_fmt_f64 = True
                 return f"scar_fmt_f64({args_code[0]})"
+            if t == "f32":
+                self.needs_fmt_f32 = True
+                return f"scar_fmt_f32({args_code[0]})"
             self.needs_str_concat = True
             if t == "i32":
                 return f'scar_aprintf("%d", (int)({args_code[0]}))'
@@ -963,6 +1008,10 @@ class Expresiones:
             return f"scar_to_i64({args_code[0]})"
         if name == "to_f64":
             return f"((double)({args_code[0]}))"
+        if name == "to_f32":
+            # de un f64 redondea al f32 más cercano (lo que no cabe es ±inf); de un
+            # entero, lo mismo, redondeando una sola vez
+            return f"((float)({args_code[0]}))"
         if name == "rand":
             self.needs_rand = True
             return "scar_rand()"
@@ -1095,6 +1144,39 @@ class Expresiones:
             return call_code
         return _SIGUE
 
+    def _arg_va_prestado(self, expr, name, j, p_ty, env) -> bool:
+        """True si el argumento j de la llamada `expr` va a un Vec/Map prestado:
+        de una fn normal que lo presta, o de un valor fn (que siempre presta)."""
+        if p_ty is None or p_ty.name not in (VEC_MARK, MAP_MARK):
+            return False
+        if getattr(expr.callee, "es_valor_fn", False):
+            return True
+        return (name in self.fn_sigs and name not in env and name not in self.task_sigs
+                and self._contenedor_prestado(name, j, p_ty))
+
+    def _arg_contenedor_prestado(self, arg_expr, p_ty, code, env, out, pad, tarde):
+        """El argumento de un parámetro Vec/Map prestado. Un lugar
+        (`v`, `p.lista`, `m[i]`) se presta en su sitio: la dirección de un Vec (la
+        fn puede agrandarlo y quien llama lo ve), el puntero de un Map. Un valor
+        fresco va a un temporal que se suelta al terminar la sentencia; si la
+        sentencia no suelta temporales, se anota en `tarde` y la llamada se arma
+        en una sola expresión (_call_fn_usuario)."""
+        es_vec = p_ty.name == VEC_MARK
+        if Parser._is_place(arg_expr):
+            return f"&({code})" if es_vec else code
+        tmp = self._new_tmp()
+        drop = None
+        if self._let_creates_fresh_owner(arg_expr, marca_new_generico(arg_expr), env):
+            drop = self._vivo_drop_fn(p_ty, "plain")
+        decl = f"{self.c_type(p_ty)} {tmp} = {code};"
+        if self._can_capture_arg_temps:
+            out.append(f"{pad}{decl}")
+            if drop is not None:
+                self.pending_expr_temps.append(f"dropfree:{drop}:{tmp}")
+        else:
+            tarde.append((decl, f"{drop}(&{tmp});" if drop is not None else None))
+        return f"&{tmp}" if es_vec else tmp
+
     def _call_fn_usuario(self, expr, env, out, pad, name, param_tys, mangled_call_name,
                          args_code, temps_prestados, temps_devueltos):
         """La llamada a una fn del usuario: los parámetros que consume, y los
@@ -1103,9 +1185,13 @@ class Expresiones:
         # ser su dueño y la fn lo libera al cerrar su scope (gen_fn)
         if param_tys is not None:
             consumed = self.consumed_params.get(name, ())
-            self._capture_args_reading_moved_fields(expr.args, param_tys, args_code, env, out, pad)
+            prestados = {j for j, p_ty in enumerate(param_tys)
+                         if self._arg_va_prestado(expr, name, j, p_ty, env)}
+            self._capture_args_reading_moved_fields(expr.args, param_tys, args_code, env, out, pad, prestados)
             for j, (arg_expr, p_ty) in enumerate(zip(expr.args, param_tys)):
-                if p_ty is not None and self._is_moved_container_type(p_ty):
+                if self._arg_va_prestado(expr, name, j, p_ty, env):
+                    pass  # prestado: ya se pasó por dirección (_arg_contenedor_prestado)
+                elif p_ty is not None and self._is_moved_container_type(p_ty):
                     args_code[j] = self._move_arg_out(arg_expr, p_ty, args_code[j], env, out, pad)
                 elif (p_ty is not None and self._is_option_struct(p_ty)
                         and j in self.consumed_option_params.get(name, ())):
@@ -1129,6 +1215,22 @@ class Expresiones:
                         args_code[j] = f"{p_ty.name}_clone({args_code[j]})"
         # una fn genérica se llama por el nombre de su instancia
         call_code = f"{mangled_call_name or name}({', '.join(args_code)})"
+        tarde = self._prestar_tarde.pop(id(expr), None)
+        if tarde:
+            # un Vec/Map fresco prestado donde la sentencia no suelta temporales
+            # (la condición de un while...): la llamada entera en una expresión
+            # que arma el temporal, llama y lo suelta
+            decls = " ".join(d for d, _ in tarde)
+            drops = " ".join(f for _, f in tarde if f)
+            if name in self.fn_sigs:
+                ret_ty = self.fn_sigs[name][1]
+            else:  # un valor fn: el retorno es el último del tipo fn(...)
+                ret_ty = env[name].args[-1] if name in env and env[name].args else None
+            if ret_ty is None or ret_ty.name == "void":
+                call_code = f"({{ {decls} {call_code}; {drops} }})"
+            else:
+                r = self._new_tmp()
+                call_code = f"({{ {decls} {self.c_type(ret_ty)} {r} = {call_code}; {drops} {r}; }})"
         if temps_devueltos or temps_prestados:
             # el resultado a un temporal; al terminar la sentencia se suelta cada
             # argumento fresco que no volvió
@@ -1161,7 +1263,7 @@ class Expresiones:
                     campo_ty = self.infer(expr, env)
                 except CodegenError:
                     campo_ty = None
-                if campo_ty is not None and campo_ty.name in ("i32", "i64", "f64", "bool"):
+                if campo_ty is not None and campo_ty.name in ("i32", "i64", "f32", "f64", "bool"):
                     raiz_code = self.gen_expr(raiz, env, out, pad)
                     raiz_code = self._capture_fresh_struct_temp(raiz, raiz_code, env, out, pad)
                     return raiz_code + "".join(f"->{c}" for c in reversed(camino))
@@ -1174,11 +1276,29 @@ class Expresiones:
                 campo_ty = self.infer(expr, env)
             except CodegenError:
                 campo_ty = None
-            if campo_ty is not None and campo_ty.name in ("i32", "i64", "f64", "bool"):
+            if campo_ty is not None and campo_ty.name in ("i32", "i64", "f32", "f64", "bool"):
                 obj_code = self._capture_fresh_struct_temp(expr.obj, obj_code, env, out, pad)
         return f"{obj_code}->{expr.field}"
 
     def _gen_index_expr(self, expr, env, out, pad, expected_ty):
+        # v[i] -> scar_vec_en_<T>(v, i): el elemento de un Vec de números o bool,
+        # panic fuera de rango. Sin Option
+        # de por medio, el compilador ve un acceso directo a la memoria.
+        obj_ty = self.infer(expr.obj, env)
+        if obj_ty.name == VEC_MARK:
+            elem = obj_ty.args[0] if obj_ty.args else T_I32
+            obj_code = self.gen_expr(expr.obj, env, out, pad)
+            idx_code = self.gen_expr(expr.index, env, out, pad)
+            np = self._mangled_name(elem)
+            if elem.name in ("i32", "i64", "f64", "f32", "bool"):
+                return f"scar_vec_en_{np}({obj_code}, {idx_code})"
+            # un elemento con dueño es un lugar (el checker no deja otra cosa):
+            # un struct es un puntero al elemento, como cualquier struct del C
+            # generado (v[i].campo -> ...->campo); un Vec es el Vec mismo, como
+            # lvalue (m[i][j], m[i].push(x)). Nada se copia.
+            if elem.name == VEC_MARK:
+                return f"(*scar_vec_lugar_{np}({obj_code}, {idx_code}))"
+            return f"scar_vec_lugar_{np}({obj_code}, {idx_code})"
         # s[i] -> scar_str_index(obj, i): un str nuevo de un carácter, panic fuera
         # de rango. Si el objeto es a su vez un str fresco (`(a + b)[0]`), va antes
         # a un temporal.
@@ -1191,6 +1311,21 @@ class Expresiones:
         idx_code = self.gen_expr(expr.index, env, out, pad)
         self.needs_str_index = True
         return f"scar_str_index({obj_code}, {idx_code})"
+
+    def _gen_slice_expr(self, expr, env, out, pad, expected_ty):
+        # v[a..b] -> scar_vec_trozo_<T>(v, a, b): un Vec de C que apunta adentro del
+        # buffer de v, sin copiar nada. El checker solo lo deja como
+        # lado de suma/punto, que lo leen por valor y no lo guardan: nadie lo
+        # libera (no es fresco) y el buffer de v no se mueve mientras tanto.
+        obj_ty = self.infer(expr.obj, env)
+        elem = obj_ty.args[0] if obj_ty.args else T_I32
+        obj_code = self.gen_expr(expr.obj, env, out, pad)
+        desde = self.gen_expr(expr.desde, env, out, pad)
+        hasta = self.gen_expr(expr.hasta, env, out, pad)
+        np = self._mangled_name(elem)
+        if elem.name not in ("i32", "i64", "f64", "f32") and np not in self.vec_trozo_defs:
+            self.vec_trozo_defs[np] = self._vec_c_trozo(np, self.c_type(obj_ty))
+        return f"scar_vec_trozo_{np}({obj_code}, {desde}, {hasta})"
 
     def _gen_array_lit_expr(self, expr, env, out, pad, expected_ty):
         return self._gen_array_lit(expr, env, out, pad)

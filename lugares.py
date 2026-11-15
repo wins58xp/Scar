@@ -150,26 +150,40 @@ def puede_reemplazar(efecto, conocidas, expr, lugar, misma_raiz):
     guardada en una variable o una task" si no se sabe cuál); si no, None.
     Ver el docstring del módulo. `misma_raiz(n)` dice si la variable `n` es
     la raíz del lugar o un alias suyo."""
+    if camino(lugar) is None:
+        return False
+    for nombre, args in _llamadas(expr):
+        quien = llamada_puede_reemplazar(efecto, conocidas, nombre, args, lugar, misma_raiz)
+        if quien is not None:
+            return quien
+    return None
+
+
+def llamada_puede_reemplazar(efecto, conocidas, nombre, args, lugar, misma_raiz):
+    """Lo mismo que puede_reemplazar, para una sola llamada (`nombre`, `args`),
+    sin mirar las llamadas de adentro de sus argumentos. La usa también el
+    checker para la llamada que recibe el lugar mismo: `f(c, c.pesos)` con una f
+    que reasigna `p.pesos` le reemplaza a `c.pesos` el objeto que recibe por el
+    otro parámetro."""
     c_lugar = camino(lugar)
     if c_lugar is None:
-        return False
+        return None
     campos = c_lugar[1]
-    for nombre, args in _llamadas(expr):
-        for k, a in enumerate(args):
-            c = camino(a)
-            if c is None or not misma_raiz(c[0]):
-                continue
-            p = c[1] if c[0] == c_lugar[0] else ()
-            if len(p) >= len(campos) or campos[:len(p)] != p:
-                continue        # L mismo, algo de adentro de L o un hermano
-            resto = campos[len(p):]
-            if nombre is None or (nombre not in efecto and nombre not in conocidas):
-                return nombre or "una fn guardada en una variable o una task"
-            if nombre not in efecto or k >= len(efecto[nombre]):
-                continue
-            suyo = efecto[nombre][k]
-            if suyo == TODO or any(g and resto[:len(g)] == g for g in suyo):
-                return nombre
+    for k, a in enumerate(args):
+        c = camino(a)
+        if c is None or not misma_raiz(c[0]):
+            continue
+        p = c[1] if c[0] == c_lugar[0] else ()
+        if len(p) >= len(campos) or campos[:len(p)] != p:
+            continue        # L mismo, algo de adentro de L o un hermano
+        resto = campos[len(p):]
+        if nombre is None or (nombre not in efecto and nombre not in conocidas):
+            return nombre or "una fn guardada en una variable o una task"
+        if nombre not in efecto or k >= len(efecto[nombre]):
+            continue
+        suyo = efecto[nombre][k]
+        if suyo == TODO or any(g and resto[:len(g)] == g for g in suyo):
+            return nombre
     return None
 
 

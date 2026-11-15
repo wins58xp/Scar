@@ -24,6 +24,10 @@
 # Operaciones: suma, resta, mul, div, neg, cuadrado, exponencial, logaritmo,
 # tanh, sigmoide, relu, y escalar (multiplicar por un número fijo). Todo en f64.
 # Probada contra derivadas numéricas (diferencias centradas).
+#
+# Al final está la cinta de vectores en f32 (CintaV, las funciones v_*): un nodo
+# por operación sobre un Vec<f32> entero, con producto matriz-vector, para redes
+# de verdad (pruebas/lib_autodiff_vec.scar la compara con esta).
 
 struct Cinta {
     valores: Vec<f64>
@@ -237,5 +241,754 @@ fn derivar(c: Cinta, salida: i32) {
             }
         }
         i = i - 1
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Cinta de vectores en f32 (CintaV)
+# ---------------------------------------------------------------------------
+#
+# Lo mismo, pero cada valor de la cinta es un Vec<f32> entero (un vector, o una
+# matriz guardada fila por fila), y cada operación es un nodo para todo el
+# vector, no uno por número. Una capa de una red, y = tanh(W·x + b), son tres
+# nodos aunque W tenga miles de pesos. En f32, la mitad de memoria que en f64.
+#
+#   let c = autodiff.cinta_v()
+#   let w = autodiff.v_matriz(c, 2, 3, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+#   let x = autodiff.v_variable(c, [1.0, 2.0, 3.0])
+#   let y = autodiff.v_tanh(c, autodiff.v_matvec(c, w, x))
+#   let p = autodiff.v_total(c, y)                  # un vector de largo 1
+#   autodiff.v_derivar(c, p)
+#   print(autodiff.v_gradiente(c, w))               # dp/dW, fila por fila
+#
+# Las operaciones de dos vectores piden el mismo largo (si no, panic). Los
+# resultados de v_total, v_punto y v_ecm son vectores de largo 1, y v_derivar
+# pide uno de esos.
+#
+# Para entrenar paso a paso sin copiar los pesos, los
+# pesos viven en la cinta como parámetros: se declaran una vez, antes de
+# cualquier operación, y entre un paso y otro solo se bota lo calculado.
+#
+#   let c = autodiff.cinta_v()
+#   let w = autodiff.v_parametro(c, 2, 3, pesos)    # la cinta se queda con `pesos`
+#   # en cada paso:
+#   autodiff.v_reiniciar(c)                          # conserva los parámetros
+#   let x = autodiff.v_constante(c, entrada)         # sin gradiente
+#   let p = autodiff.v_ecm(c, autodiff.v_matvec(c, w, x), autodiff.v_constante(c, objetivo))
+#   autodiff.v_derivar(c, p)
+#   autodiff.v_aprender(c, 0.1)                      # w = w - 0.1·dp/dw, en su lugar
+#
+# v_aprender hace la misma cuenta que v_paso, así que da lo mismo bit a bit que
+# volver a cargar los pesos con v_matriz en cada paso.
+#
+# Una matriz que se usa una sola vez, en un v_matvec, tiene un gradiente que no
+# hace falta armar entero: dW[f][j] = 0 + g[f]·x[j],
+# con g el gradiente de la salida de esa capa y x su entrada. La cinta guarda g y x,
+# y v_aprender hace las cuentas fila por fila (las mismas, en el mismo orden). Así
+# no se reserva, ni se pone en cero, ni se recorre un vector del tamaño de la
+# matriz. v_gradiente, v_gradiente_en y v_paso lo calculan en el momento.
+
+struct CintaV {
+    valores: Vec<Vec<f32>>
+    grads: Vec<Vec<f32>>
+    ops: Vec<i32>
+    izq: Vec<i32>
+    der: Vec<i32>
+    # filas de una matriz (1 para un vector)
+    filas: Vec<i32>
+    # para v_escalar: el número fijo
+    fijos: Vec<f32>
+    # cuántos valores del comienzo son parámetros (v_parametro): v_reiniciar los
+    # conserva
+    parametros: i32
+    # cuántos valores están en uso. Los vectores de más allá son la reserva que dejó
+    # v_reiniciar: el paso siguiente escribe encima en vez de armarlos de nuevo
+    #
+    n: i32
+    # por parámetro: el número del v_matvec del que sale su gradiente diferido, o
+    # -1 si se arma entero en grads
+    dif_op: Vec<i32>
+    # por parámetro diferido: g (el gradiente de la salida de la capa) y x (su
+    # entrada), copiados al terminar v_derivar
+    dif_g: Vec<Vec<f32>>
+    dif_x: Vec<Vec<f32>>
+    # una fila de trabajo de v_aprender
+    fila: Vec<f32>
+}
+
+fn _matvec() -> i32 { return 12 }
+fn _total() -> i32 { return 13 }
+fn _punto() -> i32 { return 14 }
+fn _ecm() -> i32 { return 15 }
+
+# Una cinta de vectores vacía.
+fn cinta_v() -> CintaV {
+    return CintaV { valores: vec_new(), grads: vec_new(), ops: vec_new(), izq: vec_new(), der: vec_new(),
+                    filas: vec_new(), fijos: vec_new(), parametros: 0, n: 0, dif_op: vec_new(), dif_g: vec_new(),
+                    dif_x: vec_new(), fila: vec_new() }
+}
+
+# Vacía la cinta, parámetros incluidos.
+fn v_limpiar(c: CintaV) {
+    c.valores = vec_new()
+    c.grads = vec_new()
+    c.ops = vec_new()
+    c.izq = vec_new()
+    c.der = vec_new()
+    c.filas = vec_new()
+    c.fijos = vec_new()
+    c.parametros = 0
+    c.n = 0
+    c.dif_op = vec_new()
+    c.dif_g = vec_new()
+    c.dif_x = vec_new()
+}
+
+# Bota todo lo calculado y conserva los parámetros (v_parametro) con sus
+# gradientes: para el paso siguiente de un entrenamiento.
+fn v_reiniciar(c: CintaV) {
+    # los vectores de lo calculado quedan como reserva para el paso siguiente
+    c.n = c.parametros
+}
+
+# Cuántos valores (vectores) tiene la cinta.
+fn v_largo(c: CintaV) -> i32 {
+    return c.n
+}
+
+fn _v_revisar(c: CintaV, i: i32) {
+    if i < 0 or i >= c.n {
+        panic("autodiff: el valor " + a_texto(i) + " no es de esta cinta (tiene " + a_texto(c.n) + ")")
+    }
+}
+
+fn _ceros(n: i32) -> Vec<f32> {
+    let mut v: Vec<f32> = vec_new()
+    let mut i = 0
+    while i < n {
+        v.push(0.0)
+        i = i + 1
+    }
+    return v
+}
+
+# El lugar del valor siguiente, de `largo` números (sin escribir), con su gradiente
+# en cero si `con_grad` (si no, vacío: una constante). Si la reserva tiene un
+# vector en ese lugar y del mismo largo, lo reusa; si no, lo arma.
+fn _v_lugar(c: CintaV, largo: i32, con_grad: bool, filas: i32, op: i32, a: i32, b: i32, fijo: f32) -> i32 {
+    let i = c.n
+    if i < c.valores.len() {
+        if c.valores[i].len() != largo {
+            c.valores.set(i, _ceros(largo))
+        }
+        if con_grad {
+            if c.grads[i].len() != largo {
+                c.grads.set(i, _ceros(largo))
+            } else {
+                c.grads[i].llenar(0.0)
+            }
+        } else if c.grads[i].len() > 0 {
+            c.grads.set(i, vec_new())
+        }
+        c.ops[i] = op
+        c.izq[i] = a
+        c.der[i] = b
+        c.filas[i] = filas
+        c.fijos[i] = fijo
+    } else {
+        c.valores.push(_ceros(largo))
+        if con_grad {
+            c.grads.push(_ceros(largo))
+        } else {
+            c.grads.push(vec_new())
+        }
+        c.ops.push(op)
+        c.izq.push(a)
+        c.der.push(b)
+        c.filas.push(filas)
+        c.fijos.push(fijo)
+    }
+    c.n = i + 1
+    return i
+}
+
+# Copia `v` en el valor `i` (del mismo largo), número a número.
+fn _v_copiar_en(c: CintaV, i: i32, v: Vec<f32>) {
+    let mut j = 0
+    while j < v.len() {
+        c.valores[i][j] = v[j]
+        j = j + 1
+    }
+}
+
+# Agrega el valor a la cinta; su gradiente ya tiene que estar en c.grads.
+
+
+fn _mismo_largo(c: CintaV, a: i32, b: i32, que: str) {
+    _v_revisar(c, a)
+    _v_revisar(c, b)
+    if c.valores[a].len() != c.valores[b].len() {
+        panic("autodiff: " + que + " pide dos vectores del mismo largo (" + a_texto(c.valores[a].len())
+              + " y " + a_texto(c.valores[b].len()) + ")")
+    }
+}
+
+# Un vector del que se quiere la derivada (pesos, una entrada). Se copia.
+fn v_variable(c: CintaV, v: Vec<f32>) -> i32 {
+    let i = _v_lugar(c, v.len(), true, 1, _hoja(), -1, -1, 0.0)
+    _v_copiar_en(c, i, v)
+    return i
+}
+
+# Una matriz de `filas` x `columnas`, guardada fila por fila en `v`.
+fn v_matriz(c: CintaV, filas: i32, columnas: i32, v: Vec<f32>) -> i32 {
+    if filas <= 0 or columnas <= 0 or filas * columnas != v.len() {
+        panic("autodiff: una matriz de " + a_texto(filas) + " x " + a_texto(columnas) + " lleva "
+              + a_texto(filas * columnas) + " números, no " + a_texto(v.len()))
+    }
+    let i = v_variable(c, v)
+    c.filas[i] = filas
+    return i
+}
+
+# Un vector fijo (una entrada, un objetivo). Se copia. No lleva gradiente: la
+# vuelta hacia atrás no calcula nada hacia él, y v_gradiente da un vector vacío.
+# Para la derivada respecto de una entrada, v_variable.
+fn v_constante(c: CintaV, v: Vec<f32>) -> i32 {
+    let i = _v_lugar(c, v.len(), false, 1, _hoja(), -1, -1, 0.0)
+    _v_copiar_en(c, i, v)
+    return i
+}
+
+# Un parámetro: pesos que se aprenden y que quedan en la cinta entre un paso y
+# otro (v_reiniciar no los saca). La cinta se queda con `pesos` (no se copia), de
+# `filas` x `columnas` guardados fila por fila (un vector: 1 x largo). Los
+# parámetros van antes de cualquier otro valor. Devuelve su número, que no
+# cambia entre pasos.
+fn v_parametro(c: CintaV, filas: i32, columnas: i32, pesos: Vec<f32>) -> i32 {
+    if c.n != c.parametros {
+        panic("autodiff: v_parametro va antes de cualquier otro valor de la cinta (ya hay "
+              + a_texto(c.n - c.parametros) + " que no son parámetros)")
+    }
+    if filas <= 0 or columnas <= 0 or filas * columnas != pesos.len() {
+        panic("autodiff: un parámetro de " + a_texto(filas) + " x " + a_texto(columnas) + " lleva "
+              + a_texto(filas * columnas) + " números, no " + a_texto(pesos.len()))
+    }
+    let i = c.n
+    # su gradiente se reserva la primera vez que hace falta entero
+    if i < c.valores.len() {
+        # el lugar era de la reserva (un valor calculado de un paso anterior)
+        c.valores.set(i, pesos)
+        c.grads.set(i, vec_new())
+        c.ops[i] = _hoja()
+        c.izq[i] = -1
+        c.der[i] = -1
+        c.filas[i] = filas
+        c.fijos[i] = 0.0
+    } else {
+        c.valores.push(pesos)
+        c.grads.push(vec_new())
+        c.ops.push(_hoja())
+        c.izq.push(-1)
+        c.der.push(-1)
+        c.filas.push(filas)
+        c.fijos.push(0.0)
+    }
+    c.dif_op.push(-1)
+    c.dif_g.push(vec_new())
+    c.dif_x.push(vec_new())
+    c.n = i + 1
+    c.parametros = c.parametros + 1
+    return i
+}
+
+# El gradiente del parámetro `p` armado entero en c.grads (en cero si recién se
+# reserva).
+fn _grad_entero(c: CintaV, p: i32) {
+    if c.grads[p].len() != c.valores[p].len() {
+        c.grads.set(p, _ceros(c.valores[p].len()))
+    }
+}
+
+# True si `i` es un parámetro con el gradiente diferido.
+fn _diferido(c: CintaV, i: i32) -> bool {
+    return i < c.parametros and c.dif_op[i] >= 0
+}
+
+# La fila de trabajo de la cinta, del largo de la entrada del parámetro diferido `p`.
+fn _preparar_fila(c: CintaV, p: i32) {
+    if c.fila.len() != c.dif_x[p].len() {
+        c.fila = _ceros(c.dif_x[p].len())
+    }
+}
+
+# Le suma a `w` (los pesos de un parámetro diferido, o una copia) k·dW, fila por
+# fila, sin armar dW, con dW[f][j] = 0 + g[f]·x[j]: por cada fila f, fila = 0 + g[f]·x
+# y w[f] = w[f] + k·fila. Son las mismas cuentas que armar dW (ponerlo en cero y
+# hacerle acumular(x, g[f]) a cada fila) y después w.acumular(dW, k). `fila` tiene
+# el largo de x (_preparar_fila).
+fn _sumar_diferido(g: Vec<f32>, x: Vec<f32>, fila: Vec<f32>, w: Vec<f32>, k: f32) {
+    let m = x.len()
+    let mut f = 0
+    while f < g.len() {
+        fila.llenar(0.0)
+        fila.acumular(x, g[f])
+        let base = f * m
+        w[base..base + m].acumular(fila, k)
+        f = f + 1
+    }
+}
+
+# El valor de `i` (una copia).
+fn v_valor(c: CintaV, i: i32) -> Vec<f32> {
+    _v_revisar(c, i)
+    return v_copia(c.valores[i])
+}
+
+# La derivada del último resultado pasado a v_derivar respecto de `i` (una copia).
+fn v_gradiente(c: CintaV, i: i32) -> Vec<f32> {
+    _v_revisar(c, i)
+    if _diferido(c, i) {
+        let r = _ceros(c.valores[i].len())
+        _preparar_fila(c, i)
+        _sumar_diferido(c.dif_g[i], c.dif_x[i], c.fila, r, 1.0)
+        return r
+    }
+    if i < c.parametros and c.grads[i].len() == 0 {
+        return _ceros(c.valores[i].len())  # todavía no se derivó
+    }
+    return v_copia(c.grads[i])
+}
+
+# El número `k` del valor `i` (sin copiar el vector).
+fn v_valor_en(c: CintaV, i: i32, k: i32) -> f32 {
+    _v_revisar(c, i)
+    return c.valores[i][k]
+}
+
+# El número `k` de la derivada de `i`.
+fn v_gradiente_en(c: CintaV, i: i32, k: i32) -> f32 {
+    _v_revisar(c, i)
+    if i < c.parametros and c.grads[i].len() == 0 {
+        let chequeo = c.valores[i][k]  # el mismo panic que un k fuera de rango
+        if _diferido(c, i) {
+            let m = c.dif_x[i].len()
+            return 0.0 + c.dif_g[i][k / m] * c.dif_x[i][k % m]
+        }
+        return 0.0
+    }
+    return c.grads[i][k]
+}
+
+# Una copia de `v` (un Vec<f32> nuevo con los mismos números).
+fn v_copia(v: Vec<f32>) -> Vec<f32> {
+    let mut r: Vec<f32> = vec_new()
+    let mut i = 0
+    while i < v.len() {
+        r.push(v[i])
+        i = i + 1
+    }
+    return r
+}
+
+# a + b, número a número.
+fn v_suma(c: CintaV, a: i32, b: i32) -> i32 {
+    _mismo_largo(c, a, b, "v_suma")
+    let n = c.valores[a].len()
+    let r = _v_lugar(c, n, true, 1, _suma(), a, b, 0.0)
+    let mut i = 0
+    while i < n {
+        c.valores[r][i] = c.valores[a][i] + c.valores[b][i]
+        i = i + 1
+    }
+    return r
+}
+
+# a - b, número a número.
+fn v_resta(c: CintaV, a: i32, b: i32) -> i32 {
+    _mismo_largo(c, a, b, "v_resta")
+    let n = c.valores[a].len()
+    let r = _v_lugar(c, n, true, 1, _resta(), a, b, 0.0)
+    let mut i = 0
+    while i < n {
+        c.valores[r][i] = c.valores[a][i] - c.valores[b][i]
+        i = i + 1
+    }
+    return r
+}
+
+# a * b, número a número.
+fn v_mul(c: CintaV, a: i32, b: i32) -> i32 {
+    _mismo_largo(c, a, b, "v_mul")
+    let n = c.valores[a].len()
+    let r = _v_lugar(c, n, true, 1, _mul(), a, b, 0.0)
+    let mut i = 0
+    while i < n {
+        c.valores[r][i] = c.valores[a][i] * c.valores[b][i]
+        i = i + 1
+    }
+    return r
+}
+
+# a * k, con k un número fijo.
+fn v_escalar(c: CintaV, a: i32, k: f32) -> i32 {
+    _v_revisar(c, a)
+    let n = c.valores[a].len()
+    let r = _v_lugar(c, n, true, 1, _escalar(), a, -1, k)
+    let mut i = 0
+    while i < n {
+        c.valores[r][i] = c.valores[a][i] * k
+        i = i + 1
+    }
+    return r
+}
+
+# W · x: W una matriz de f x n (v_matriz), x un vector de largo n. Da un vector
+# de largo f.
+fn v_matvec(c: CintaV, w: i32, x: i32) -> i32 {
+    _v_revisar(c, w)
+    _v_revisar(c, x)
+    let f = c.filas[w]
+    let n = c.valores[x].len()
+    if f * n != c.valores[w].len() {
+        panic("autodiff: v_matvec: la matriz tiene " + a_texto(c.valores[w].len()) + " números en "
+              + a_texto(f) + " filas y el vector tiene largo " + a_texto(n))
+    }
+    # cada fila es un producto punto en 16 carriles, sobre el pedazo de la matriz
+    # (sin copiarlo)
+    let r = _v_lugar(c, f, true, 1, _matvec(), w, x, 0.0)
+    let mut i = 0
+    while i < f {
+        let base = i * n
+        c.valores[r][i] = c.valores[w][base..base + n].punto(c.valores[x])
+        i = i + 1
+    }
+    return r
+}
+
+fn _f32_tanh(x: f32) -> f32 {
+    return to_f32(_tanh_f(x))
+}
+
+fn _f32_sigmoide(x: f32) -> f32 {
+    return to_f32(_sigmoide_f(x))
+}
+
+# tanh de cada número.
+fn v_tanh(c: CintaV, a: i32) -> i32 {
+    _v_revisar(c, a)
+    let n = c.valores[a].len()
+    let r = _v_lugar(c, n, true, 1, _tanh(), a, -1, 0.0)
+    let mut i = 0
+    while i < n {
+        c.valores[r][i] = _f32_tanh(c.valores[a][i])
+        i = i + 1
+    }
+    return r
+}
+
+# sigmoide de cada número.
+fn v_sigmoide(c: CintaV, a: i32) -> i32 {
+    _v_revisar(c, a)
+    let n = c.valores[a].len()
+    let r = _v_lugar(c, n, true, 1, _sigmoide(), a, -1, 0.0)
+    let mut i = 0
+    while i < n {
+        c.valores[r][i] = _f32_sigmoide(c.valores[a][i])
+        i = i + 1
+    }
+    return r
+}
+
+# relu de cada número (los negativos pasan a 0).
+fn v_relu(c: CintaV, a: i32) -> i32 {
+    _v_revisar(c, a)
+    let n = c.valores[a].len()
+    let r = _v_lugar(c, n, true, 1, _relu(), a, -1, 0.0)
+    let mut i = 0
+    while i < n {
+        let x = c.valores[a][i]
+        if x > 0.0 {
+            c.valores[r][i] = x
+        } else {
+            c.valores[r][i] = 0.0
+        }
+        i = i + 1
+    }
+    return r
+}
+
+# La suma de todos los números de `a` (un vector de largo 1).
+fn v_total(c: CintaV, a: i32) -> i32 {
+    _v_revisar(c, a)
+    let s = c.valores[a].suma()
+    let r = _v_lugar(c, 1, true, 1, _total(), a, -1, 0.0)
+    c.valores[r][0] = s
+    return r
+}
+
+# El producto punto de a y b (un vector de largo 1).
+fn v_punto(c: CintaV, a: i32, b: i32) -> i32 {
+    _mismo_largo(c, a, b, "v_punto")
+    let s = c.valores[a].punto(c.valores[b])
+    let r = _v_lugar(c, 1, true, 1, _punto(), a, b, 0.0)
+    c.valores[r][0] = s
+    return r
+}
+
+# El error cuadrático medio entre a (lo calculado) y b (lo esperado): la media
+# de (a - b)², un vector de largo 1.
+fn v_ecm(c: CintaV, a: i32, b: i32) -> i32 {
+    _mismo_largo(c, a, b, "v_ecm")
+    let n = c.valores[a].len()
+    let mut s: f32 = 0.0
+    let mut i = 0
+    while i < n {
+        let d = c.valores[a][i] - c.valores[b][i]
+        s = s + d * d
+        i = i + 1
+    }
+    if n > 0 {
+        s = s / to_f32(n)
+    }
+    let r = _v_lugar(c, 1, true, 1, _ecm(), a, b, 0.0)
+    c.valores[r][0] = s
+    return r
+}
+
+# Calcula la derivada de `salida` (un vector de largo 1) respecto de cada valor
+# de la cinta. Los gradientes de una llamada anterior se borran antes.
+fn v_derivar(c: CintaV, salida: i32) {
+    _v_revisar(c, salida)
+    if c.valores[salida].len() != 1 {
+        panic("autodiff: v_derivar pide un resultado de largo 1 (v_total, v_punto o v_ecm), y este tiene largo "
+              + a_texto(c.valores[salida].len()))
+    }
+    _decidir_diferidos(c)
+    let mut k = 0
+    while k < c.n {
+        c.grads[k].llenar(0.0)
+        k = k + 1
+    }
+    c.grads[salida][0] = 1.0
+    let mut i = salida
+    while i >= 0 {
+        let op = c.ops[i]
+        let a = c.izq[i]
+        let b = c.der[i]
+        let n = c.grads[i].len()
+        # una constante (v_constante) no lleva gradiente: no se calcula nada hacia ella
+        let con_a = a >= 0 and c.grads[a].len() > 0
+        let con_b = b >= 0 and c.grads[b].len() > 0
+        if op == _suma() or op == _resta() {
+            let signo: f32 = if op == _suma() { 1.0 } else { -1.0 }
+            let mut j = 0
+            while j < n {
+                let g = c.grads[i][j]
+                if con_a {
+                    c.grads[a][j] = c.grads[a][j] + g
+                }
+                if con_b {
+                    c.grads[b][j] = c.grads[b][j] + signo * g
+                }
+                j = j + 1
+            }
+        } else if op == _mul() {
+            let mut j = 0
+            while j < n {
+                let g = c.grads[i][j]
+                if con_a {
+                    c.grads[a][j] = c.grads[a][j] + g * c.valores[b][j]
+                }
+                if con_b {
+                    c.grads[b][j] = c.grads[b][j] + g * c.valores[a][j]
+                }
+                j = j + 1
+            }
+        } else if op == _escalar() and con_a {
+            let k2 = c.fijos[i]
+            let mut j = 0
+            while j < n {
+                c.grads[a][j] = c.grads[a][j] + c.grads[i][j] * k2
+                j = j + 1
+            }
+        } else if op == _matvec() {
+            # a = W (f x m), b = x (m): la fila f de dW suma g[f] * x, y dx suma
+            # g[f] * (fila f de W); cada una en un acumular sobre el pedazo de la fila
+            let m = c.valores[b].len()
+            let mut f = 0
+            while f < n {
+                let g = c.grads[i][f]
+                let base = f * m
+                if con_a {
+                    c.grads[a][base..base + m].acumular(c.valores[b], g)
+                }
+                if con_b {
+                    c.grads[b].acumular(c.valores[a][base..base + m], g)
+                }
+                f = f + 1
+            }
+        } else if op == _tanh() and con_a {
+            let mut j = 0
+            while j < n {
+                let v = c.valores[i][j]
+                c.grads[a][j] = c.grads[a][j] + c.grads[i][j] * (1.0 - v * v)
+                j = j + 1
+            }
+        } else if op == _sigmoide() and con_a {
+            let mut j = 0
+            while j < n {
+                let v = c.valores[i][j]
+                c.grads[a][j] = c.grads[a][j] + c.grads[i][j] * v * (1.0 - v)
+                j = j + 1
+            }
+        } else if op == _relu() and con_a {
+            let mut j = 0
+            while j < n {
+                if c.valores[a][j] > 0.0 {
+                    c.grads[a][j] = c.grads[a][j] + c.grads[i][j]
+                }
+                j = j + 1
+            }
+        } else if op == _total() and con_a {
+            let g = c.grads[i][0]
+            let mut j = 0
+            while j < c.grads[a].len() {
+                c.grads[a][j] = c.grads[a][j] + g
+                j = j + 1
+            }
+        } else if op == _punto() {
+            let g = c.grads[i][0]
+            let mut j = 0
+            while j < c.grads[a].len() {
+                if con_a {
+                    c.grads[a][j] = c.grads[a][j] + g * c.valores[b][j]
+                }
+                if con_b {
+                    c.grads[b][j] = c.grads[b][j] + g * c.valores[a][j]
+                }
+                j = j + 1
+            }
+        } else if op == _ecm() {
+            let m = c.valores[a].len()
+            if m > 0 {
+                let g = c.grads[i][0] * 2.0 / to_f32(m)
+                let mut j = 0
+                while j < m {
+                    let d = c.valores[a][j] - c.valores[b][j]
+                    if con_a {
+                        c.grads[a][j] = c.grads[a][j] + g * d
+                    }
+                    if con_b {
+                        c.grads[b][j] = c.grads[b][j] - g * d
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i - 1
+    }
+    # g y x de cada parámetro diferido, para v_aprender y v_gradiente (valen
+    # aunque v_reiniciar saque los valores calculados)
+    let mut p = 0
+    while p < c.parametros {
+        let op = c.dif_op[p]
+        if op >= 0 {
+            _copiar_dif(c.dif_g, p, c.grads[op])
+            _copiar_dif(c.dif_x, p, c.valores[c.der[op]])
+        }
+        p = p + 1
+    }
+}
+
+# Copia `v` en dest[p], encima de lo que había si tiene el mismo largo, de una vez
+# (0 + 1·v, con SIMD). Un -0.0 queda como +0.0, y no cambia nada: g y x de un
+# gradiente diferido solo se usan en 0 + g[f]·x[j], que da +0.0 con cualquier signo
+# del cero (y lo mismo si el otro es inf o nan).
+fn _copiar_dif(dest: Vec<Vec<f32>>, p: i32, v: Vec<f32>) {
+    if dest[p].len() != v.len() {
+        dest.set(p, _ceros(v.len()))
+    }
+    dest[p].llenar(0.0)
+    dest[p].acumular(v, 1.0)
+}
+
+# Qué parámetros quedan con el gradiente diferido en este v_derivar: los que usa
+# una sola operación, y es un v_matvec donde son la matriz. A esos se les suelta
+# el vector de gradiente (la vuelta hacia atrás no les escribe nada, como a una
+# constante); a los demás se les arma entero.
+fn _decidir_diferidos(c: CintaV) {
+    let mut usos: Vec<i32> = vec_new()
+    let mut op_de: Vec<i32> = vec_new()
+    let mut p = 0
+    while p < c.parametros {
+        usos.push(0)
+        op_de.push(-1)
+        p = p + 1
+    }
+    let mut i = c.parametros
+    while i < c.n {
+        let a = c.izq[i]
+        let b = c.der[i]
+        if a >= 0 and a < c.parametros {
+            usos[a] = usos[a] + 1
+            if c.ops[i] == _matvec() {
+                op_de[a] = i
+            } else {
+                op_de[a] = -1
+            }
+        }
+        if b >= 0 and b < c.parametros {
+            usos[b] = usos[b] + 1
+            op_de[b] = -1
+        }
+        i = i + 1
+    }
+    p = 0
+    while p < c.parametros {
+        if usos[p] == 1 and op_de[p] >= 0 {
+            c.dif_op[p] = op_de[p]
+            if c.grads[p].len() > 0 {
+                c.grads.set(p, vec_new())
+            }
+        } else {
+            c.dif_op[p] = -1
+            _grad_entero(c, p)
+        }
+        p = p + 1
+    }
+}
+
+# Resta a los pesos de `i` su gradiente por `tasa` (un paso de descenso por el
+# gradiente) y devuelve los pesos nuevos, para volver a cargarlos en la cinta
+# del paso siguiente.
+fn v_paso(c: CintaV, i: i32, tasa: f32) -> Vec<f32> {
+    _v_revisar(c, i)
+    let r = v_copia(c.valores[i])
+    if _diferido(c, i) {
+        _preparar_fila(c, i)
+        _sumar_diferido(c.dif_g[i], c.dif_x[i], c.fila, r, 0.0 - tasa)
+        return r
+    }
+    if i < c.parametros {
+        _grad_entero(c, i)
+    }
+    r.acumular(c.grads[i], 0.0 - tasa)  # v + (-tasa)·g, igual bit a bit que v - tasa·g
+    return r
+}
+
+# Un paso de descenso por el gradiente sobre todos los parámetros (v_parametro),
+# en su lugar: w = w - tasa·dw. La misma cuenta que v_paso, sin copiar.
+fn v_aprender(c: CintaV, tasa: f32) {
+    let mut i = 0
+    while i < c.parametros {
+        if _diferido(c, i) {
+            _preparar_fila(c, i)
+            _sumar_diferido(c.dif_g[i], c.dif_x[i], c.fila, c.valores[i], 0.0 - tasa)
+        } else {
+            _grad_entero(c, i)
+            c.valores[i].acumular(c.grads[i], 0.0 - tasa)
+        }
+        i = i + 1
     }
 }

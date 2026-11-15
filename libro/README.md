@@ -30,6 +30,7 @@ programa completo en [`ejemplos/`](../ejemplos/), que corre igual con
 15. [Interfaces gráficas con `gui`](15_interfaces.md)
 16. [Herramientas: formato, editor y pruebas](16_herramientas.md)
 17. [IA nativa](17_ia_nativa.md)
+18. [Un cerebro de miles de regiones](18_muchas_regiones.md)
 
 Apéndices:
 

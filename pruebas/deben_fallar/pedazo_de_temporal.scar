@@ -1,0 +1,8 @@
+# espera: 'v[a..b]' es sobre un Vec guardado en una variable o en un campo
+# Un pedazo de un Vec temporal: nadie soltaría el Vec.
+fn crear() -> Vec<f64> {
+    return [1.0, 2.0]
+}
+fn main() {
+    print(crear()[0..1].suma())
+}

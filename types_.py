@@ -1,6 +1,8 @@
 """Representación de tipos para el verificador estático de SCAR."""
+import math
+import struct
 
-PRIMITIVE_NAMES = {"i32", "i64", "f64", "str", "bool", "void"}
+PRIMITIVE_NAMES = {"i32", "i64", "f32", "f64", "str", "bool", "void"}
 
 # Marcas de los tipos del lenguaje que no son primitivos (TypeAnn.name). Viven
 # solo acá: type_checker.py y codegen/ las importan (paso C9).
@@ -19,7 +21,7 @@ FN_MARK = "__Fn"
 
 # Los tipos escalares que cruzan la frontera de una extern fn tal cual. Un str
 # cruza como const char*; quién libera lo que C reservó lo decide el backend.
-FFI_SUPPORTED_TYPES = {"i32", "i64", "f64", "bool", "str"}
+FFI_SUPPORTED_TYPES = {"i32", "i64", "f64", "bool", "str"}  # f32 todavía no cruza
 
 
 class TypeAnn:
@@ -48,7 +50,10 @@ class TypeAnn:
         return self.name
 
     def is_numeric(self):
-        return self.name in ("i32", "i64", "f64")
+        return self.name in NUMERICOS
+
+    def is_float(self):
+        return self.name in ("f32", "f64")
 
     def is_integer(self):
         return self.name in ("i32", "i64")
@@ -76,6 +81,7 @@ PARAMS_COPIA = set()
 # Tipos primitivos reutilizables
 T_I32 = TypeAnn("i32")
 T_I64 = TypeAnn("i64")
+T_F32 = TypeAnn("f32")
 T_F64 = TypeAnn("f64")
 T_STR = TypeAnn("str")
 T_BOOL = TypeAnn("bool")
@@ -87,12 +93,15 @@ T_VOID = TypeAnn("void")
 # el codegen.
 #
 # Enteros i32 e i64; desbordar cualquiera de los dos es un panic. Ampliaciones
-# implícitas solo si no pierden información: i32 -> i64 e i32 -> f64. i64 -> f64
-# pierde precisión por encima de 2**53, así que mezclar i64 con f64 es un error
-# de tipo y se convierte a mano con to_f64() / to_i64(). Las conversiones
-# explícitas (to_i32 / to_i64 / to_f64) hacen panic si el valor no cabe: nunca
-# truncan en silencio un entero.
+# implícitas solo si no pierden información: i32 -> i64, i32 -> f64 y
+# f32 -> f64. i64 -> f64 pierde precisión por encima de 2**53, así que mezclar
+# i64 con f64 es un error de tipo y se convierte a mano con to_f64() / to_i64().
+# Un f32 guarda enteros exactos solo hasta 2**24: un entero no pasa solo a f32
+# (to_f32()). Las conversiones explícitas (to_i32 / to_i64 / to_f32 / to_f64)
+# hacen panic si el valor no cabe: nunca truncan en silencio un entero.
+# Las reglas son las mismas para toda la familia de tipos numéricos.
 # ---------------------------------------------------------------------------
+NUMERICOS = ("i32", "i64", "f32", "f64")
 I32_MIN, I32_MAX = -2 ** 31, 2 ** 31 - 1
 I64_MIN, I64_MAX = -2 ** 63, 2 ** 63 - 1
 INT_RANGES = {"i32": (I32_MIN, I32_MAX), "i64": (I64_MIN, I64_MAX)}
@@ -110,8 +119,12 @@ def int_literal_type(v):
 
 def numeric_result(l, r):
     """Tipo de `l op r` (+, -, *, /, %) para dos operandos numéricos concretos.
-    None si la mezcla no está permitida (i64 con f64)."""
+    None si la mezcla no está permitida (i64 con f64; f32 con un entero)."""
     names = {l.name, r.name}
+    if "f32" in names:
+        if names == {"f32"}:
+            return T_F32
+        return T_F64 if names == {"f32", "f64"} else None
     if "f64" in names:
         return None if "i64" in names else T_F64
     if "i64" in names:
@@ -121,8 +134,69 @@ def numeric_result(l, r):
 
 def numeric_mix_ok(l, r):
     """True si l y r se pueden comparar (misma regla que la aritmética: i64 y
-    f64 no se mezclan sin una conversión explícita)."""
-    return {l.name, r.name} != {"i64", "f64"}
+    f64 no se mezclan sin una conversión explícita, ni f32 con un entero)."""
+    return numeric_result(l, r) is not None
+
+
+# ---------------------------------------------------------------------------
+# f32: un decimal de 32 bits (IEEE 754 binary32). En el intérprete un f32 es un
+# float de Python (64 bits) que vale exactamente un f32; cada cuenta se hace en
+# 64 bits y se redondea a 32, que da lo mismo que hacerla en 32 (sumar, restar,
+# multiplicar, dividir y sqrt: 53 bits alcanzan para que redondear dos veces no
+# cambie el resultado). El nativo usa `float` de C.
+# ---------------------------------------------------------------------------
+def redondear_f32(x):
+    """El f32 más cercano a x (a par en el empate); lo que no cabe es ±inf."""
+    try:
+        return struct.unpack("f", struct.pack("f", x))[0]
+    except OverflowError:
+        return math.copysign(math.inf, x)
+
+
+def literal_f32(v):
+    """El valor de un literal usado como f32, o None si no sirve: un literal
+    decimal se redondea al f32 más cercano (None si es más grande que el mayor
+    f32); uno entero tiene que caber exacto."""
+    if isinstance(v, float):
+        r = redondear_f32(v)
+        return None if math.isinf(r) else r
+    try:
+        r = redondear_f32(float(v))
+    except OverflowError:
+        return None
+    return r if (not math.isinf(r) and int(r) == v) else None
+
+
+def fmt_f32(v):
+    """Un f32 como texto: el decimal más corto (de 1 a 9 cifras, bien
+    redondeado) que vuelve al mismo f32, con la forma de un f64 (`0.1`, `2.0`,
+    `1e+20`). Igual que scar_fmt_f32 del nativo (native/runtime/fmt_f32.c)."""
+    v = float(v)
+    if v != v:
+        return "nan"
+    if math.isinf(v):
+        return "-inf" if v < 0 else "inf"
+    if v == 0.0:
+        return "-0.0" if math.copysign(1.0, v) < 0 else "0.0"
+    a = abs(v)
+    for p in range(1, 10):
+        s = "%.*e" % (p - 1, a)
+        if redondear_f32(float(s)) == a:
+            break
+    mant, _, e = s.partition("e")
+    digits = mant.replace(".", "").rstrip("0") or "0"
+    nd = len(digits)
+    decpt = int(e) + 1
+    o = "-" if v < 0 else ""
+    if -4 < decpt <= 16:
+        if decpt <= 0:
+            return o + "0." + "0" * (-decpt) + digits
+        if decpt >= nd:
+            return o + digits + "0" * (decpt - nd) + ".0"
+        return o + digits[:decpt] + "." + digits[decpt:]
+    exp10 = decpt - 1
+    o += digits[0] + ("." + digits[1:] if nd > 1 else "")
+    return o + "e%s%02d" % ("-" if exp10 < 0 else "+", abs(exp10))
 
 
 def mensaje_movida(nombre):

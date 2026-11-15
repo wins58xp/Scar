@@ -382,11 +382,10 @@ class TiposC:
         de C (`int32_t (*f)(int32_t)`, con el nombre de la variable en el medio),
         así el resto del backend sigue usando `f"{self.c_type(t)} {name}"`."""
         param_tys, ret_ty = ty.args[:-1], ty.args[-1]
-        # Primitivos, str, structs (prestados), Vec/Map/Option/Result/Chan en la
+        # Primitivos, str, structs y Vec/Map (prestados), Option/Result/Chan en la
         # firma y un struct de retorno: por el contrato del tipo fn
         # (type_checker._chequear_contrato_fn_valor) una llamada a través de él es
-        # como cualquier otra: un Vec/Map que recibe es suyo y lo que devuelve es
-        # nuevo.
+        # como cualquier otra: lo que devuelve es nuevo.
         for t in ty.args:
             if t.name in C_TYPE or t.name in self.structs:
                 continue
@@ -402,7 +401,10 @@ class TiposC:
         # 'Fn_str_bool_void' para 'fn(str, bool)'
         c_name = "Fn_" + "_".join(self._mangled_name(t) for t in ty.args)
         self.fn_types[key] = c_name
-        param_c = ", ".join(C_TYPE[t.name] if t.name in C_TYPE else self.c_type(t)
+        # un Vec se presta por puntero, como en la firma de la fn que
+        # se guarda: el checker solo deja guardar una que lo recibe prestado
+        param_c = ", ".join(C_TYPE[t.name] if t.name in C_TYPE
+                            else self.c_type(t) + ("*" if t.name == VEC_MARK else "")
                             for t in param_tys) if param_tys else "void"
         ret_c = C_TYPE[ret_ty.name] if ret_ty.name in C_TYPE else self.c_type(ret_ty)
         # Con un Vec/Map/Option... en la firma, su typedef va después de
@@ -933,6 +935,7 @@ class TiposC:
                                inner_is_map)
             + self._vec_c_get_pop(opt_c_name, c_name, name_part, inner, inner_is_struct,
                                   inner_is_vec, opt_con_dueno, inner_is_map)
+            + self._vec_c_suma_punto(name_part, c_name, inner)
             + self._vec_c_len_resto(name_part, c_name, inner, inner_is_struct,
                                     inner_is_chan, inner_vec_part, inner_is_vec,
                                     opt_con_dueno, inner_is_map)
@@ -944,7 +947,8 @@ class TiposC:
         fn(...) dice que lo que devuelve es nuevo; si el retorno tiene dueño y
         fresh_owned no puede asegurarlo, se usa un envoltorio que devuelve una
         copia (en el peor caso, una pérdida acotada; nunca que quien llama libere
-        algo que no es suyo)."""
+        algo que no es suyo). Los Vec/Map se prestan igual que en la fn: su
+        firma ya es la del tipo fn."""
         params, ret = self.fn_sigs[nombre]
         if (ret is None or ret.name == "str" or not self._necesita_clonar(ret)
                 or self._ret_con_contrato(ret) or self.fresh_owned_fns.get(nombre, False)):
@@ -952,7 +956,8 @@ class TiposC:
         if nombre in self._envoltorios_fn:
             return self._envoltorios_fn[nombre][0]
         envoltorio = f"scar_fnv_{nombre}"
-        c_params = [C_TYPE[t.name] if t.name in C_TYPE else self.c_type(t) for t in params]
+        c_params = [C_TYPE[t.name] if t.name in C_TYPE else self._c_tipo_param(nombre, i, t)
+                    for i, t in enumerate(params)]
         firma = ", ".join(f"{c} __a{i}" for i, c in enumerate(c_params)) or "void"
         args = ", ".join(f"__a{i}" for i in range(len(c_params)))
         c_ret = self.c_type(ret)
@@ -1059,6 +1064,7 @@ class TiposC:
             "i32": "scar_hash_i32",
             "i64": "scar_hash_i64",
             "f64": "scar_hash_f64",
+            "f32": "scar_hash_f64",  # un f32 es exactamente un f64
             "str": "scar_hash_str",
             "bool": "scar_hash_bool",
         }[key_ty.name]

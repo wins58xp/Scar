@@ -1,0 +1,10 @@
+# espera: a guarda() no se le puede pasar un pedazo en 'v': se queda con ese Vec
+# Una fn que se queda con su Vec no puede recibir una vista de otro.
+fn guarda(t: Vec<Vec<f32>>, v: Vec<f32>) {
+    t.push(v)
+}
+fn main() {
+    let t: Vec<Vec<f32>> = vec_new()
+    let w: Vec<f32> = [1.0]
+    guarda(t, w[0..1])
+}

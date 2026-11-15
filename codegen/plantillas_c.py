@@ -265,9 +265,12 @@ class Plantillas:
         return (
             f"static {c_name} scar_vec_new_{name_part}(int32_t cap) {{\n"
             f"    {c_name} v;\n"
+            # el buffer sale del reciclador (scar_vbuf_pedir, pool_allocator.c) y
+            # la capacidad es todo lo que entra en el bloque, al menos cap
             f"    if (cap > 0) {{\n"
-            f"        v.data = malloc(sizeof({inner_c}) * (size_t)cap);\n"
-            f"        v.cap = cap;\n"
+            f"        size_t util;\n"
+            f"        v.data = scar_vbuf_pedir(sizeof({inner_c}) * (size_t)cap, &util);\n"
+            f"        v.cap = (int32_t)(util / sizeof({inner_c}));\n"
             f"    }} else {{\n"
             f"        v.data = NULL;\n"
             f"        v.cap = 0;\n"
@@ -280,8 +283,11 @@ class Plantillas:
             # con el realloc adentro gcc nunca inlineaba push (visto en objdump). grow
             # corre O(log n) veces por Vec, al doblar la capacidad.
             f"static __attribute__((noinline)) void scar_vec_grow_{name_part}({c_name}* v) {{\n"
-            f"    v->cap = v->cap ? v->cap * 2 : 4;\n"
-            f"    v->data = realloc(v->data, sizeof({inner_c}) * v->cap);\n"
+            f"    int32_t cap = v->cap ? v->cap * 2 : 4;\n"
+            f"    size_t util;\n"
+            f"    v->data = scar_vbuf_agrandar(v->data, sizeof({inner_c}) * (size_t)v->len,\n"
+            f"                                 sizeof({inner_c}) * (size_t)cap, &util);\n"
+            f"    v->cap = (int32_t)(util / sizeof({inner_c}));\n"
             f"}}\n"
             f"\n"
         )
@@ -343,6 +349,139 @@ class Plantillas:
             )
         )
 
+    def _vec_c_trozo(self, name_part, c_name):
+        """v[a..b]: la vista del pedazo, que se lee y se escribe como
+        un Vec cualquiera (suma y punto dan lo de un Vec con esos elementos).
+        cap = 0: no es dueña de nada, nadie la libera."""
+        pnc = panic_c(self.has_tasks)
+        return (
+            f"static inline __attribute__((unused)) {c_name} scar_vec_trozo_{name_part}({c_name} v, int32_t a, int32_t b) {{\n"
+            f"    if (__builtin_expect(a < 0 || a > b || b > v.len, 0)) {{\n"
+            f'        {pnc}("pedazo fuera de rango: [%d..%d] (longitud %d)", a, b, v.len);\n'
+            f"    }}\n"
+            f"    {c_name} r = v;\n"
+            f"    r.data = v.data + a;\n"
+            f"    r.len = b - a;\n"
+            f"    r.cap = 0;\n"
+            f"    return r;\n"
+            f"}}\n\n"
+        )
+
+    def _vec_c_llenar(self, name_part, c_name, inner):
+        """v.llenar(x): cada elemento queda en x. Un bucle
+        sin chequeos por elemento, que el compilador hace con SIMD o memset. Sale
+        solo si el programa lo usa."""
+        t = self.c_type(inner)
+        return (
+            f"static __attribute__((unused)) void scar_vec_llenar_{name_part}({c_name} v, {t} x) {{\n"
+            f"    for (int32_t i = 0; i < v.len; i++) v.data[i] = x;\n"
+            f"}}\n\n"
+        )
+
+    def _vec_c_acumular_entero(self, name_part, c_name, inner):
+        """a.acumular(b, k) con enteros: a[i] = a[i] + k * b[i], la cuenta exacta
+        (en 64 bits para i32, en 128 para i64), y panic en el primer elemento que
+        no cabe en el tipo. En orden, como el intérprete (si a y b se pisan, da
+        lo mismo). Sale solo si el programa lo usa."""
+        t = self.c_type(inner)
+        pnc = panic_c(self.has_tasks)
+        ancho, lo, hi = (("int64_t", "INT32_MIN", "INT32_MAX") if inner.name == "i32"
+                         else ("__int128", "INT64_MIN", "INT64_MAX"))
+        return (
+            f"static __attribute__((unused)) void scar_vec_acumular_{name_part}({c_name} a, {c_name} b, {t} k) {{\n"
+            f"    if (a.len != b.len) {{\n"
+            f'        {pnc}("acumular: los Vec tienen largos distintos (%d y %d)", a.len, b.len);\n'
+            f"    }}\n"
+            f"    for (int32_t i = 0; i < a.len; i++) {{\n"
+            f"        {ancho} r = ({ancho})a.data[i] + ({ancho})k * b.data[i];\n"
+            f"        if (__builtin_expect(r < ({ancho}){lo} || r > ({ancho}){hi}, 0)) {{\n"
+            f'            {pnc}("acumular: el resultado no cabe en {inner.name} (posición %d)", i);\n'
+            f"        }}\n"
+            f"        a.data[i] = ({t})r;\n"
+            f"    }}\n"
+            f"}}\n\n"
+        )
+
+    def _vec_c_suma_punto(self, name_part, c_name, inner):
+        """v.suma() y a.punto(b) de un Vec de números. Decimales: el elemento i va al carril i % 16, cada carril
+        suma en orden, y al final se juntan de a pares (k + 8, k + 4, k + 2, k + 1);
+        cada cuenta se redondea al tipo, sin FMA (-ffp-contract=off). Los 16
+        carriles son independientes, así que el compilador los hace con SIMD sin
+        cambiar el resultado: el intérprete hace las mismas cuentas en el mismo
+        orden. Enteros: la suma exacta en 128 bits y panic si no cabe en el tipo
+        (el orden no importa); en i64.punto, también si una suma parcial pasa de
+        128 bits. Mismos mensajes que el intérprete."""
+        if inner.name not in ("i32", "i64", "f64", "f32"):
+            return ""
+        t = self.c_type(inner)
+        pnc = panic_c(self.has_tasks)
+        largos = (
+            f"    if (a.len != b.len) {{\n"
+            f'        {pnc}("punto: los Vec tienen largos distintos (%d y %d)", a.len, b.len);\n'
+            f"    }}\n"
+        )
+        trozo = self._vec_c_trozo(name_part, c_name)
+        if inner.name in ("f64", "f32"):
+            def carriles(nombre, params, termino, previo=""):
+                return (
+                    f"static __attribute__((unused)) {t} scar_vec_{nombre}_{name_part}({params}) {{\n"
+                    + previo
+                    + f"    {t} s[16] = {{0}};\n"
+                    f"    int32_t i = 0;\n"
+                    f"    for (; i + 16 <= {termino[0]}; i += 16) {{\n"
+                    f"        for (int k = 0; k < 16; k++) s[k] = s[k] + {termino[1].format(j="i + k")};\n"
+                    f"    }}\n"
+                    f"    for (int k = 0; i < {termino[0]}; i++, k++) s[k] = s[k] + {termino[1].format(j='i')};\n"
+                    f"    for (int w = 8; w >= 1; w /= 2) {{\n"
+                    f"        for (int k = 0; k < w; k++) s[k] = s[k] + s[k + w];\n"
+                    f"    }}\n"
+                    f"    return s[0];\n"
+                    f"}}\n\n"
+                )
+            # a.acumular(b, k): a[i] = a[i] + k * b[i], cada cuenta
+            # redondeada al tipo (sin FMA). Cada elemento es independiente: el
+            # compilador lo hace con SIMD y da lo mismo. Si a y b se pisan (dos
+            # pedazos del mismo Vec), el orden es el del bucle, como el intérprete.
+            acumular = (
+                f"static __attribute__((unused)) void scar_vec_acumular_{name_part}({c_name} a, {c_name} b, {t} k) {{\n"
+                f"    if (a.len != b.len) {{\n"
+                f'        {pnc}("acumular: los Vec tienen largos distintos (%d y %d)", a.len, b.len);\n'
+                f"    }}\n"
+                f"    for (int32_t i = 0; i < a.len; i++) a.data[i] = a.data[i] + k * b.data[i];\n"
+                f"}}\n\n"
+            )
+            return (trozo + acumular + carriles("suma", f"{c_name} v", ("v.len", "v.data[{j}]"))
+                    + carriles("punto", f"{c_name} a, {c_name} b", ("a.len", "a.data[{j}] * b.data[{j}]"), largos))
+        lo, hi = ("INT32_MIN", "INT32_MAX") if inner.name == "i32" else ("INT64_MIN", "INT64_MAX")
+        def cabe(nombre):
+            return (
+                f"    if (s < (__int128){lo} || s > (__int128){hi}) {{\n"
+                f'        {pnc}("{nombre}: el resultado no cabe en {inner.name}");\n'
+                f"    }}\n"
+                f"    return ({t})s;\n"
+            )
+        suma = (
+            f"static __attribute__((unused)) {t} scar_vec_suma_{name_part}({c_name} v) {{\n"
+            f"    __int128 s = 0;\n"
+            f"    for (int32_t i = 0; i < v.len; i++) s += v.data[i];\n"
+            + cabe("suma") + f"}}\n\n"
+        )
+        if inner.name == "i32":
+            cuerpo = f"    for (int32_t i = 0; i < a.len; i++) s += (int64_t)a.data[i] * b.data[i];\n"
+        else:
+            cuerpo = (
+                f"    for (int32_t i = 0; i < a.len; i++) {{\n"
+                f"        if (__builtin_add_overflow(s, (__int128)a.data[i] * b.data[i], &s)) {{\n"
+                f'            {pnc}("punto: la suma no cabe en 128 bits");\n'
+                f"        }}\n"
+                f"    }}\n"
+            )
+        punto = (
+            f"static __attribute__((unused)) {t} scar_vec_punto_{name_part}({c_name} a, {c_name} b) {{\n"
+            + largos + f"    __int128 s = 0;\n" + cuerpo + cabe("punto") + f"}}\n\n"
+        )
+        return trozo + suma + punto
+
     def _vec_c_get_pop(self, opt_c_name, c_name, name_part, inner, inner_is_struct,
                        inner_is_vec, opt_con_dueno, inner_is_map):
         """scar_vec_get (una copia, o None fuera de rango) y scar_vec_pop."""
@@ -350,7 +489,33 @@ class Plantillas:
             # get() de un Vec<Struct> no puede devolver &v.data[i]: esa dirección
             # vive dentro del buffer, y un push() posterior que lo realloque la deja
             # colgando. Devuelve una copia independiente.
-            f"static {opt_c_name} scar_vec_get_{name_part}({c_name} v, int32_t index) {{\n"
+            # v[i] de un Vec de números o bool: el elemento, sin Option; panic fuera de rango, con el mismo
+            # mensaje que set() y que el intérprete.
+            (
+                f"static inline {self.c_type(inner)} scar_vec_en_{name_part}({c_name} v, int32_t index) {{\n"
+                f"    if (__builtin_expect(index < 0 || index >= v.len, 0)) {{\n"
+                f'        {panic_c(self.has_tasks)}("índice fuera de rango: %d (longitud %d)", index, v.len);\n'
+                f"    }}\n"
+                f"    return v.data[index];\n"
+                f"}}\n"
+                f"\n"
+                if inner.name in ("i32", "i64", "f64", "f32", "bool") else ""
+            )
+            # v[i] de un Vec de structs o de Vec: un lugar. La dirección del elemento dentro del buffer, con el mismo
+            # chequeo de rango; vale mientras el Vec no crezca, y el checker solo deja
+            # usarla dentro de una sentencia (v[i].campo, m[i][j], m[i].len()).
+            + (
+                f"static inline {inner.name if inner_is_struct else self.c_type(inner)}* "
+                f"scar_vec_lugar_{name_part}({c_name} v, int32_t index) {{\n"
+                f"    if (__builtin_expect(index < 0 || index >= v.len, 0)) {{\n"
+                f'        {panic_c(self.has_tasks)}("índice fuera de rango: %d (longitud %d)", index, v.len);\n'
+                f"    }}\n"
+                f"    return &v.data[index];\n"
+                f"}}\n"
+                f"\n"
+                if inner_is_struct or inner_is_vec else ""
+            )
+            + f"static {opt_c_name} scar_vec_get_{name_part}({c_name} v, int32_t index) {{\n"
             f"    if (index < 0 || index >= v.len) {{\n"
             f"        return {opt_c_name}_None();\n"
             f"    }}\n"
@@ -398,16 +563,16 @@ class Plantillas:
             f"    return v.len;\n"
             f"}}\n"
             f"\n"
-            # free: el buffer de un Vec es siempre malloc (nunca de la arena). Antes
+            # free: el buffer de un Vec es siempre del reciclador (nunca de la arena). Antes
             # de liberarlo se suelta cada elemento con dueño: un str con scar_free, un
             # struct embebido con {T}_free_fields (sin tasks) o {T}_free_heap_fields
-            # (con tasks). free(NULL) es válido (un Vec sin push).
+            # (con tasks). scar_vbuf_soltar(NULL) no hace nada (un Vec sin push).
             + (
                 f"static void scar_vec_free_{name_part}({c_name} v) {{\n"
                 f"    for (int32_t i = 0; i < v.len; i++) {{\n"
                 f"        scar_free((char*)v.data[i]);\n"
                 f"    }}\n"
-                f"    free(v.data);\n"
+                f"    scar_vbuf_soltar(v.data);\n"
                 f"}}"
                 if inner.name == "str" else
                 f"static void scar_vec_free_{name_part}({c_name} v) {{\n"
@@ -432,7 +597,7 @@ class Plantillas:
                     + f"    }}\n"
                     if opt_con_dueno or inner_is_map else ""
                 )
-                + f"    free(v.data);\n"
+                + f"    scar_vbuf_soltar(v.data);\n"
                 f"}}"
             )
         )

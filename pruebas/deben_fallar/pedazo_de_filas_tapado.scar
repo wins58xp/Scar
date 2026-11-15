@@ -1,0 +1,10 @@
+# espera: 'm[0]' no puede cambiar de largo mientras se usa el pedazo 'q'
+# Otra variable 'm' tapa a la matriz, pero 'p' sigue siendo un pedazo suyo.
+fn main() {
+    let m: Vec<Vec<f64>> = [[1.0, 2.0], [3.0]]
+    let p = m[0..2]
+    let q = p[0][0..1]
+    let m = 5
+    p[0].push(1.0)
+    print(q[0], m)
+}

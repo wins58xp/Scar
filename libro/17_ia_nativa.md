@@ -189,6 +189,111 @@ Esto escala sin cambiar nada: diez regiones, cada una con su canal y su modelo,
 aprenden a la vez en los núcleos de tu procesador, y no pueden pisarse porque
 ninguna ve la memoria de otra.
 
+### Pesos en `f32`
+
+Un modelo grande son muchos números, y `f32` (capítulo 2) los guarda en la mitad
+de memoria que `f64`, con unas 7 cifras. Es el formato de las GPU y de casi todas
+las librerías de IA. Una región se escribe igual:
+
+```scar
+task promedio(entrada: Chan<f32>, tasa: f32) -> f32 {
+    let mut w: f32 = 0.0
+    while let Some(x) = entrada.recv() {
+        w = w + tasa * (x - w)
+    }
+    return w
+}
+
+fn main() {
+    let canal: Chan<f32> = chan_new(8)
+    let h = spawn promedio(canal, 0.5)
+    let mut i = 0
+    while i < 20 {
+        canal.send(to_f32(i) * 0.1)
+        i = i + 1
+    }
+    canal.close()
+    print("w =", h.join())
+}
+```
+
+```
+w = 1.8000002
+```
+
+### Una red entera en la cinta de vectores
+
+La cinta de §17.1 tiene un nodo por cada número: una capa de 256 entradas y 256
+neuronas son más de 130.000 nodos por ejemplo. `lib/autodiff` tiene también una
+**cinta de vectores** en `f32` (`cinta_v` y las funciones `v_`): cada valor es un
+`Vec<f32>` entero, o una matriz guardada fila por fila, y cada operación es un
+solo nodo. La capa `tanh(W·x + b)` son tres:
+
+```scar
+use "autodiff"
+
+fn main() {
+    let c = autodiff.cinta_v()
+    let w = autodiff.v_parametro(c, 1, 2, [0.0, 0.0])
+    let b = autodiff.v_parametro(c, 1, 1, [0.0])
+    let xs: Vec<f32> = [1.0, 2.0, -1.0, 0.5, 3.0, -2.0]
+    let ys: Vec<f32> = [1.0, 0.0, 1.0]
+    let mut vuelta = 0
+    while vuelta < 200 {
+        let mut i = 0
+        while i < 3 {
+            autodiff.v_reiniciar(c)
+            let x = autodiff.v_constante(c, [xs[2 * i], xs[2 * i + 1]])
+            let z = autodiff.v_sigmoide(c, autodiff.v_suma(c, autodiff.v_matvec(c, w, x), b))
+            let objetivo = autodiff.v_constante(c, [ys[i]])
+            let perdida = autodiff.v_ecm(c, z, objetivo)
+            autodiff.v_derivar(c, perdida)
+            autodiff.v_aprender(c, 0.5)
+            i = i + 1
+        }
+        vuelta = vuelta + 1
+    }
+    print("pesos:", autodiff.v_valor_en(c, w, 0) > 0.0, autodiff.v_valor_en(c, w, 1) > 0.0)
+}
+```
+
+```
+pesos: true true
+```
+
+Los pesos son **parámetros** de la cinta: `v_parametro` los declara una sola
+vez (de `filas` x `columnas`, guardados fila por fila; un vector es una fila) y
+la cinta se queda con ellos. En cada ejemplo, `v_reiniciar` bota lo calculado
+en el ejemplo anterior y deja los parámetros; `v_constante` agrega un vector
+fijo (una entrada, un objetivo), que no lleva derivada; y `v_aprender` le resta
+a cada parámetro su gradiente por la tasa, en su lugar. Nada se copia de un
+ejemplo al siguiente. (También se puede volver a cargar los pesos en cada
+ejemplo con `v_limpiar`, `v_matriz` y `v_paso`, que devuelve los pesos nuevos:
+da exactamente lo mismo, pero copia los pesos dos veces por ejemplo, y con una
+red grande eso cuesta más que la cuenta misma.) Entrenando la
+misma red con las dos cintas, en un Ryzen de 12 hilos la de
+vectores es unas 5 veces más rápida con una red chica y más de 20 veces con una
+de 64 neuronas o más, y con 512 entradas y 512 neuronas usa 7 MB en vez de 46 MB. Por dentro, cada fila de `W·x` es un
+`punto` sobre un pedazo de la matriz, y la vuelta hacia atrás usa `acumular`
+(§6.2). El capítulo 18 lo junta con §17.3: muchas regiones, cada una con su red y
+su cinta de vectores, aprendiendo a la vez.
+
+### La memoria de una región
+
+Una región que aprende crea y suelta muchísimos valores chicos: muestras,
+textos, los `Vec` de cada paso. En el binario, lo que una región suelta no
+vuelve al sistema operativo: queda en una lista de su hilo, y el próximo valor
+del mismo tamaño reusa ese lugar, sin pedirle memoria a nadie. La lista tiene un
+tope, así que la memoria no sube aunque el programa corra horas. Y cuando una
+región arma muestras y otra las suelta (el caso de un canal), lo que sobra pasa
+en lotes de un hilo a otro.
+
+Nada de esto se escribe ni se ve: el programa es el mismo, y cada valor se
+sigue soltando en el momento exacto en que su dueño lo suelta (capítulo 8). No
+hay recolector de basura. Medido con dos regiones que aprenden y se pasan
+muestras por canales: 36.000 pasos en medio segundo, con unos 2,4 MB de
+memoria, y lo mismo de una corrida a otra.
+
 ## 17.4 Darle un canal a una región que ya corre
 
 A veces hay que cambiar algo de una región **mientras corre**: darle una fuente

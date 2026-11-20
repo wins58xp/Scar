@@ -1,0 +1,6 @@
+# espera: suma_ciclica
+# Las operaciones cíclicas son para enteros sin signo.
+fn main() {
+    let n = 5
+    print(suma_ciclica(n, 1))
+}

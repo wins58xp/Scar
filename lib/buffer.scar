@@ -1033,11 +1033,16 @@ fn _es_cifra(c: i32) -> bool {
     return c >= 48 and c <= 57
 }
 
+# una cifra de un hexadecimal: 0-9, a-f o A-F
+fn _es_hex(c: i32) -> bool {
+    return _es_cifra(c) or (c >= 97 and c <= 102) or (c >= 65 and c <= 70)
+}
+
 # buffer.clases(linea) -> Vec<i32>: la clase de cada carácter (0 común, 1 palabra clave, 2 tipo,
 # 3 texto entre comillas, 4 número, 5 comentario, 6 nombre de función).
 fn clases(s: str) -> Vec<i32> {
     let claves = " fn task spawn let mut return if else while for in struct true false and or not Ok Err Result Chan Some None print extern from type own accepts break enum match use export continue "
-    let tipos = " i32 i64 f64 str bool Vec Option Map Result Chan String "
+    let tipos = " i32 i64 i16 u8 u32 u64 f32 f64 str bool Vec Option Map Result Chan String "
     let n = len(s)
     let r: Vec<i32> = vec_new()
     let mut i = 0
@@ -1093,7 +1098,17 @@ fn clases(s: str) -> Vec<i32> {
                         r.push(cl)
                     }
                 } else {
-                    if _es_cifra(c) {
+                    if c == 48 and i + 1 < n and (ord(s[i + 1]) == 120 or ord(s[i + 1]) == 88) {
+                        # un hexadecimal (0xFF): el 0x y sus cifras 0-9, a-f
+                        let a = i
+                        i = i + 2
+                        while i < n and _es_hex(ord(s[i])) {
+                            i = i + 1
+                        }
+                        for q in a..i {
+                            r.push(4)
+                        }
+                    } else if _es_cifra(c) {
                         let a = i
                         while i < n and _es_cifra(ord(s[i])) {
                             i = i + 1

@@ -1,0 +1,8 @@
+# espera: 'saluda()' no devuelve nada: no se puede usar como valor
+fn saluda() {
+    print("hola")
+}
+
+fn main() {
+    let x = saluda()
+}

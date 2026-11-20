@@ -1,0 +1,5 @@
+# espera: número hexadecimal mal formado '0x'
+fn main() {
+    let a = 0x
+    print(a)
+}

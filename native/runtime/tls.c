@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Lo "por hilo" del runtime, todo en un struct: el contexto de la tarea, el
-// registro de dueñas vivas, rand(), los límites de la pila, el recuerdo de
+// registro de dueñas vivas, rand(), el recuerdo de
 // s[i], el pool de bloques chicos y el guardián de las extern fn.
 //
 // Por qué un struct y no variables _Thread_local sueltas: con tareas livianas
@@ -31,7 +31,6 @@ typedef struct ScarHilo {
     struct ScarVivo *vivos;
     int nvivos, capvivos;
     uint64_t rand_state, rand_base, rand_hijos;
-    uintptr_t pila_hi, pila_lo;
     ScarStrc strc[2];
     int strc_ult;
     // del hilo
@@ -62,8 +61,6 @@ typedef struct ScarHilo {
 #define __scar_rand_state (scar_tls()->rand_state)
 #define __scar_rand_base (scar_tls()->rand_base)
 #define __scar_rand_hijos (scar_tls()->rand_hijos)
-#define scar_pila_hi (scar_tls()->pila_hi)
-#define scar_pila_lo (scar_tls()->pila_lo)
 #define scar_strc (scar_tls()->strc)
 #define scar_strc_ult (scar_tls()->strc_ult)
 #define scar_progreso_local (scar_tls()->progreso_local)

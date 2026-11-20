@@ -25,6 +25,7 @@ static TaskContext* scar_ctx_new(const char *name, TaskContext *parent) {
     atomic_init(&ctx->finished, 0);
     pthread_mutex_init(&ctx->injected_lock, NULL);
     ctx->injected_slots = NULL;  // ver TaskContext
+    ctx->inyectar = NULL;
     ctx->panic_msg = NULL;
     ctx->free_retval = NULL;
     ctx->parent = parent;
@@ -46,6 +47,38 @@ static TaskContext* scar_ctx_new(const char *name, TaskContext *parent) {
     return ctx;
 }
 
+// Un texto armado de tres partes, guardado una sola vez por combinación y nunca
+// soltado (vive lo que el programa): los Err de inject_chan sobre un Task<T> sin
+// nombre llevan el nombre de la tarea, que recién se sabe al correr, y un
+// Result guarda su texto sin copiarlo.
+typedef struct ScarTextoFijo { struct ScarTextoFijo *sig; char texto[]; } ScarTextoFijo;
+static ScarTextoFijo *scar_textos_fijos = NULL;
+static pthread_mutex_t scar_textos_fijos_mu = PTHREAD_MUTEX_INITIALIZER;
+__attribute__((unused))
+static const char *scar_texto_fijo(const char *a, const char *b, const char *c) {
+    size_t la = strlen(a), lb = strlen(b), lc = strlen(c);
+    pthread_mutex_lock(&scar_textos_fijos_mu);
+    for (ScarTextoFijo *t = scar_textos_fijos; t; t = t->sig) {
+        if (strncmp(t->texto, a, la) == 0 && strncmp(t->texto + la, b, lb) == 0
+                && strcmp(t->texto + la + lb, c) == 0) {
+            pthread_mutex_unlock(&scar_textos_fijos_mu);
+            return t->texto;
+        }
+    }
+    ScarTextoFijo *t = malloc(sizeof(ScarTextoFijo) + la + lb + lc + 1);
+    const char *r = "inject_chan: sin memoria";
+    if (t) {
+        memcpy(t->texto, a, la);
+        memcpy(t->texto + la, b, lb);
+        memcpy(t->texto + la + lb, c, lc + 1);
+        t->sig = scar_textos_fijos;
+        scar_textos_fijos = t;
+        r = t->texto;
+    }
+    pthread_mutex_unlock(&scar_textos_fijos_mu);
+    return r;
+}
+
 static void scar_panic(const char *fmt, ...) __attribute__((noreturn));
 static _Atomic int scar_hilos_vivos;
 
@@ -59,7 +92,7 @@ static void scar_tarea_lanzar(TaskContext *ctx, void *(*fn)(void *), void *args)
     int rc = 0;
 #ifdef SCAR_PLANIFICADOR
     if (scar_livianas) {
-        ScarFibra *f = scar_fibra_nueva(fn, args, ctx, scar_tam_pila);
+        ScarFibra *f = scar_fibra_nueva(fn, args, ctx);
         // la tarea nueva queda de "siguiente" en este mismo trabajador (como el
         // runnext de Go): un spawn seguido de join corre sin cruzar de núcleo.
         // Si la madre sigue trabajando, la hija pasa a la cola con el próximo
@@ -68,7 +101,7 @@ static void scar_tarea_lanzar(TaskContext *ctx, void *(*fn)(void *), void *args)
         rc = errno ? errno : ENOMEM;
     } else
 #endif
-    rc = pthread_create(&ctx->thread, NULL, fn, args);
+    rc = scar_hilo_lanzar(&ctx->thread, &ctx->pila, fn, args);
     if (rc == 0) return;
     atomic_fetch_sub(&scar_hilos_vivos, 1);
     atomic_store(&ctx->joined, 1);
@@ -80,10 +113,8 @@ static void scar_tarea_lanzar(TaskContext *ctx, void *(*fn)(void *), void *args)
     free(args);
 #ifdef SCAR_PLANIFICADOR
     if (scar_livianas)
-        scar_panic("no se pudo lanzar la tarea '%s': no hay memoria para su pila (%s). "
-                   "Cada tarea viva ocupa dos zonas de memoria y Linux permite "
-                   "vm.max_map_count por programa: para más tareas vivas a la vez, "
-                   "sudo sysctl vm.max_map_count=1048576", ctx->name, strerror(rc));
+        scar_panic("no se pudo lanzar la tarea '%s': no hay memoria para su pila (%s)",
+                   ctx->name, strerror(rc));
 #endif
     scar_panic("no se pudo lanzar la tarea '%s': el sistema no da más hilos (%s). "
                "Cada tarea es un hilo: el límite es ulimit -u; con "
@@ -110,6 +141,7 @@ static void scar_tarea_recoger(TaskContext *ctx, void **retval) {
     }
 #endif
     pthread_join(ctx->thread, retval);
+    scar_hilo_pila_soltar(&ctx->pila);
 }
 
 // Ultimo paso del wrapper de una task (normal, panic o

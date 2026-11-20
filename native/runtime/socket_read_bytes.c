@@ -1,19 +1,19 @@
 // exactamente n bytes; Err("EOF") si la otra punta cierra antes,
 // Err("timeout") si pasa el timeout de I/O sin ningún byte nuevo
-static @@RES@@ scar_socket_read_bytes(ScarSocket __scar_h, int32_t n) {
-    if (n < 0) @@PANIC@@("read_bytes: cantidad negativa (%d)", n);
+static @@RES@@ scar_socket_@@METODO@@(ScarSocket __scar_h, int32_t n) {
+    if (n < 0) @@PANIC@@("@@METODO@@: cantidad negativa (%d)", n);
     int sock;
-    if (!scar_h_ver(__scar_h, NULL, &sock)) return scar_bytes_err("socket cerrado");
+    if (!scar_h_ver(__scar_h, NULL, &sock)) return scar_bytes_err@@SUF@@("socket cerrado");
     int base = scar_nvivos;
-    @@VEC@@ v = scar_vec_new_i32(n);
-    scar_vivo_push(&v, scar_drop_bytes_tmp, NULL);
+    @@VEC@@ v = scar_vec_new_@@T@@(n);
+    scar_vivo_push(&v, scar_drop_bytes_tmp@@SUF@@, NULL);
     double deadline = @@AHORA@@ + SCAR_IO_TIMEOUT_SECONDS;
     while (v.len < n) {
 @@CANCEL@@        double rem = deadline - @@AHORA@@;
         if (rem <= 0) {
             scar_vivo_baja(&v, base);
-            scar_vec_free_i32(v);
-            return scar_bytes_err("timeout");
+            scar_vec_free_@@T@@(v);
+            return scar_bytes_err@@SUF@@("timeout");
         }
         double step = rem < 0.02 ? rem : 0.02;
         struct timeval tv;
@@ -28,10 +28,10 @@ static @@RES@@ scar_socket_read_bytes(ScarSocket __scar_h, int32_t n) {
             ssize_t k = SCAR_BLOQUEANDO(recv(sock, buf, falta < 4096 ? (size_t)falta : 4096, 0));
             if (k <= 0) {
                 scar_vivo_baja(&v, base);
-                scar_vec_free_i32(v);
-                return scar_bytes_err(k == 0 ? "EOF" : "error de lectura");
+                scar_vec_free_@@T@@(v);
+                return scar_bytes_err@@SUF@@(k == 0 ? "EOF" : "error de lectura");
             }
-            for (ssize_t i = 0; i < k; i++) scar_vec_push_i32(&v, (int32_t)buf[i]);
+            for (ssize_t i = 0; i < k; i++) scar_vec_push_@@T@@(&v, (@@CT@@)buf[i]);
             deadline = @@AHORA@@ + SCAR_IO_TIMEOUT_SECONDS;  // cuenta desde el último byte
         }
     }

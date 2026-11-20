@@ -1,0 +1,9 @@
+# espera: devuelve un pedazo de un Vec que no llegó por un parámetro
+fn local() -> Vec<f64> {
+    let w = [1.0, 2.0]
+    return w[0..1]
+}
+fn main() {
+    let p = local()
+    print(p)
+}

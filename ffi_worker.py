@@ -69,6 +69,11 @@ class ScarFfiWorkerError(Exception):
 _C_TYPE_NAMES = {
     "i32": "int32_t",
     "i64": "int64_t",
+    "f32": "float",
+    "u8": "uint8_t",
+    "u32": "uint32_t",
+    "u64": "uint64_t",
+    "i16": "int16_t",
     "f64": "double",
     "bool": "bool",
     "str": "char*",
@@ -88,9 +93,19 @@ def _c_type_name(type_name, extern_types):
 # llamada, el worker devuelve los elementos (C pudo cambiarlos) detrás del
 # valor de retorno, en el orden de los parámetros.
 _VEC_ELEM = {"i32": ("int32_t", 4, "<i"), "i64": ("int64_t", 8, "<q"),
-             "f64": ("double", 8, "<d"), "bool": ("bool", 1, "<?")}
-# Cómo vuelve cada elemento a SCAR; interpreter.py cambia el de i64 por su I64.
-_VEC_CONV = {"vec_i32": int, "vec_i64": int, "vec_f64": float, "vec_bool": bool}
+             "f32": ("float", 4, "<f"), "f64": ("double", 8, "<d"), "bool": ("bool", 1, "<?"),
+             "u8": ("uint8_t", 1, "<B"), "u32": ("uint32_t", 4, "<I"), "u64": ("uint64_t", 8, "<Q"),
+             "i16": ("int16_t", 2, "<h")}
+# Cómo vuelve cada elemento a SCAR; interpreter.py cambia los enteros por su
+# clase (I64, U8, U32, U64, I16).
+_VEC_CONV = {"vec_i32": int, "vec_i64": int, "vec_f32": float, "vec_f64": float, "vec_bool": bool, "vec_u8": int,
+             "vec_u32": int, "vec_u64": int, "vec_i16": int}
+# Cómo vuelve un escalar de cada tipo; interpreter.py cambia los enteros y f32
+# por I64, U8, U32, U64, I16 y F32.
+_VAL_CONV = {"i64": int, "f32": float, "u8": int, "u32": int, "u64": int, "i16": int}
+# Los números que van por el pipe tal cual, con el tamaño y el formato de
+# struct de _VEC_ELEM (bool va como un byte 0/1, aparte).
+_NUMEROS_PIPE = ("i32", "i64", "f64", "f32", "u8", "u32", "u64", "i16")
 
 
 def _param_kind(type_name, extern_types):
@@ -111,6 +126,10 @@ def _param_kind(type_name, extern_types):
         return "i64"
     if type_name == "f64":
         return "f64"
+    if type_name == "f32":
+        return "f32"
+    if type_name in _NUMEROS_PIPE:
+        return type_name
     if type_name == "bool":
         return "bool"
     if type_name == "str":
@@ -166,6 +185,11 @@ static int write_exact(int fd, const void *buf, size_t n) {
 static int32_t read_i32(void)  { int32_t v; if(!read_exact(0,&v,4)) exit(1); return v; }
 static int64_t read_i64(void)  { int64_t v; if(!read_exact(0,&v,8)) exit(1); return v; }
 static double  read_f64(void)  { double  v; if(!read_exact(0,&v,8)) exit(1); return v; }
+static float   read_f32(void)  { float   v; if(!read_exact(0,&v,4)) exit(1); return v; }
+static uint8_t read_u8(void)   { uint8_t v; if(!read_exact(0,&v,1)) exit(1); return v; }
+static uint32_t read_u32(void) { uint32_t v; if(!read_exact(0,&v,4)) exit(1); return v; }
+static uint64_t read_u64(void) { uint64_t v; if(!read_exact(0,&v,8)) exit(1); return v; }
+static int16_t read_i16(void) { int16_t v; if(!read_exact(0,&v,2)) exit(1); return v; }
 static uint8_t read_bool(void) { uint8_t v; if(!read_exact(0,&v,1)) exit(1); return v; }
 static uint64_t read_ptr(void) { uint64_t v; if(!read_exact(0,&v,8)) exit(1); return v; }
 static char *read_str(void) {
@@ -179,6 +203,11 @@ static char *read_str(void) {
 static void write_i32(int32_t v)  { write_exact(1,&v,4); }
 static void write_i64(int64_t v)  { write_exact(1,&v,8); }
 static void write_f64(double v)   { write_exact(1,&v,8); }
+static void write_f32(float v)    { write_exact(1,&v,4); }
+static void write_u8(uint8_t v)   { write_exact(1,&v,1); }
+static void write_u32(uint32_t v) { write_exact(1,&v,4); }
+static void write_u64(uint64_t v) { write_exact(1,&v,8); }
+static void write_i16(int16_t v) { write_exact(1,&v,2); }
 static void write_bool(uint8_t v) { write_exact(1,&v,1); }
 static void write_ptr(uint64_t v) { write_exact(1,&v,8); }
 static void write_str(const char *s) {
@@ -222,6 +251,11 @@ def _emit_call(idx, decl, extern_types, lines):
         "i32": ("int32_t", "read_i32()"),
         "i64": ("int64_t", "read_i64()"),
         "f64": ("double", "read_f64()"),
+        "f32": ("float", "read_f32()"),
+        "u8": ("uint8_t", "read_u8()"),
+        "u32": ("uint32_t", "read_u32()"),
+        "u64": ("uint64_t", "read_u64()"),
+        "i16": ("int16_t", "read_i16()"),
         "bool": ("bool", "(bool)read_bool()"),
         "str": ("char*", "read_str()"),
         "ptr": ("void*", "(void*)(uintptr_t)read_ptr()"),
@@ -249,6 +283,11 @@ def _emit_call(idx, decl, extern_types, lines):
             "i32": "write_i32(r);",
             "i64": "write_i64(r);",
             "f64": "write_f64(r);",
+            "f32": "write_f32(r);",
+            "u8": "write_u8(r);",
+            "u32": "write_u32(r);",
+            "u64": "write_u64(r);",
+            "i16": "write_i16(r);",
             "bool": "write_bool((uint8_t)r);",
             "str": "write_str(r);",
             "ptr": "write_ptr((uint64_t)(uintptr_t)r);",
@@ -390,12 +429,8 @@ class FfiWorker:
         try:
             payload = struct.pack("<I", idx)
             for value, kind in zip(args, param_kinds):
-                if kind == "i32":
-                    payload += struct.pack("<i", value)
-                elif kind == "i64":
-                    payload += struct.pack("<q", value)
-                elif kind == "f64":
-                    payload += struct.pack("<d", value)
+                if kind in _NUMEROS_PIPE:
+                    payload += struct.pack(_VEC_ELEM[kind][2], value)
                 elif kind == "bool":
                     payload += struct.pack("<B", 1 if value else 0)
                 elif kind == "ptr":
@@ -434,14 +469,10 @@ class FfiWorker:
         if True:
             if ret_kind == "void":
                 return None
-            if ret_kind == "i32":
-                raw = self._read(4)
-                return struct.unpack("<i", raw)[0]
-            if ret_kind == "i64":
-                return struct.unpack("<q", self._read(8))[0]
-            if ret_kind == "f64":
-                raw = self._read(8)
-                return struct.unpack("<d", raw)[0]
+            if ret_kind in _NUMEROS_PIPE:
+                _, size, fmt = _VEC_ELEM[ret_kind]
+                v = struct.unpack(fmt, self._read(size))[0]
+                return _VAL_CONV[ret_kind](v) if ret_kind in _VAL_CONV else v
             if ret_kind == "bool":
                 raw = self._read(1)
                 return struct.unpack("<B", raw)[0] != 0

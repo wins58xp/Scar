@@ -11,8 +11,7 @@
 // medido): cambio de contexto propio en ensamblador (ucontext es 15 veces más
 // lento), colas por trabajador con robo de la mitad, la tarea despertada en
 // "siguiente" (se corre en el mismo hilo apenas la actual se duerme, como el
-// runnext de Go), pilas con página de guarda (un desborde es un panic, ver
-// pila.c) reusadas en una lista de libres.
+// runnext de Go), y las pilas de pilas.c, reusadas.
 //
 // Dormirse sin carrera: antes de anotarse en la fila de una ScarCond la fibra
 // marca `guardando`; suelta sus candados ella misma, vuelve al planificador, y
@@ -23,7 +22,7 @@
 // el prototipo, confundía a TSan: el unlock lo hacía "otro hilo".)
 //
 // Lo que el runtime guarda "por hilo" (__scar_ctx, el registro de dueñas
-// vivas, el estado de rand(), los límites de la pila) es por tarea: el
+// vivas, el estado de rand()) es por tarea: el
 // planificador lo guarda en la fibra al salir y lo repone al entrar
 // (scar_tls_guardar / scar_tls_restaurar, al final del archivo, después de
 // que todo eso está declarado).
@@ -33,7 +32,7 @@
 // (SCAR_SIN_PLANIFICADOR hace lo mismo en cualquier sistema, para probarlo.)
 #if defined(_WIN32) || defined(SCAR_SIN_PLANIFICADOR)
 static int scar_correr_main(int (*fn)(int, char **), int argc, char **argv) {
-    return fn(argc, argv);
+    return scar_main_en_pila(fn, argc, argv);
 }
 #else
 #include <limits.h>
@@ -156,8 +155,8 @@ typedef struct ScarFibra {
 #ifdef SCAR_CAMBIO_UCONTEXT
     ucontext_t uc;
 #endif
-    char *mapa;                 // el mmap entero: página de guarda + pila
-    size_t tam_mapa;
+    char *mapa;                 // la pila entera (pilas.c), sin guarda
+    size_t tam_mapa;            // scar_pila_tam
     void *(*fn)(void *);
     void *arg;
     void *resultado;
@@ -179,7 +178,6 @@ typedef struct ScarFibra {
     void *tls_vivos;
     int tls_nvivos, tls_capvivos;
     uint64_t tls_rand[3];
-    uintptr_t tls_pila_hi, tls_pila_lo;
 #if defined(__SANITIZE_ADDRESS__)
     void *asan_falsa;           // pila falsa de ASan (detect_stack_use_after_return)
 #endif
@@ -254,8 +252,6 @@ static atomic_int scar_cuidador = -1;
 static _Atomic uint64_t scar_dormidos_mapa = 0;   // bit i: el trabajador i duerme (los primeros 64)
 static pthread_condattr_t scar_cond_mono_attr;
 static size_t scar_pagina = 4096;
-static size_t scar_tam_pila = 1u << 20;
-static size_t scar_tam_pila_main = 8u << 20;
 
 static void scar_tls_guardar(ScarFibra *f);
 static void scar_tls_restaurar(ScarFibra *f);
@@ -274,47 +270,7 @@ static inline long long scar_mono_ns(void) {
     return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
-// ---- pilas: mmap con una página de guarda abajo, reusadas ----
-static pthread_mutex_t scar_pilas_mu = PTHREAD_MUTEX_INITIALIZER;
-static char *scar_pilas_libres = NULL;    // enlazadas por la primera palabra útil
-static int scar_n_pilas_libres = 0;
-#define SCAR_MAX_PILAS_LIBRES 16384
-
-static char *scar_pila_tomar(size_t tam) {
-    if (tam == scar_tam_pila) {
-        pthread_mutex_lock(&scar_pilas_mu);
-        char *p = scar_pilas_libres;
-        if (p) {
-            scar_pilas_libres = *(char **)(p + scar_pagina);
-            scar_n_pilas_libres--;
-        }
-        pthread_mutex_unlock(&scar_pilas_mu);
-        if (p) return p;
-    }
-    char *p = mmap(NULL, tam + scar_pagina, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (p == MAP_FAILED) return NULL;
-    if (mprotect(p, scar_pagina, PROT_NONE) != 0) {
-        munmap(p, tam + scar_pagina);
-        return NULL;
-    }
-    return p;
-}
-
-static void scar_pila_soltar(char *p, size_t tam) {
-    if (tam == scar_tam_pila) {
-        pthread_mutex_lock(&scar_pilas_mu);
-        if (scar_n_pilas_libres < SCAR_MAX_PILAS_LIBRES) {
-            *(char **)(p + scar_pagina) = scar_pilas_libres;
-            scar_pilas_libres = p;
-            scar_n_pilas_libres++;
-            pthread_mutex_unlock(&scar_pilas_mu);
-            return;
-        }
-        pthread_mutex_unlock(&scar_pilas_mu);
-    }
-    munmap(p, tam + scar_pagina);
-}
+// ---- pilas: las de pilas.c (alineadas, en bloques, reusadas) ----
 
 // ---- avisos a los sanitizers en cada cambio de pila ----
 #if defined(__SANITIZE_ADDRESS__)
@@ -648,7 +604,7 @@ static void scar_cambiar_a_fibra(ScarTrab *t, ScarFibra *f) {
     scar_tls_restaurar(f);
 #if defined(__SANITIZE_ADDRESS__)
     void *falsa = NULL;
-    __sanitizer_start_switch_fiber(&falsa, f->mapa + scar_pagina, f->tam_mapa - scar_pagina);
+    __sanitizer_start_switch_fiber(&falsa, f->mapa, f->tam_mapa);
 #endif
 #if defined(__SANITIZE_THREAD__)
     __tsan_switch_to_fiber(f->tsan_fibra, 0);
@@ -727,7 +683,7 @@ static void scar_fibra_fin(void *p) {
 #if defined(__SANITIZE_THREAD__)
     __tsan_destroy_fiber(f->tsan_fibra);
 #endif
-    scar_pila_soltar(f->mapa, f->tam_mapa - scar_pagina);
+    scar_pila_soltar(f->mapa);
     free(f);
     if (tarea) scar_tarea_fibra_termino(tarea, res);
 }
@@ -748,22 +704,20 @@ static void scar_fibra_entrada_uc(unsigned lo, unsigned hi) {
 #endif
 
 // una fibra nueva (sin poner en cola); NULL si no hay memoria para su pila
-static ScarFibra *scar_fibra_nueva(void *(*fn)(void *), void *arg, void *tarea, size_t tam) {
+static ScarFibra *scar_fibra_nueva(void *(*fn)(void *), void *arg, void *tarea) {
     ScarFibra *f = calloc(1, sizeof(ScarFibra));
     if (!f) return NULL;
-    f->mapa = scar_pila_tomar(tam);
+    f->mapa = scar_pila_tomar();
     if (!f->mapa) { free(f); return NULL; }
-    f->tam_mapa = tam + scar_pagina;
+    f->tam_mapa = scar_pila_tam;
     f->fn = fn;
     f->arg = arg;
     f->tarea = tarea;
     f->esp_idx = -1;
-    f->tls_pila_lo = (uintptr_t)(f->mapa + scar_pagina);
-    f->tls_pila_hi = (uintptr_t)(f->mapa + f->tam_mapa);
 #ifdef SCAR_CAMBIO_UCONTEXT
     getcontext(&f->uc);
-    f->uc.uc_stack.ss_sp = f->mapa + scar_pagina;
-    f->uc.uc_stack.ss_size = tam;
+    f->uc.uc_stack.ss_sp = f->mapa;
+    f->uc.uc_stack.ss_size = f->tam_mapa;
     f->uc.uc_link = NULL;
     uintptr_t u = (uintptr_t)f;
     makecontext(&f->uc, (void (*)(void))scar_fibra_entrada_uc, 2, (unsigned)u, (unsigned)(u >> 32));
@@ -1009,7 +963,7 @@ static int scar_correr_main(int (*fn)(int, char **), int argc, char **argv) {
     const char *modo = getenv("SCAR_TAREAS");
     scar_livianas = !(modo && strcmp(modo, "hilos") == 0);
 #endif
-    if (!scar_livianas) return fn(argc, argv);
+    if (!scar_livianas) return scar_main_en_pila(fn, argc, argv);
     long pg = sysconf(_SC_PAGESIZE);
     if (pg > 0) scar_pagina = (size_t)pg;
     long nc = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1018,13 +972,7 @@ static int scar_correr_main(int (*fn)(int, char **), int argc, char **argv) {
     if (h && atoi(h) > 0) scar_n_trab = atoi(h);
     const char *go = getenv("SCAR_GIRO_OCIOSO_US");
     if (go && atol(go) >= 0) scar_giro_ocioso_ns = atol(go) * 1000LL;
-    const char *kb = getenv("SCAR_PILA_TAREA_KB");
-    if (kb && atol(kb) >= 64) scar_tam_pila = ((size_t)atol(kb) * 1024 + scar_pagina - 1) & ~(scar_pagina - 1);
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur >= (1u << 20))
-        scar_tam_pila_main = (size_t)rl.rlim_cur;
-    if (scar_tam_pila_main > (1024u << 20)) scar_tam_pila_main = 1024u << 20;
-    scar_tam_pila_main = (scar_tam_pila_main + scar_pagina - 1) & ~(scar_pagina - 1);
+    scar_pilas_iniciar();   // el tamaño de todas las pilas, el mismo para main y las tareas
     pthread_condattr_init(&scar_cond_mono_attr);
     pthread_condattr_setclock(&scar_cond_mono_attr, CLOCK_MONOTONIC);
     scar_trab = calloc(SCAR_MAX_TRAB, sizeof(ScarTrab));
@@ -1034,7 +982,7 @@ static int scar_correr_main(int (*fn)(int, char **), int argc, char **argv) {
     atomic_store(&scar_trab_creados, 1);
     static ScarMainArgs m;
     m.fn = fn; m.argc = argc; m.argv = argv;
-    ScarFibra *f = scar_fibra_nueva(scar_main_fibra, &m, NULL, scar_tam_pila_main);
+    ScarFibra *f = scar_fibra_nueva(scar_main_fibra, &m, NULL);
     if (!f) {
         fprintf(stderr, "[PANIC] main murió: no hay memoria para su pila (SCAR_TAREAS=livianas)\n");
         return 1;

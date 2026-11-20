@@ -192,11 +192,88 @@ fn main() {
 [[1.0, 2.0], [20.0, 4.0]] 2 28.0
 ```
 
-Lo que no se puede es sacar el elemento sin decirlo: `let n = red[0]`,
-pasarlo a una función, guardarlo en otra lista, o sacar un campo con dueño
-(`let s = red[0].nombre`) son errores. Para eso está `get`, que da una copia, y
-`replace`, que lo saca de verdad. Es la misma regla del capítulo 8: nada cambia de
-dueño ni se copia sin que se escriba.
+Lo que no se puede es sacar el elemento sin decirlo: `let n = red[0]`, guardarlo
+en otra lista, pasarlo a una función que se queda con él, o sacar un campo con
+dueño (`let s = red[0].nombre`) son errores. Para eso está `get`, que da una
+copia, y `replace`, que lo saca de verdad. Es la misma regla del capítulo 8: nada
+cambia de dueño ni se copia sin que se escriba. A una función que solo lo
+**presta** (lo lee o le cambia campos, sin guardarlo ni devolverlo) sí se le pasa:
+`activar(red[0], x)`.
+
+### Recorrer una lista: `for x in v`
+
+`for x in v` da una vuelta por cada elemento, en orden. `x` es `v[i]`, con las
+mismas reglas: en una lista de números o `bool` es una copia del elemento,
+tomada al empezar la vuelta; en una lista de structs o de listas es el elemento
+mismo, un lugar, y lo que se le cambia queda en la lista.
+
+```scar
+struct Neurona {
+    pesos: Vec<f32>
+    sesgo: f32
+}
+
+fn activar(n: Neurona, x: Vec<f32>) -> f32 {
+    return n.pesos.punto(x) + n.sesgo
+}
+
+fn main() {
+    let notas = [6.5, 5.0, 7.0, 4.2]
+    let mut suma = 0.0
+    for nota in notas {
+        suma = suma + nota
+    }
+    print("promedio:", suma / to_f64(notas.len()))
+
+    let red: Vec<Neurona> = [Neurona { pesos: [0.5, -0.25], sesgo: 0.1 },
+                             Neurona { pesos: [1.0, 1.0], sesgo: 0.0 }]
+    let x: Vec<f32> = [2.0, 4.0]
+    for n in red {
+        n.sesgo = n.sesgo + 0.5
+        print(activar(n, x))
+    }
+    print(red[0].sesgo, red[1].sesgo)
+}
+```
+
+```
+promedio: 5.675
+0.6
+6.5
+0.6 0.5
+```
+
+Se recorre lo mismo que se puede indexar: una variable, un campo
+(`for w in capa.pesos`), una fila (`for x in m[i]`), un pedazo
+(`for x in v[2..5]`) o lo que devuelve una función (`for x in leer()`). `break` y
+`continue` funcionan como en cualquier bucle.
+
+**Mientras dura el bucle, la lista no cambia de largo.** Agregarle o sacarle
+elementos mientras se la recorre es el error clásico de casi todos los lenguajes
+(saltarse un elemento, o leer memoria que ya se soltó); en SCAR es un error del
+compilador:
+
+```scar-error
+fn main() {
+    let mut v = [1, 2, 3]
+    for x in v {
+        if x == 2 {
+            v.push(4)
+        }
+    }
+}
+```
+
+```
+ERROR DE TIPO: 'v' no puede cambiar de largo mientras se recorre con 'for x in v' (línea 3): acá se le hace .push(). Hazlo después del for, o recorre los índices ('for i in 0..v.len()') (línea 5)
+```
+
+Sus elementos sí se pueden cambiar (`v[0] = 9`, `n.sesgo = ...`), y después del
+bucle la lista vuelve a ser libre. `x` no se reasigna (`x = 3` es un error): para
+escribir los números de una lista, se recorren los índices,
+`for i in 0..v.len() { v[i] = ... }`. Por ahora `for x in v` no recorre una lista
+de textos (se recorren sus índices, con `get`) ni una lista de una función
+genérica (capítulo 13).
 
 ### `suma` y `punto`
 
@@ -411,8 +488,7 @@ imprimirlo, tomarle otro pedazo (`fila[0..2]`) y pasarlo a una función que no l
 cambia el largo. Hay dos reglas, y el compilador las revisa:
 
 - **El pedazo no es una lista propia.** No crece ni se achica (nada de `push` ni
-  `pop`), no lleva `mut`, y no sale de su bloque: no se devuelve, no se guarda
-  en otra lista ni en un struct, no se manda a una tarea.
+  `pop`), no se guarda en otra lista ni en un struct, y no se manda a una tarea.
 - **Mientras usas el pedazo, la lista no cambia de largo.** Desde el `let`
   hasta la última línea que nombra al pedazo, a la lista original no le puedes
   hacer `push` ni `pop`, ni moverla, ni pasarla a una función que lo haga.
@@ -431,6 +507,200 @@ fn main() {
 El error dice qué pedazo sigue en uso y en qué línea se tomó. Si necesitas el
 pedazo después de agrandar la lista, tómalo de nuevo (`let p = v[0..2]` otra
 vez, después del `push`).
+
+Un pedazo declarado con `let mut` puede pasar a mirar **otro** pedazo: de la
+misma lista, de otra, o de sí mismo. Es lo que hace una búsqueda binaria, que
+achica su pedazo a la mitad en cada vuelta sin copiar nada:
+
+```scar
+fn esta(v: Vec<i32>, x: i32) -> bool {
+    let mut p = v[0..v.len()]
+    while p.len() > 1 {
+        let m = p.len() / 2
+        if p[m] > x {
+            p = p[0..m]
+        } else {
+            p = p[m..p.len()]
+        }
+    }
+    return p.len() == 1 and p[0] == x
+}
+
+fn main() {
+    let orden = [1, 3, 5, 7, 9, 11, 13]
+    print(esta(orden, 7), esta(orden, 8))
+}
+```
+
+```
+true false
+```
+
+A un pedazo solo se le asigna otro pedazo (`p = w[a..b]`, `p = q`), nunca una
+lista propia, porque nadie la soltaría. Y mientras lo usas, **ninguna** de las
+listas que miró o puede mirar cambia de largo: el compilador las cuida todas,
+desde el `let` hasta la última línea que nombra al pedazo. Las listas que
+un pedazo mira tienen que estar declaradas antes que él.
+
+Una función puede **devolver un pedazo de lo que recibe**. No hay nada que
+anotar: el compilador mira la función y sabe de qué parámetro es el pedazo, y
+en quien la llama el resultado es un pedazo de la lista que se le pasó, con las
+mismas reglas.
+
+```scar
+fn sin_bordes(v: Vec<f64>) -> Vec<f64> {
+    return v[1..v.len() - 1]
+}
+
+fn main() {
+    let datos = [9.0, 1.0, 2.0, 3.0, 9.0]
+    let centro = sin_bordes(datos)
+    centro[0] = 5.0
+    print(centro, centro.suma())
+    print(datos)
+    datos.push(4.0)
+}
+```
+
+```
+[5.0, 2.0, 3.0] 10.0
+[9.0, 5.0, 2.0, 3.0, 9.0]
+```
+
+`centro` mira adentro de `datos`: lo que se le escribe queda en `datos`, y
+`datos.push(4.0)` vale recién después de la última línea que usa `centro`. Tres
+cosas que el compilador pide:
+
+- Una función devuelve **siempre pedazos o siempre una lista propia**, no a veces
+  una cosa y a veces la otra: quien recibe el resultado tiene que saber si le toca
+  soltarlo.
+- El pedazo es de algo que llegó por un **parámetro**. Un pedazo de una lista
+  creada adentro de la función no sirve: esa lista deja de existir al volver.
+- El resultado se guarda (`let p = f(v)`), se le asigna a un pedazo `let mut`, se
+  recorre (`for x in f(v)`), se devuelve, o se usa directo (`print(f(v))`,
+  `f(v).suma()`, `g(f(v))`). Directo vale donde se evalúa una sola vez y antes
+  que cualquier otra llamada de la sentencia; a la derecha de un `and`/`or` o en
+  la condición de un `while`, primero el `let`.
+
+Un pedazo también se puede **guardar adentro de un struct o de una lista**. Es
+la forma de tener una red entera con sus capas mirando un solo `Vec` de pesos,
+sin copiar ninguno: lo que una capa escribe queda en ese `Vec`.
+
+```scar
+struct Capa {
+    w: Vec<f64>
+    sesgo: f64
+}
+
+fn activar(c: Capa, x: Vec<f64>) -> f64 {
+    return c.w.punto(x) + c.sesgo
+}
+
+fn bajar(c: Capa, paso: f64) {
+    for i in 0..c.w.len() {
+        c.w[i] = c.w[i] - paso
+    }
+}
+
+fn main() {
+    let pesos = [0.5, 1.0, 2.0, 4.0, 3.0, 3.0]
+    let red: Vec<Capa> = vec_new()
+    for k in 0..3 {
+        red.push(Capa { w: pesos[k * 2..k * 2 + 2], sesgo: 0.0 })
+    }
+    for capa in red {
+        bajar(capa, 0.5)
+        print(activar(capa, [1.0, 1.0]))
+    }
+    print(pesos)
+}
+```
+
+```
+0.5
+5.0
+5.0
+[0.0, 0.5, 1.5, 3.5, 2.5, 2.5]
+```
+
+La variable que guarda un pedazo (`red`, y cada capa adentro) sigue las reglas
+del pedazo. Mientras se usa, la lista mirada no cambia de largo:
+
+```scar-error
+struct Capa {
+    w: Vec<f64>
+    sesgo: f64
+}
+
+fn main() {
+    let pesos = [0.5, 1.0, 2.0, 4.0]
+    let capa = Capa { w: pesos[0..2], sesgo: 0.0 }
+    pesos.push(9.0)
+    print(capa.w)
+}
+```
+
+```
+ERROR DE TIPO: 'pesos' no puede cambiar de largo mientras se usa 'capa', que guarda un pedazo de él (línea 8): acá se le hace .push(). Usa 'capa' solo antes de esta línea (línea 9)
+```
+
+Y lo que guarda un pedazo **vive en la función que lo arma**:
+
+- Se presta a funciones que leen o que escriben sus números (`activar`,
+  `bajar`), también a las que lo recorren con `for`. No a una que podría
+  agrandar algo de adentro o quedarse con él.
+- No se manda a una tarea ni por un canal, y no se guarda en algo que llegó por
+  un parámetro: el pedazo podría seguir ahí cuando la lista que mira ya no
+  exista.
+- Se guarda con un literal (`Capa { w: v[a..b] }`), con `lista.push(...)` o
+  asignando el campo (`c.w = v[a..b]`), y la lista mirada tiene que estar
+  declarada antes que quien guarda el pedazo.
+- Una copia con `get` es propia: ya no mira la lista original.
+
+Sí se puede **devolver**, si los pedazos que guarda son de algo que llegó por un
+parámetro. Así se escribe una función que arma una capa, o la red entera, sobre
+la lista de pesos de quien la llama; el compilador deduce qué guarda lo devuelto,
+y quien lo recibe sigue las mismas reglas que si lo hubiera armado ahí:
+
+```scar
+struct Capa {
+    w: Vec<f64>
+    sesgo: f64
+}
+
+fn capa(pesos: Vec<f64>, desde: i32, n: i32) -> Capa {
+    return Capa { w: pesos[desde..desde + n], sesgo: 0.0 }
+}
+
+fn armar(pesos: Vec<f64>, por_capa: i32) -> Vec<Capa> {
+    let red: Vec<Capa> = vec_new()
+    let mut desde = 0
+    while desde + por_capa <= pesos.len() {
+        red.push(capa(pesos, desde, por_capa))
+        desde = desde + por_capa
+    }
+    return red
+}
+
+fn main() {
+    let pesos = [0.5, 1.0, 2.0, 4.0, 3.0, 3.0]
+    let red = armar(pesos, 2)
+    for c in red {
+        c.w[0] = 0.0
+    }
+    print(red.len(), pesos)
+    print(capa(pesos, 4, 2).w.suma())
+}
+```
+
+```
+3 [0.0, 1.0, 0.0, 4.0, 0.0, 3.0]
+3.0
+```
+
+Se devuelve entero (`return c`, `return Capa { ... }`), no una parte (`return
+c.w` sacaría el pedazo como si fuera una lista propia), y no un pedazo de una
+lista creada adentro de la función.
 
 Un pedazo también puede ser de una lista de structs, de textos o de listas. Es
 la misma ventana: `capas[1..3]` son esas capas de la lista original, no copias.
@@ -525,14 +795,9 @@ fn main() {
     let lista: Vec<Tarea> = vec_new()
     lista.push(Tarea { titulo: "comprar pan", hecha: true })
     lista.push(Tarea { titulo: "llamar al banco", hecha: false })
-    for i in 0..lista.len() {
-        match lista.get(i) {
-            Some(t) => {
-                let marca = if t.hecha { "[x]" } else { "[ ]" }
-                print(marca, t.titulo)
-            }
-            None => {}
-        }
+    for t in lista {
+        let marca = if t.hecha { "[x]" } else { "[ ]" }
+        print(marca, t.titulo)
     }
 }
 ```

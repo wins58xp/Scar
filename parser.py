@@ -1,5 +1,7 @@
 """Parser recursivo descendente para SCAR. Produce un AST de dicts/nodos simples."""
 
+import copy
+
 from lexer import tokenize, Token
 from types_ import TypeAnn, FN_MARK, CHAN_MARK, VEC_MARK, MAP_MARK, T_I32
 
@@ -31,9 +33,17 @@ class Node:
     # Lo mismo para un i32 usado donde se espera i64; el intérprete lo
     # marca como i64 (para que una cuenta posterior desborde en 64 bits).
     promover_i64 = False
+    # Una ampliación que no pierde nada y no tiene marca propia (u8 -> i32, i64,
+    # f32, f64): el nombre del tipo al que se amplía, o None (type_checker._compatible)
+    promover_a = None
     # El checker anota el tipo entero ("i32"/"i64") de un literal y de
     # cada cuenta entera (BinOp, '-' unario), y el valor de un `-N` plegado.
     tipo_int = None
+    # El intérprete guarda acá, la primera vez que evalúa el nodo, la función
+    # que lo evalúa (o lo ejecuta, si es una sentencia) con su ampliación de tipo
+    # ya resuelta (Interpreter._resolver_eval). Las marcas de arriba las pone el
+    # checker antes de correr y no cambian, así que se resuelve una sola vez.
+    _ev = None
     literal_plegado = None
     # Un literal usado como f32 (`let x: f32 = 0.5`, `x * 2.0` con x: f32):
     # el checker guarda acá su valor ya redondeado a f32 (types_.literal_f32).
@@ -233,6 +243,8 @@ class AssignStmt(Node):
 
 # Expressions
 class NumLit(Node):
+    escrito = None   # cómo se escribió, si no es el decimal de su valor (0xFF)
+
     def __init__(self, value): self.value = value
 
 class StrLit(Node):
@@ -749,7 +761,11 @@ class Parser:
         self.expect("sym", "{")
         stmts = []
         while not self.check("sym", "}"):
-            stmts.append(self.parse_stmt())
+            st = self.parse_stmt()
+            if isinstance(st, list):
+                stmts.extend(st)  # `for x in v`: el pedazo de v y el for (ver _for_en_vec)
+            else:
+                stmts.append(st)
         self.expect("sym", "}")
         return Block(stmts).at(start_tok)
 
@@ -903,19 +919,76 @@ class Parser:
         var = self.expect("id").value
         self.expect("kw", "in")
         start = self.parse_cond_expr()
-        if not self.check("sym", ".."):
-            t = self.peek()
-            if t.kind != "eof":
-                raise ParseError(
-                    f"'for' recorre un rango de enteros, como 'for i in 0..n' (línea {t.line}): "
-                    "no recorre una lista ni otro valor. Para una lista, recorre sus índices "
-                    "con 'for i in 0..v.len()' y lee cada uno con 'v.get(i)', o sácalos con "
-                    "'while let Some(x) = v.pop()'",
-                    t.line, t.col)
+        if self.check("sym", "{"):
+            return self._for_en_vec(start_tok, var, start, self.parse_block())
         self.expect("sym", "..")
         end = self.parse_cond_expr()
         body = self.parse_block()
         return ForStmt(var, start, end, body).at(start_tok)
+
+    def _for_en_vec(self, tok, var, fuente, body):
+        """`for x in v { ... }`: `x` es
+        `v[i]`. Se baja a lo que el lenguaje ya tiene, con sus reglas:
+
+            let _forK_v = v[0..v.len()]        # un pedazo guardado de v entero
+            for _forK_i in 0..len(_forK_v) {
+                ...                            # cada `x` es `_forK_v[_forK_i]`
+            }
+
+        Mientras el pedazo se usa (el for entero), v no cambia de largo ni se va
+        (pedazos.py); `x` es un lugar para un elemento con dueño, como `v[i]`.
+        Para números y bool, el checker cambia cada `x` por una copia tomada al
+        comenzar la vuelta (TypeChecker, ForStmt con `x_for`). Si `v` no es un
+        lugar (`for x in leer()`), primero se guarda en una variable; un índice
+        que no es un nombre ni un número (`m[f()]`) se calcula una sola vez."""
+        self._n_for = getattr(self, "_n_for", 0) + 1
+        k = self._n_for
+        nv, ni = f"_for{k}_v", f"_for{k}_i"
+        texto = _texto_fuente(fuente)
+        previas = []
+
+        def guardar(expr, sufijo):
+            nombre = f"_for{k}_{sufijo}"
+            let = LetStmt(nombre, expr).at(tok)
+            let.de_for = (var, texto)
+            let.oculta = True  # no la escribió el usuario (scope_resolver no la ofrece)
+            previas.append(let)
+            return Ident(nombre).at(tok)
+
+        if isinstance(fuente, SliceExpr):
+            pedazo = fuente
+        else:
+            if self._is_place(fuente):
+                # un índice con cuentas o llamadas se calcula una vez, antes
+                n = 0
+                nodo = fuente
+                while not isinstance(nodo, Ident):
+                    if isinstance(nodo, IndexExpr) and not isinstance(nodo.index, (Ident, NumLit)):
+                        n += 1
+                        nodo.index = guardar(nodo.index, f"n{n}")
+                    nodo = nodo.obj
+            else:
+                fuente = guardar(fuente, "d")  # el for se queda con el Vec temporal
+            largo = MethodCall(copy.deepcopy(fuente), "len", []).at(tok)
+            pedazo = SliceExpr(fuente, NumLit(0).at(tok), largo).at(tok)
+        pedazo._de_for = (var, texto)
+        let = LetStmt(nv, pedazo).at(tok)
+        let.de_for = (var, texto)
+        let.oculta = True
+
+        def elemento(ident):
+            e = IndexExpr(Ident(nv).at(ident), Ident(ni).at(ident)).at(ident)
+            e._x_for = var
+            e._texto_for = texto
+            return e
+
+        _sustituir(body, var, elemento)
+        bucle = ForStmt(ni, NumLit(0).at(tok), MethodCall(Ident(nv).at(tok), "len", []).at(tok), body).at(tok)
+        bucle.x_for = var
+        bucle.v_for = nv
+        bucle.texto_for = texto
+        bucle.pedazo_for = pedazo  # (no es un hijo: ya cuelga del let)
+        return previas + [let, bucle]
 
     # ---- Expressions (precedencia ascendente) ----
     def parse_expr(self):
@@ -1113,7 +1186,9 @@ class Parser:
 
         if t.kind == "num":
             self.advance()
-            return NumLit(t.value).at(t)
+            lit = NumLit(t.value).at(t)
+            lit.escrito = t.escrito   # 0xFF: los mensajes lo citan como se escribió
+            return lit
         if t.kind == "str":
             self.advance()
             return StrLit(t.value).at(t)
@@ -1218,10 +1293,10 @@ def _if_como_expr(st):
 # struct literal (`D { a: d.a + 5 }`, `A { o: arg(0) }`) se veía. Todo
 # recorrido genérico usa esta función; si un nodo nuevo guarda sus hijos de
 # otra forma, se agrega acá y lo ven todos.
-_ATRIBUTOS_NO_HIJOS = ("line", "col", "promover_f64", "promover_i64", "tipo_int",
+_ATRIBUTOS_NO_HIJOS = ("line", "col", "promover_f64", "promover_i64", "promover_a", "tipo_int",
                        "literal_plegado", "tipo_origen", "tipo_var", "archivo", "tipo_lugar",
                        "devuelve_str", "tipo_elem", "tipo_if", "tipo_visto", "tipo_replace",
-                       "lit_f32")
+                       "lit_f32", "escrito", "_ev", "_x_for", "_texto_for", "_de_for", "x_for", "v_for", "texto_for", "de_for", "pedazo_for")
 
 
 def hijos(node):
@@ -1237,6 +1312,89 @@ def hijos(node):
     if attrs is None:
         return []
     return [v for k, v in attrs.items() if k not in _ATRIBUTOS_NO_HIJOS]
+
+
+def _texto_fuente(expr):
+    """Cómo se escribió lo que recorre un `for x in ...`, para los mensajes:
+    `v`, `c.pesos`, `m[i]`, `v[a..b]`, `leer()`."""
+    if isinstance(expr, Ident):
+        return expr.name
+    if isinstance(expr, NumLit):
+        return str(expr.value)
+    if isinstance(expr, FieldAccess):
+        return f"{_texto_fuente(expr.obj)}.{expr.field}"
+    if isinstance(expr, IndexExpr):
+        return f"{_texto_fuente(expr.obj)}[{_texto_indice(expr.index)}]"
+    if isinstance(expr, SliceExpr):
+        return f"{_texto_fuente(expr.obj)}[{_texto_indice(expr.desde)}..{_texto_indice(expr.hasta)}]"
+    if isinstance(expr, Call) and isinstance(expr.callee, Ident):
+        return f"{expr.callee.name}(...)" if expr.args else f"{expr.callee.name}()"
+    if isinstance(expr, MethodCall):
+        return f"{_texto_fuente(expr.obj)}.{expr.method}(...)" if expr.args else f"{_texto_fuente(expr.obj)}.{expr.method}()"
+    return "..."
+
+
+def _texto_indice(expr):
+    return _texto_fuente(expr) if isinstance(expr, (Ident, NumLit, FieldAccess)) else "..."
+
+
+def _sustituir(node, var, hacer):
+    """Cambia cada `var` del cuerpo de un `for var in v` por `hacer(ident)`,
+    respetando lo que la tapa: un `let var` (desde ahí, en su bloque), un
+    `for var in ...`, un `while let Some(var)` o un brazo de match que liga
+    `var`. Asignarle a `var` es un error: es cada elemento, no una variable."""
+    def bloque(stmts):
+        for i, st in enumerate(stmts):
+            stmts[i] = uno(st)
+            if isinstance(st, LetStmt) and st.name == var:
+                return
+
+    def uno(n):
+        if isinstance(n, Ident):
+            return hacer(n) if n.name == var else n
+        if isinstance(n, list):
+            for i, h in enumerate(n):
+                n[i] = uno(h)
+            return n
+        if isinstance(n, tuple):
+            return tuple(uno(h) for h in n)
+        if isinstance(n, dict):
+            for k in list(n):
+                n[k] = uno(n[k])
+            return n
+        if not isinstance(n, Node) or isinstance(n, Patron):
+            return n
+        if isinstance(n, Block):
+            bloque(n.stmts)
+            return n
+        if isinstance(n, AssignStmt) and isinstance(n.target, Ident) and n.target.name == var:
+            raise ParseError(
+                f"'{var}' es cada elemento que recorre el 'for' y no se reasigna (línea {n.line}). "
+                f"Para cambiar los elementos, recorre los índices: 'for i in 0..v.len() {{ v[i] = ... }}'",
+                n.line, n.col)
+        if isinstance(n, ForStmt):
+            n.start = uno(n.start)
+            n.end = uno(n.end)
+            if n.var != var:
+                uno(n.body)
+            return n
+        if isinstance(n, WhileLetStmt):
+            n.expr = uno(n.expr)
+            if n.pattern != var:
+                uno(n.body)
+            return n
+        if isinstance(n, MatchArm):
+            liga = n.pattern.binds and any(isinstance(b, Ident) and b.name == var for b in n.pattern.binds)
+            if not liga:
+                n.body = uno(n.body)
+            return n
+        for k, v in list(n.__dict__.items()):
+            if k in _ATRIBUTOS_NO_HIJOS:
+                continue
+            setattr(n, k, uno(v))
+        return n
+
+    uno(node)
 
 
 def es_panic(stmt):

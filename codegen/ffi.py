@@ -3,31 +3,36 @@ un extern fn, qué librerías van aisladas en un worker por pipe y el wrapper
 que habla con él, y las export fn de una librería (modo --lib).
 """
 
+from types_ import ESCALARES_STR  # familias de tipos (types_.py)
 from types_ import TypeAnn, T_VOID
 
 from .comun import (
     _raiz_fin_c, _raiz_inicio_c, SCAR_RAND_SEED_LINE,
-    VEC_MARK,
+    VEC_MARK, C_TYPE,
 )
+from types_ import ESCALARES
 
 
 class FFI:
     # cómo cruza cada elemento de un Vec escalar la frontera (tipo de C, bytes)
-    _VEC_FFI_ELEM = {"i32": ("int32_t", 4), "i64": ("int64_t", 8), "f64": ("double", 8), "bool": ("bool", 1)}
+    _VEC_FFI_ELEM = {"i32": ("int32_t", 4), "i64": ("int64_t", 8), "f32": ("float", 4), "f64": ("double", 8),
+                     "bool": ("bool", 1), "u8": ("uint8_t", 1),
+                     "u32": ("uint32_t", 4), "u64": ("uint64_t", 8),
+                     "i16": ("int16_t", 2)}
 
     def _pipe_type_ok(self, ty: TypeAnn) -> bool:
         """Tipos que el protocolo de pipe del worker aislado sabe serializar
         (ffi_worker.py: _param_kind/_ret_kind). Más angosto que types_.ffi_tipo_ok:
         sin struct por valor ni fn como valor. Esa diferencia decide si una
         librería puede aislarse (_library_pipe_eligible)."""
-        if ty.name in ("i32", "i64", "f64", "bool", "str"):
+        if ty.name in ESCALARES_STR:
             return True
         if self._es_vec_ffi(ty):
             return True  # el largo y los elementos, ida y vuelta
         return ty.name in self.extern_types and not ty.args
 
     def _es_vec_ffi(self, ty) -> bool:
-        """Un Vec de i32/i64/f64/bool como parámetro de una extern fn: en C son
+        """Un Vec de i32/i64/f32/f64/bool como parámetro de una extern fn: en C son
         dos parámetros, `T*` y `int64_t` (el largo). C lo recibe prestado durante
         la llamada y lo que cambie en los elementos queda en el Vec (con el
         worker aislado, los elementos vuelven por el pipe)."""
@@ -56,7 +61,7 @@ class FFI:
     def _pipe_kind(self, ty: TypeAnn) -> str:
         """'i32'|'f64'|'bool'|'str'|'ptr' para el protocolo de pipe; _pipe_type_ok
         ya garantizó que ty es uno de estos."""
-        if ty.name in ("i32", "i64", "f64", "bool", "str"):
+        if ty.name in ESCALARES_STR:
             return ty.name
         if self._es_vec_ffi(ty):
             return "vec_" + ty.args[0].name
@@ -101,6 +106,10 @@ class FFI:
                 lines.append(f"    if (__scar_ok && !scar_ffi_write_i64(__scar_h->wfd, {arg})) __scar_ok = 0;\n")
             elif kind == "f64":
                 lines.append(f"    if (__scar_ok && !scar_ffi_write_f64(__scar_h->wfd, {arg})) __scar_ok = 0;\n")
+            elif kind == "f32":
+                lines.append(f"    if (__scar_ok && !scar_ffi_write_f32(__scar_h->wfd, {arg})) __scar_ok = 0;\n")
+            elif kind in ("u8", "u32", "u64", "i16"):
+                lines.append(f"    if (__scar_ok && !scar_ffi_write_{kind}(__scar_h->wfd, {arg})) __scar_ok = 0;\n")
             elif kind == "bool":
                 lines.append(f"    if (__scar_ok && !scar_ffi_write_bool(__scar_h->wfd, (uint8_t){arg})) __scar_ok = 0;\n")
             elif kind == "str":
@@ -142,6 +151,16 @@ class FFI:
                 lines.append("    double __scar_gr = 0;\n")
                 lines.append(
                     "    if (__scar_ok && !scar_ffi_read_f64(__scar_h->rfd, &__scar_gr)) __scar_ok = 0;\n"
+                )
+            elif ret_kind == "f32":
+                lines.append("    float __scar_gr = 0;\n")
+                lines.append(
+                    "    if (__scar_ok && !scar_ffi_read_f32(__scar_h->rfd, &__scar_gr)) __scar_ok = 0;\n"
+                )
+            elif ret_kind in ("u8", "u32", "u64", "i16"):
+                lines.append(f"    {C_TYPE[ret_kind]} __scar_gr = 0;\n")
+                lines.append(
+                    f"    if (__scar_ok && !scar_ffi_read_{ret_kind}(__scar_h->rfd, &__scar_gr)) __scar_ok = 0;\n"
                 )
             else:  # bool
                 lines.append("    uint8_t __scar_gr = 0;\n")
@@ -218,8 +237,8 @@ class FFI:
     def _exportadas_inicio(self):
         """Los tipos de C de la frontera, el encabezado del bloque exportado y
         tipo_frontera (que va anotando los Vec escalares que cruzan)."""
-        tipos_c = {"i32": "int32_t", "i64": "int64_t", "f64": "double", "bool": "bool",
-                   "str": "char*", "void": "void"}
+        # los escalares con su tipo de C de siempre; str cruza como char* propio
+        tipos_c = {**{t: C_TYPE[t] for t in ESCALARES}, "str": "char*", "void": "void"}
         out = [
             "// ---- lo que exporta la librería ----",
             "// el mensaje del último panic de este hilo (NULL si su última llamada",
@@ -302,7 +321,7 @@ class FFI:
                 else:
                     args.append(f"a{i}")
             llamada = f"{d.name}({', '.join(args)})"
-            cuerpo = [f"{ret_c} {nombre}({', '.join(ps) or 'void'}) {{",
+            cuerpo = [f"static {ret_c} scar_exp_{nombre}({', '.join(ps) or 'void'}) {{",
                       "    TaskContext *__scar_previo = __scar_ctx;",
                       "    /*SCAR_STRC*/",
                       "    scar_lib_poner_error(NULL);"]
@@ -352,7 +371,52 @@ class FFI:
                 cuerpo.append("    return r;")
             cuerpo.append("}")
             cuerpos.append("\n".join(cuerpo))
+            cuerpos.append(self._exportada_en_pila(nombre, ret_c, ps))
         return cuerpos
+
+    @staticmethod
+    def _exportada_en_pila(nombre, ret_c, ps):
+        """La export fn de verdad: corre el cuerpo (scar_exp_<nombre>) en una pila
+        de SCAR (scar_lib_en_pila, pilas.c), porque quien
+        la llama lo hace desde su propia pila. Los argumentos y el resultado van
+        en un struct."""
+        n = len(ps)
+        campos = [p + ";" for p in ps] + ([f"{ret_c} r;"] if ret_c != "void" else [])
+        llamada = f"scar_exp_{nombre}({', '.join(f'e->a{i}' for i in range(n))})"
+        directa = f"scar_exp_{nombre}({', '.join(f'a{i}' for i in range(n))})"
+        iniciar = ", ".join(f".a{i} = a{i}" for i in range(n))
+        if ret_c == "void":
+            sin_pila = "        return;"
+            con_pila = "        return;"
+            directo = f"    {directa};"
+        else:
+            sin_pila = (f"        {ret_c} z;\n"
+                        "        memset(&z, 0, sizeof z);\n"
+                        "        return z;")
+            con_pila = "        return e.r;"
+            directo = f"    return {directa};"
+        return "\n".join([
+            "#if defined(SCAR_HAY_CAMBIO_PILA)",
+            f"typedef struct {{ {' '.join(campos) or 'char vacio;'} }} ScarExpA_{nombre};",
+            f"static void scar_exp_t_{nombre}(void *p) {{",
+            f"    ScarExpA_{nombre} *e = p;",
+            "    (void)e;",
+            f"    {'e->r = ' if ret_c != 'void' else ''}{llamada};",
+            "}",
+            "#endif",
+            f"{ret_c} {nombre}({', '.join(ps) or 'void'}) {{",
+            "#if defined(SCAR_HAY_CAMBIO_PILA)",
+            f"    ScarExpA_{nombre} e = {{ {iniciar or '0'} }};",
+            f"    if (!scar_lib_en_pila(scar_exp_t_{nombre}, &e)) {{",
+            "        scar_lib_poner_error(strdup(\"no hay memoria para la pila de SCAR\"));",
+            sin_pila,
+            "    }",
+            con_pila,
+            "#else",
+            directo,
+            "#endif",
+            "}",
+        ])
 
     def _exportadas_vecs(self, out, vecs_c, cuerpos):
         """Las funciones de C para liberar los Vec que la librería entrega, y el

@@ -1,0 +1,6 @@
+# espera: un f64 guarda enteros exactos solo hasta 9007199254740992
+fn main() {
+    let a: u64 = 9007199254740993
+    let f: f64 = a
+    print(f)
+}

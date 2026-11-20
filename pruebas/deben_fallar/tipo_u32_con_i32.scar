@@ -1,0 +1,7 @@
+# espera: Convierte los dos con to_i64()
+# Ninguno contiene al otro: el que contiene a los dos es i64.
+fn main() {
+    let a: u32 = 5
+    let n = 3
+    print(a + n)
+}

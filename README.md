@@ -14,16 +14,21 @@ memoria que se suelta no vuelve al sistema operativo cada vez: queda en una
 lista del hilo para reusarla, con un tope, así que un programa que corre horas
 no crece.
 
-Además de enteros (`i32`, `i64`) y decimales de 64 bits (`f64`), tiene `f32`:
-la mitad de memoria, el formato de las GPU y de las librerías de IA. Para la IA
+Tiene enteros con signo (`i16`, `i32`, `i64`) y sin signo (`u8`, `u32`, `u64`,
+para bytes, colores y hashes; se escriben también en hexadecimal, `0xFF`), y
+decimales de 64 bits (`f64`) y de 32 (`f32`): la mitad de memoria, el formato de
+las GPU y de las librerías de IA, y cruza a C como `float`. Para la IA
 también trae `v[i]`, `v.suma()` y `a.punto(b)` (sumas en 16 carriles con SIMD y
 el mismo resultado bit a bit en las dos maneras de correr), y en `lib/autodiff`
 una cinta de derivadas sobre vectores en `f32`, un nodo por capa y no por número.
+Los pedazos de una lista (`w[a..b]`, sin copiar) se pasan, se guardan, se devuelven
+y se recorren con `for x in v`, y el compilador revisa que la lista no cambie de
+largo mientras alguien la mira.
 
 Cada programa corre de dos maneras, con la misma salida: con un intérprete
 (`scar run`) o compilado a C y a un binario nativo (`scar build`).
 
-> **Esto es un alfa (0.3.0).** El lenguaje funciona y está probado, pero
+> **Esto es un alfa (0.4.0).** El lenguaje funciona y está probado, pero
 > todavía puede cambiar. Qué trajo la primera versión: [`SCAR_0.1.0.md`](SCAR_0.1.0.md);
 > lo que cambió después: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -32,8 +37,8 @@ Cada programa corre de dos maneras, con la misma salida: con un intérprete
 Necesitas Linux, Python 3.12 o más nuevo, y gcc o clang.
 
 ```
-git clone https://github.com/wins58xp/scar
-cd scar
+git clone https://github.com/wins58xp/Scar
+cd Scar
 ./instalar.sh
 scar --version
 ```
@@ -101,5 +106,5 @@ publicas una versión modificada, ponle otro nombre (ver [`MARCA.md`](MARCA.md))
 ## El repositorio oficial
 
 El único repositorio oficial de SCAR es
-[github.com/wins58xp/scar](https://github.com/wins58xp/scar). Las versiones
+[github.com/wins58xp/Scar](https://github.com/wins58xp/Scar). Las versiones
 oficiales son las que se publican ahí como *releases*.

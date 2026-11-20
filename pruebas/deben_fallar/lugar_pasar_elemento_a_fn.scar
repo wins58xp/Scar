@@ -4,8 +4,8 @@ struct N {
     pesos: Vec<f32>
     nombre: str
 }
-fn usar(n: N) -> f32 {
-    return n.peso
+fn usar(n: N) -> N {
+    return n    # se queda con lo que recibe: un elemento del Vec no se puede prestar así
 }
 fn crear() -> Vec<f32> {
     return [1.0, 2.0]
@@ -15,5 +15,5 @@ fn main() {
     red.push(N { peso: 1.0, pesos: [1.0], nombre: "a" })
     let mut m: Vec<Vec<f32>> = vec_new()
     m.push([1.0])
-    print(usar(red[0]))
+    print(usar(red[0]).peso)
 }

@@ -120,6 +120,7 @@ class Tareas:
                 f"{pad}{tmp_ctx}->injected_slots = "
                 f"calloc(1, sizeof(InjectedSlots_{name}));"
             )
+            out.append(f"{pad}{tmp_ctx}->inyectar = scar_inyectar_{name};")
         # Cómo se libera __scar_result si nadie hace join (scar_cancel_children):
         # void no reserva nada; un struct, con {name}_free_erased; un valor con
         # datos propios (Vec, Map, str), con su liberador; el resto
@@ -158,6 +159,8 @@ class Tareas:
             si no, el canal va al slot y devuelve Ok(())."""
         handle_expr, chan_expr = expr.args
         handle_ty = self.infer(handle_expr, env)
+        if handle_ty.name == TASK_MARK and len(handle_ty.args) == 1:
+            return self._gen_inject_chan_sin_nombre(expr, args_code, env, out, pad)
         if handle_ty.name != TASK_MARK or len(handle_ty.args) < 2:
             # un spawn con un error previo devuelve el Task sin el nombre de la task:
             # el checker ya lo reportó, así que acá no se llega con un .scar real
@@ -240,6 +243,42 @@ class Tareas:
         out.append(f"{pad}    pthread_mutex_unlock(&{ctx_code}->injected_lock);")
         out.append(f"{pad}}}")
         return tmp_result
+
+    def _gen_inject_chan_sin_nombre(self, expr, args_code, env, out, pad) -> str:
+        """inject_chan sobre un Task<T> sin nombre (una lista de tareas de varias
+        clases): no se sabe al compilar qué tarea es, así que la tarea misma pone
+        el canal (ctx->inyectar, _gen_inyectar) y si no acepta ese tipo da Err al
+        correr, con el mismo texto que el intérprete. Los textos llevan el nombre
+        de la tarea, que se sabe al correr: scar_texto_fijo los arma una vez."""
+        chan_ty = self.infer(expr.args[1], env)
+        inner = chan_ty.args[0] if chan_ty.args else T_I32
+        mangled = self._mangled_name(inner)
+        result_c = self.c_type(TypeAnn("Result", [T_VOID]))
+        handle_code, chan_code = args_code[0], args_code[1]
+        ctx = self._new_tmp()
+        r = self._new_tmp()
+        k = self._new_tmp()
+        termino = (f"scar_texto_fijo(\"la task '\", {ctx}->name, "
+                   f"\"' ya terminó, no se puede inyectar\")")
+        out.append(f"{pad}{result_c} {r};")
+        out.append(f"{pad}TaskContext *{ctx} = ({handle_code}).ctx;")
+        out.append(f"{pad}if (atomic_load(&{ctx}->finished)) {{")
+        out.append(f"{pad}    {r} = {result_c}_Err({termino});")
+        out.append(f"{pad}}} else {{")
+        out.append(f"{pad}    pthread_mutex_lock(&{ctx}->injected_lock);")
+        out.append(f"{pad}    if (atomic_load(&{ctx}->finished)) {{")
+        out.append(f"{pad}        {r} = {result_c}_Err({termino});")
+        out.append(f"{pad}    }} else {{")
+        out.append(f"{pad}        int {k} = {ctx}->inyectar ? {ctx}->inyectar({ctx}, \"{mangled}\", {chan_code}) : 1;")
+        out.append(f"{pad}        if ({k} == 0) {r} = {result_c}_Ok(true);")
+        out.append(f"{pad}        else if ({k} == 1) {r} = {result_c}_Err(scar_texto_fijo(\"la task '\", "
+                   f"{ctx}->name, \"' no declaró aceptar {chan_ty!r} por inyección\"));")
+        out.append(f"{pad}        else {r} = {result_c}_Err(scar_texto_fijo(\"la task '\", {ctx}->name, "
+                   f"\"' ya tiene una inyección de {chan_ty!r} pendiente sin consumir (accept_chan())\"));")
+        out.append(f"{pad}    }}")
+        out.append(f"{pad}    pthread_mutex_unlock(&{ctx}->injected_lock);")
+        out.append(f"{pad}}}")
+        return r
 
     def _gen_accept_chan(self, expr: "Call", declared_ty: "TypeAnn", env, out, pad) -> str:
         """accept_chan(), como _accept_chan del intérprete. Corre dentro de la
@@ -339,8 +378,28 @@ class Tareas:
         self.task_accept_slots[decl.name] = slot_index
         return (
             f"typedef struct {{\n" + "\n".join(field_lines) + f"\n"
-            f"}} {struct_name};"
+            f"}} {struct_name};\n"
+            f"static int scar_inyectar_{decl.name}(TaskContext *ctx, const char *tipo, void *chan);"
         )
+
+    def _gen_inyectar(self, decl: FnDecl) -> str:
+        """Para una task con `accepts`: la función que guarda su TaskContext para
+        inject_chan sobre un Task<T> sin nombre. Recibe
+        el tipo del canal por su nombre de C y lo pone en su lugar; se llama con
+        injected_lock tomado. 0: lo puso; 1: no acepta ese tipo; 2: ya hay uno."""
+        slots = self.task_accept_slots.get(decl.name, {})
+        lineas = [f"static int scar_inyectar_{decl.name}(TaskContext *ctx, const char *tipo, void *chan) {{",
+                  f"    InjectedSlots_{decl.name} *s = (InjectedSlots_{decl.name}*)ctx->injected_slots;"]
+        for mangled, campo in slots.items():
+            lineas.append(f"    if (strcmp(tipo, \"{mangled}\") == 0) {{")
+            lineas.append(f"        if (s->{campo} != NULL) return 2;")
+            lineas.append(f"        scar_chan_incref_{mangled}(chan);")
+            lineas.append(f"        s->{campo} = chan;")
+            lineas.append("        return 0;")
+            lineas.append("    }")
+        lineas.append("    return 1;")
+        lineas.append("}")
+        return "\n".join(lineas)
 
     def _gen_task_support(self, decl: FnDecl):
         """Para una task: el struct de argumentos (en el heap, porque tiene que
@@ -565,7 +624,6 @@ class Tareas:
             f"    {args_struct}* __scar_args = ({args_struct}*)__scar_arg;\n"
             f"    TaskContext* __scar_task_ctx = __scar_args->__scar_ctx_hija;\n"
             f"    __scar_ctx = __scar_task_ctx;\n"
-            f"{'    scar_pila_iniciar();' + chr(10) if getattr(self, '_fns_recursivas', None) else ''}"
             f"    SCAR_RAND_HILO(__scar_task_ctx->rand_semilla);\n"
             f"    void* __scar_result = NULL;\n"
             f"{hoisted_block}"
@@ -593,9 +651,10 @@ class Tareas:
             f"    // (normal/panic/cancelacion) por igual, a diferencia de\n"
             f"    // 'completed' de arriba.\n"
             f"{finished_block}"
-            f"{'    scar_pila_terminar();' + chr(10) if getattr(self, '_fns_recursivas', None) else ''}"
             f"    return __scar_result;\n"
             f"}}"
         )
         forward_decl_wrapper = f"static void* {thread_fn_name}(void* __scar_arg);"
+        if decl.accepts:
+            def_wrapper += "\n\n" + self._gen_inyectar(decl)
         return forward_decl_wrapper, typedef_args, def_wrapper

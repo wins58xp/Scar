@@ -1,0 +1,15 @@
+# espera: que podría cambiarlo
+struct Capa {
+    pesos: Vec<f64>
+}
+fn reemplaza(c: Capa) {
+    c.pesos = [9.0]
+}
+fn main() {
+    let red: Vec<Capa> = [Capa { pesos: [1.0, 2.0] }]
+    for c in red {
+        let p = c.pesos[0..1]
+        reemplaza(c)
+        print(p)
+    }
+}

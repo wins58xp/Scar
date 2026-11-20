@@ -1,0 +1,13 @@
+# espera: no se le pasa a crece(), que podría cambiarle el largo a algo de adentro
+struct Capa {
+    w: Vec<f64>
+    n: i32
+}
+fn crece(c: Capa) {
+    c.w.push(1.0)
+}
+fn main() {
+    let params = [1.0, 2.0, 3.0]
+    let c = Capa { w: params[0..2], n: 1 }
+    crece(c)
+}

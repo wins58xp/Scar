@@ -966,6 +966,15 @@ class Sentencias:
             out.append(f"{pad}{target_code} = {tmp};")
             self._flush_pending_expr_temps(out, pad)
             return
+        if getattr(stmt, "_reasigna_pedazo", False):
+            # `p = w[c..d]` con `let mut p = v[a..b]` (pedazos.py, 2.5a): un pedazo
+            # no es dueño de nada (cap = 0), así que no se suelta lo que miraba ni
+            # se anota como dueño lo nuevo: solo cambia qué mira
+            target_code = self.gen_expr(stmt.target, env, out, pad)
+            expr_code = self.gen_expr(stmt.expr, env, out, pad, expected_ty=env.get(stmt.target.name))
+            out.append(f"{pad}{target_code} = {expr_code};")
+            self._flush_pending_expr_temps(out, pad)
+            return
         root = self._assign_root(stmt.target)
         if root.name not in env:
             raise CodegenError(f"variable no declarada: {root.name}")
@@ -1239,6 +1248,27 @@ class Sentencias:
         self._fin_de_loop(self._loop_frames.pop())
         return
 
+    @staticmethod
+    def _nombra(node, nombre) -> bool:
+        if isinstance(node, Ident):
+            return node.name == nombre
+        if isinstance(node, (Node, list, tuple, dict)):
+            return any(Sentencias._nombra(h, nombre) for h in hijos(node))
+        return False
+
+    @staticmethod
+    def _declara_nombre(node, nombre) -> bool:
+        """True si adentro de `node` se declara otra variable `nombre`."""
+        if isinstance(node, LetStmt) and node.name == nombre:
+            return True
+        if isinstance(node, ForStmt) and node.var == nombre:
+            return True
+        if isinstance(node, WhileLetStmt) and node.pattern == nombre:
+            return True
+        if isinstance(node, (Node, list, tuple, dict)):
+            return any(Sentencias._declara_nombre(h, nombre) for h in hijos(node))
+        return False
+
     def _gen_while_let_stmt(self, stmt, env, out, indent, rest, pad):
         val_ty = self.infer(stmt.expr, env)
         # el match sobre un Result se baja a un while let Ok(x): Result_T y
@@ -1272,7 +1302,28 @@ class Sentencias:
         out.append(f"{inner_pad}if ({tmp}.tag != 1) break;")
         inner_env = dict(env)
         inner_env[stmt.pattern] = inner_ty
-        out.append(f"{inner_pad}{self.c_type(inner_ty)} {stmt.pattern} = {tmp}.value;")
+        # Un Vec que sigue siendo de la variable `o` (`match o { Some(f) => ... }`):
+        # f es ese mismo Vec, no una copia de su cabecera. Con la copia, un
+        # `f.push(x)` que agranda el buffer dejaba a `o` con el puntero viejo, y al
+        # soltar `o` se soltaba memoria ya suelta (y se perdía la nueva). En el
+        # intérprete f y lo de adentro de `o` son la misma lista.
+        lugar = stmt.expr
+        while isinstance(lugar, FieldAccess):   # `match c.quiza { Some(v) => ... }`
+            lugar = lugar.obj
+        por_puntero = (
+            isinstance(lugar, Ident) and inner_ty.name == VEC_MARK
+            and not getattr(stmt, "copia_ligada", False)
+            and not self._es_vec_prestado_actual(stmt.pattern)
+            and not self._declara_nombre(stmt.body, stmt.pattern)
+            # si el cuerpo nombra a la variable del Option (`q = None`), la ligada
+            # tiene que sobrevivir a eso: va como antes, con su cabecera (el
+            # checker ya pidió una copia si además el cuerpo la agranda)
+            and not self._nombra(stmt.body, lugar.name))
+        if por_puntero:
+            out.append(f"{inner_pad}{self.c_type(inner_ty)}* {stmt.pattern} = &({expr_code}).value;")
+            self._ligadas_ptr.add(stmt.pattern)
+        else:
+            out.append(f"{inner_pad}{self.c_type(inner_ty)} {stmt.pattern} = {tmp}.value;")
         prev_payload = self._opt_payload_of
         self._opt_payload_of = dict(prev_payload)
         if (isinstance(stmt.expr, Ident)
@@ -1323,6 +1374,8 @@ class Sentencias:
             self._emit_owner_frees(body_owners, inner_env, out, inner_pad)
         self._vivos_cerrar(body_owners, out, inner_pad)
         self._opt_payload_of = prev_payload
+        if por_puntero:
+            self._ligadas_ptr.discard(stmt.pattern)
         out.append(f"{pad}}}")
         self._fin_de_loop(self._loop_frames.pop())
         if diferido is not None:
@@ -1743,7 +1796,6 @@ class Sentencias:
                     f"    (void)argc; (void)argv;\n"
                     f"{SCAR_RAND_SEED_LINE if self.needs_rand else ''}"
                     f"{'    scar_extern_install_guard();' + chr(10) if self.extern_sigs else ''}"
-                    f"{'    scar_pila_iniciar();' + chr(10) if self._fns_recursivas else ''}"
                     f"{_raiz_inicio_c('main')}"
                     "    if (sigsetjmp(__scar_root.panic_env, 1) != 0) {\n"
                     f"{_raiz_fin_c('        ')}"
@@ -1754,15 +1806,23 @@ class Sentencias:
                     "}"
                 )
             out.append("    return 0;")
+            # Sin tareas, main de C también deja el main de verdad en otro hilo,
+            # con una pila de SCAR (scar_main_en_pila, pilas.c): todo el código de
+            # SCAR corre en una pila de SCAR.
             return (
+                f"static int scar_main_real(int argc, char** argv);\n"
                 f"{self._main_sig()} {{\n"
                 # Igual que con tasks: antes que nada.
                 + ("    scar_ffi_worker_start_all();\n" if self.pipe_isolated_libs else "")
                 + SCAR_MALLOPT_PROLOGUE
                 + self._main_arg_init()
+                + f"    return scar_main_en_pila(scar_main_real, {'argc, argv' if self.usa_arg else '0, NULL'});\n"
+                + "}\n"
+                + "static int scar_main_real(int argc, char** argv) {\n"
+                + "    (void)argc; (void)argv;\n"
+                + "    scar_main_al_terminar_poner(scar_vivos_liberar_registro);\n"
                 + (SCAR_RAND_SEED_LINE if self.needs_rand else "")
                 + ("    scar_extern_install_guard();\n" if self.extern_sigs else "")
-                + ("    scar_pila_iniciar();\n" if self._fns_recursivas else "")
                 + "\n".join(out)
                 + "\n}"
             )
@@ -1772,4 +1832,7 @@ class Sentencias:
         # llamador (medido: ~4-5% en 53_sensor_red_avanzada). Si algún día se
         # compila en varios .c, hay que revisar esto.
         static_kw = "" if decl.name == "main" else "static "
+        if decl.name != "main" and getattr(self, "_revisar_pila", False):
+            # ¿queda pila? (pila.c)
+            body = "    SCAR_PILA_REVISAR();\n" + body
         return f"{static_kw}{self.c_type(ret)} {decl.name}({param_list}) {{\n{body}\n}}"

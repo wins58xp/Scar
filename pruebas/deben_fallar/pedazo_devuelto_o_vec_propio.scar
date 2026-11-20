@@ -1,0 +1,12 @@
+# espera: una fn devuelve siempre pedazos o siempre un Vec propio
+fn mezcla(v: Vec<f64>) -> Vec<f64> {
+    if v.len() > 2 {
+        return v[0..2]
+    }
+    return [1.0]
+}
+fn main() {
+    let w = [1.0, 2.0]
+    let p = mezcla(w)
+    print(p)
+}

@@ -1,0 +1,13 @@
+# espera: que se declara después que 'red'
+struct Capa {
+    w: Vec<f64>
+    n: i32
+}
+fn main() {
+    let red: Vec<Capa> = vec_new()
+    if red.len() == 0 {
+        let params = [1.0, 2.0, 3.0]
+        red.push(Capa { w: params[0..2], n: 1 })
+    }
+    print(red[0].w)
+}

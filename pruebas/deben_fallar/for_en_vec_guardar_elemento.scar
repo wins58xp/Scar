@@ -1,0 +1,11 @@
+# espera: es cada elemento de 'ps' (Vec<P>): un lugar, no un valor
+struct P {
+    n: i32
+}
+fn main() {
+    let ps: Vec<P> = [P { n: 1 }]
+    let mut otra: Vec<P> = vec_new()
+    for p in ps {
+        otra.push(p)
+    }
+}

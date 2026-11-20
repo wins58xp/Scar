@@ -43,8 +43,11 @@ tercera línea
 ```
 
 Un `File` se usa con métodos: `.write(texto)`, `.read_all()` (todo el
-contenido como texto), `.read_bytes(n)` y `.write_bytes(v)` (bytes crudos, como
-`Vec<i32>` de 0 a 255) y `.close()`.
+contenido como texto), `.read_u8(n)` y `.write_bytes(v)` (bytes crudos, en un
+`Vec<u8>`) y `.close()`. `.read_bytes(n)` lee lo mismo en un `Vec<i32>` de 0 a 255
+(es de antes de que existiera `u8`, y sigue igual), y `.write_bytes` también acepta
+un `Vec<i32>`, siempre que cada valor sea un byte. Un `Socket` tiene los mismos
+`.read_u8`, `.read_bytes` y `.write_bytes`.
 
 Los errores del sistema no detienen el programa: llegan como `Err`.
 
@@ -117,11 +120,21 @@ Eva no tiene nota
 `tcp_listen(puerto)` abre un puerto para recibir conexiones, `listener.accept()`
 espera una, y `tcp_connect(host, puerto)` se conecta a un servidor. Del otro
 lado de cada conexión hay un `Socket`, con `.write(texto)`, `.read()` y
-`.close()`:
+`.close()`.
+
+Con `tcp_listen(0)` el sistema elige un puerto libre, y `listener.puerto()` dice
+cuál eligió. Para un servidor y un cliente del mismo programa (una prueba, un
+servidor de prueba en otra tarea) es lo que conviene: con un número fijo, el
+puerto puede estar ocupado, por otro programa que escucha ahí o por una conexión
+cualquiera del sistema que lo tomó como su puerto de salida, y entonces
+`tcp_listen` da un `Err`. Un puerto fijo es para un servidor al que la gente se
+conecta sabiendo el número (`nc localhost 7878`). Un puerto va de 0 a 65535;
+fuera de eso, `tcp_listen` y `tcp_connect` dan un `Err`.
 
 ```scar
-fn conversar(puerto: i32) -> Result<str> {
-    let servidor = tcp_listen(puerto)?
+fn conversar() -> Result<str> {
+    let servidor = tcp_listen(0)?          # 0: un puerto libre, que elige el sistema
+    let puerto = servidor.puerto()         # el que eligió
     let cliente = tcp_connect("127.0.0.1", puerto)?
     let conexion = servidor.accept()?
 
@@ -137,11 +150,11 @@ fn conversar(puerto: i32) -> Result<str> {
 }
 
 fn main() {
-    match conversar(19191) {
+    match conversar() {
         Ok(t) => print(t)
         Err(e) => print("error:", e)
     }
-    match tcp_connect("127.0.0.1", 19193) {
+    match tcp_connect("127.0.0.1", 70000) {
         Ok(s) => print("conectado")
         Err(e) => print(e)
     }
@@ -150,7 +163,7 @@ fn main() {
 
 ```
 hola, servidor / hola, cliente
-no se pudo conectar a 127.0.0.1:19193: Connection refused
+no se pudo conectar a 127.0.0.1:70000: el puerto va de 0 a 65535
 ```
 
 En un programa de verdad, el servidor y los clientes corren en tareas

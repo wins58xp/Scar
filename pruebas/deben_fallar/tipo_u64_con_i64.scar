@@ -1,0 +1,7 @@
+# espera: no hay un entero donde quepan los dos
+# Ni u64 cabe en i64 ni i64 en u64, y no hay un entero que contenga a los dos.
+fn main() {
+    let a: u64 = 5
+    let n: i64 = 3
+    print(a + n)
+}

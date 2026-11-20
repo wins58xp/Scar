@@ -1,0 +1,5 @@
+# espera: no entra en ningún entero (el más grande es el u64, hasta 18446744073709551615)
+fn main() {
+    let b: u64 = 18446744073709551616
+    print(b)
+}

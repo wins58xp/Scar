@@ -7,6 +7,7 @@ un Codegen. Cada mixin importa de acá lo que usa.
 import re
 
 from parser import FieldAccess, Ident, hijos
+from types_ import T_U8, T_U32, T_U64, T_I16, SIN_SIGNO, CON_SIGNO_CHICOS, INT_RANGES, INT_BITS  # tareas 3.3 a 3.6
 from types_ import (TypeAnn, T_I32, T_I64, T_F32, T_F64, T_STR, T_VOID, TASK_MARK, CHAN_MARK, FN_MARK,
                     PIPE_MARK, FILE_MARK, SOCKET_MARK, LISTENER_MARK, VEC_MARK, MAP_MARK,
                     FFI_SUPPORTED_TYPES)
@@ -65,12 +66,25 @@ _TEXTO_SIN_TOPE_C = runtime_c.texto("texto_sin_tope")
 C_TYPE = {
     "i32": "int32_t",
     "i64": "int64_t",
+    "u8": "uint8_t",
+    "u32": "uint32_t",
+    "u64": "uint64_t",
+    "i16": "int16_t",
     "f32": "float",
     "f64": "double",
     "str": "const char*",
     "bool": "bool",
     "void": "void",
 }
+
+# Los límites de cada entero en C, y el entero de C donde una cuenta exacta de
+# dos de ellos (a + k * b) no desborda: así una plantilla que revisa si un
+# resultado cabe sirve para todos (un tipo nuevo se agrega acá).
+C_LIMITES = {"i32": ("INT32_MIN", "INT32_MAX"), "i64": ("INT64_MIN", "INT64_MAX"), "u8": ("0", "255"),
+             "u32": ("0", "UINT32_MAX"), "u64": ("0", "UINT64_MAX"), "i16": ("INT16_MIN", "INT16_MAX")}
+# u64: a + k * b llega a 2**128 - 2**64, que cabe en unsigned __int128 y no en __int128
+C_ANCHO_EXACTO = {"i32": "int64_t", "u8": "int64_t", "u32": "__int128", "i64": "__int128",
+                  "u64": "unsigned __int128", "i16": "int64_t"}
 
 # Al arrancar main(): que glibc sirva los bloques grandes con brk y no con
 # mmap/munmap. munmap toma un lock del kernel compartido por todo el proceso,
@@ -137,7 +151,30 @@ def _i64_helpers_c(has_tasks):
     )
 
 
-def _abs_min_max_helpers_c(has_tasks, con_f32=False):
+def _sin_signo_helpers_c(tipo, has_tasks):
+    """El runtime de un entero sin signo (u8, tarea 3.3; u32, 3.4; u64, 3.5):
+    las reglas de i32 con 0..máximo, iguales al intérprete: desbordar (también
+    restar de más), dividir por cero, correr fuera de 0..bits-1 y una conversión
+    que no cabe son un panic. Una sola plantilla (native/runtime/sin_signo.c)
+    para todos; el desborde lo revisan __builtin_add_overflow y los demás, que
+    sirven también para u64 (no hay un tipo de C más ancho donde hacer la cuenta)."""
+    return runtime_c.texto("sin_signo", PANIC=panic_c(has_tasks), T=tipo, CT=C_TYPE[tipo],
+                           MAX=str(INT_RANGES[tipo][1]), BITS=str(INT_BITS[tipo]))
+
+
+def _con_signo_helpers_c(tipo, has_tasks):
+    """El runtime de un entero con signo más angosto que i32 (i16, tarea 3.6):
+    las reglas de i32 en su rango, iguales al intérprete: desbordar, dividir por
+    cero, el mínimo / -1, negar el mínimo, correr fuera de 0..bits-1, abs del
+    mínimo y una conversión que no cabe son un panic. Una plantilla
+    (native/runtime/con_signo.c) para todos los de la familia CON_SIGNO_CHICOS."""
+    lo, hi = INT_RANGES[tipo]
+    return runtime_c.texto("con_signo", PANIC=panic_c(has_tasks), T=tipo, CT=C_TYPE[tipo],
+                           UCT="u" + C_TYPE[tipo], MIN=str(lo), MAX=str(hi),
+                           BITS=str(INT_BITS[tipo]))
+
+
+def _abs_min_max_helpers_c(has_tasks, con_f32=False, sin_signo=(), con_signo=()):
     """abs/min/max, iguales al intérprete (_abs_min_max). abs de un entero es
     exacto, y el del mínimo (que no tiene positivo) es un panic. min/max
     devuelven el primero salvo que el segundo sea menor (mayor): con NaN, el
@@ -151,8 +188,13 @@ def _abs_min_max_helpers_c(has_tasks, con_f32=False):
             "    return x < 0 ? -x : x;\n"
             "}\n"
         )
+    usados = tuple(t for t in SIN_SIGNO if t in sin_signo)   # sin signo: abs es el mismo
+    for t in usados:
+        s += f"static inline {C_TYPE[t]} scar_abs_{t}({C_TYPE[t]} x) {{ return x; }}\n"
+    # (el abs de i16 viene con su plantilla, _con_signo_helpers_c)
+    chicos = tuple(t for t in CON_SIGNO_CHICOS if t in con_signo)
     for t, ct in (("i32", "int32_t"), ("i64", "int64_t"), ("f64", "double")) + (
-            (("f32", "float"),) if con_f32 else ()):
+            (("f32", "float"),) if con_f32 else ()) + tuple((t, C_TYPE[t]) for t in usados + chicos):
         s += (
             f"static inline {ct} scar_min_{t}({ct} a, {ct} b) {{ return (b < a) ? b : a; }}\n"
             f"static inline {ct} scar_max_{t}({ct} a, {ct} b) {{ return (b > a) ? b : a; }}\n"
@@ -238,6 +280,13 @@ BUILTIN_SIGS = {
     "to_i64": ([T_F64], T_I64),
     "to_f64": ([T_I32], T_F64),
     "to_f32": ([T_F64], T_F32),
+    "to_u8": ([T_F64], T_U8),
+    "to_u32": ([T_F64], T_U32),
+    "to_u64": ([T_F64], T_U64),
+    "to_i16": ([T_F64], T_I16),
+    "suma_ciclica": ([T_U8, T_U8], T_U8),   # el tipo real sale del checker (tipo_int)
+    "resta_ciclica": ([T_U8, T_U8], T_U8),
+    "mult_ciclica": ([T_U8, T_U8], T_U8),
     "chr": ([T_I32], T_STR),
     "a_texto": ([T_STR], T_STR),  # ver el sitio de Call
     "ord": ([T_STR], T_I32),

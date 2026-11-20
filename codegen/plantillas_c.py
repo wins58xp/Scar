@@ -3,9 +3,10 @@ Chan, Vec y Map, por pieza (new, send/push, recv/get, free...). Cada pieza
 devuelve su texto; _chan_c_type, _vec_c_type y _map_c_type (TiposC) las suman.
 """
 
+from types_ import ESCALARES, FLOTANTES, NUMERICOS  # familias de tipos (types_.py)
 from types_ import T_I32
 
-from .comun import panic_c
+from .comun import panic_c, C_LIMITES, C_ANCHO_EXACTO
 
 
 class Plantillas:
@@ -385,8 +386,8 @@ class Plantillas:
         lo mismo). Sale solo si el programa lo usa."""
         t = self.c_type(inner)
         pnc = panic_c(self.has_tasks)
-        ancho, lo, hi = (("int64_t", "INT32_MIN", "INT32_MAX") if inner.name == "i32"
-                         else ("__int128", "INT64_MIN", "INT64_MAX"))
+        ancho = C_ANCHO_EXACTO[inner.name]
+        lo, hi = C_LIMITES[inner.name]
         return (
             f"static __attribute__((unused)) void scar_vec_acumular_{name_part}({c_name} a, {c_name} b, {t} k) {{\n"
             f"    if (a.len != b.len) {{\n"
@@ -411,7 +412,7 @@ class Plantillas:
         orden. Enteros: la suma exacta en 128 bits y panic si no cabe en el tipo
         (el orden no importa); en i64.punto, también si una suma parcial pasa de
         128 bits. Mismos mensajes que el intérprete."""
-        if inner.name not in ("i32", "i64", "f64", "f32"):
+        if inner.name not in NUMERICOS:
             return ""
         t = self.c_type(inner)
         pnc = panic_c(self.has_tasks)
@@ -421,7 +422,7 @@ class Plantillas:
             f"    }}\n"
         )
         trozo = self._vec_c_trozo(name_part, c_name)
-        if inner.name in ("f64", "f32"):
+        if inner.name in FLOTANTES:
             def carriles(nombre, params, termino, previo=""):
                 return (
                     f"static __attribute__((unused)) {t} scar_vec_{nombre}_{name_part}({params}) {{\n"
@@ -452,7 +453,7 @@ class Plantillas:
             )
             return (trozo + acumular + carriles("suma", f"{c_name} v", ("v.len", "v.data[{j}]"))
                     + carriles("punto", f"{c_name} a, {c_name} b", ("a.len", "a.data[{j}] * b.data[{j}]"), largos))
-        lo, hi = ("INT32_MIN", "INT32_MAX") if inner.name == "i32" else ("INT64_MIN", "INT64_MAX")
+        lo, hi = C_LIMITES[inner.name]
         def cabe(nombre):
             return (
                 f"    if (s < (__int128){lo} || s > (__int128){hi}) {{\n"
@@ -466,8 +467,19 @@ class Plantillas:
             f"    for (int32_t i = 0; i < v.len; i++) s += v.data[i];\n"
             + cabe("suma") + f"}}\n\n"
         )
-        if inner.name == "i32":
+        if C_ANCHO_EXACTO[inner.name] == "int64_t":
+            # cada producto cabe en 64 bits, y la suma de 2**31 de ellos en 128
             cuerpo = f"    for (int32_t i = 0; i < a.len; i++) s += (int64_t)a.data[i] * b.data[i];\n"
+        elif inner.name == "u64":
+            # el producto de dos u64 cabe en unsigned __int128 pero no siempre en
+            # __int128: la suma revisa que el resultado exacto quepa (tarea 3.5)
+            cuerpo = (
+                f"    for (int32_t i = 0; i < a.len; i++) {{\n"
+                f"        if (__builtin_add_overflow(s, (unsigned __int128)a.data[i] * b.data[i], &s)) {{\n"
+                f'            {pnc}("punto: la suma no cabe en 128 bits");\n'
+                f"        }}\n"
+                f"    }}\n"
+            )
         else:
             cuerpo = (
                 f"    for (int32_t i = 0; i < a.len; i++) {{\n"
@@ -499,7 +511,7 @@ class Plantillas:
                 f"    return v.data[index];\n"
                 f"}}\n"
                 f"\n"
-                if inner.name in ("i32", "i64", "f64", "f32", "bool") else ""
+                if inner.name in ESCALARES else ""
             )
             # v[i] de un Vec de structs o de Vec: un lugar. La dirección del elemento dentro del buffer, con el mismo
             # chequeo de rango; vale mientras el Vec no crezca, y el checker solo deja
@@ -569,6 +581,7 @@ class Plantillas:
             # (con tasks). scar_vbuf_soltar(NULL) no hace nada (un Vec sin push).
             + (
                 f"static void scar_vec_free_{name_part}({c_name} v) {{\n"
+                f"    if (v.cap == 0) return;\n"
                 f"    for (int32_t i = 0; i < v.len; i++) {{\n"
                 f"        scar_free((char*)v.data[i]);\n"
                 f"    }}\n"
@@ -576,6 +589,10 @@ class Plantillas:
                 f"}}"
                 if inner.name == "str" else
                 f"static void scar_vec_free_{name_part}({c_name} v) {{\n"
+                # cap == 0: un Vec sin buffer (nada que soltar) o un pedazo guardado
+                # adentro de un struct o de otro Vec (2.5c): mira un buffer que no
+                # es suyo, y sus elementos tampoco
+                f"    if (v.cap == 0) return;\n"
                 + (
                     f"    for (int32_t i = 0; i < v.len; i++) {{\n"
                     f"        {inner.name}_{'free_heap_fields' if self.has_tasks else 'free_fields'}(&v.data[i]);\n"

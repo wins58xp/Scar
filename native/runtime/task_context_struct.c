@@ -28,6 +28,10 @@ typedef struct TaskContext {
     // accept_chan(), que conocen la task destino en
     // el sitio de la llamada.
     void *injected_slots;
+    // inject_chan sobre un Task<T> sin nombre (no se sabe qué tarea es al
+    // compilar): la de esta tarea pone el canal en su lugar. 0 lo puso, 1 la
+    // tarea no acepta ese tipo, 2 ya hay uno sin recoger. NULL: no acepta nada.
+    int (*inyectar)(struct TaskContext *ctx, const char *tipo, void *chan);
     char *panic_msg;  // en el heap, de este ctx; lo libera scar_ctx_free
     struct TaskContext *parent;
     struct TaskContext **children;
@@ -59,6 +63,7 @@ typedef struct TaskContext {
     pthread_mutex_t sleep_mu;
     ScarCond sleep_cond;
     pthread_t thread;
+    char *pila;             // con SCAR_TAREAS=hilos, la pila del hilo (pilas.c); NULL si no
     sigjmp_buf panic_env;
     ScarArena arena;
     // Spawn sin join (fire-and-forget): como liberar __scar_result si nadie llama .join() sobre esta

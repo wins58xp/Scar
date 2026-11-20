@@ -21,6 +21,11 @@ static int scar_ffi_read_exact(int fd, void *buf, size_t n) {
 static int scar_ffi_write_i32(int fd, int32_t v)  { return scar_ffi_write_exact(fd, &v, 4); }
 static int scar_ffi_write_i64(int fd, int64_t v)  { return scar_ffi_write_exact(fd, &v, 8); }
 static int scar_ffi_write_f64(int fd, double v)   { return scar_ffi_write_exact(fd, &v, 8); }
+static int scar_ffi_write_f32(int fd, float v)    { return scar_ffi_write_exact(fd, &v, 4); }
+static int scar_ffi_write_u8(int fd, uint8_t v)   { return scar_ffi_write_exact(fd, &v, 1); }
+static int scar_ffi_write_u32(int fd, uint32_t v) { return scar_ffi_write_exact(fd, &v, 4); }
+static int scar_ffi_write_u64(int fd, uint64_t v) { return scar_ffi_write_exact(fd, &v, 8); }
+static int scar_ffi_write_i16(int fd, int16_t v) { return scar_ffi_write_exact(fd, &v, 2); }
 static int scar_ffi_write_bool(int fd, uint8_t v) { return scar_ffi_write_exact(fd, &v, 1); }
 static int scar_ffi_write_ptr(int fd, uint64_t v) { return scar_ffi_write_exact(fd, &v, 8); }
 static int scar_ffi_write_str(int fd, const char *s) {
@@ -48,6 +53,11 @@ static int scar_ffi_write_str(int fd, const char *s) {
 static int scar_ffi_read_i32(int fd, int32_t *out)  { return scar_ffi_read_exact(fd, out, 4); }
 static int scar_ffi_read_i64(int fd, int64_t *out)  { return scar_ffi_read_exact(fd, out, 8); }
 static int scar_ffi_read_f64(int fd, double *out)  { return scar_ffi_read_exact(fd, out, 8); }
+static int scar_ffi_read_f32(int fd, float *out)   { return scar_ffi_read_exact(fd, out, 4); }
+static int scar_ffi_read_u8(int fd, uint8_t *out)  { return scar_ffi_read_exact(fd, out, 1); }
+static int scar_ffi_read_u32(int fd, uint32_t *out) { return scar_ffi_read_exact(fd, out, 4); }
+static int scar_ffi_read_u64(int fd, uint64_t *out) { return scar_ffi_read_exact(fd, out, 8); }
+static int scar_ffi_read_i16(int fd, int16_t *out) { return scar_ffi_read_exact(fd, out, 2); }
 static int scar_ffi_read_bool(int fd, uint8_t *out) { return scar_ffi_read_exact(fd, out, 1); }
 static int scar_ffi_read_ptr(int fd, uint64_t *out) { return scar_ffi_read_exact(fd, out, 8); }
 static int scar_ffi_read_str(int fd, char **out, uint8_t *is_null) {

@@ -1,10 +1,10 @@
 # Apéndice A. Funciones incorporadas
 
-Estas son las funciones que el lenguaje trae sin declarar nada: 38, las mismas
+Estas son las funciones que el lenguaje trae sin declarar nada: 46, las mismas
 en el intérprete y en el binario. Los métodos (de `Vec`, `Map`, `str`, `Chan`,
 `File`…) no están acá: se describen en el capítulo de cada tipo.
 
-**Los nombres están reservados.** Ninguno de estos 38 nombres puede usarse para
+**Los nombres están reservados.** Ninguno de estos 46 nombres puede usarse para
 algo que se pueda llamar: una `fn`, una `task`, una `extern fn`, o un parámetro o
 variable de tipo `fn`. El compilador lo rechaza:
 
@@ -45,10 +45,15 @@ lenguaje, que acepta cualquier cantidad de valores de cualquier tipo.
 | `floor(x: f64) -> f64` | redondea hacia abajo: `floor(-2.5)` es `-3.0` |
 | `abs(x) -> el tipo de x` | valor absoluto; de un entero es exacto, y el del entero más chico (que no tiene positivo) es un panic |
 | `min(a, b)`, `max(a, b)` | el menor / mayor; el tipo sigue la regla de una suma (`i32` con `i64` da `i64`); con NaN devuelven el primero |
-| `to_i32(x) -> i32` | de un `f64` o un `f32`, trunca hacia cero (`3.99` → 3, `-3.99` → -3); de un `i64`, lo deja igual; `nan` o un valor que no entra en `i32` es un panic |
-| `to_i64(x) -> i64` | de un `i32`, siempre cabe; de un `f64` o un `f32`, trunca hacia cero; `nan` o un valor que no entra es un panic |
-| `to_f64(n) -> f64` | convierte un `i32`, un `i64` o un `f32` a `f64` (un `i64` de más de 2^53 puede perder precisión) |
+| `to_i32(x) -> i32` | de un `f64` o un `f32`, trunca hacia cero (`3.99` → 3, `-3.99` → -3); de un `i64`, un `u32` o un `u64`, lo deja igual si cabe; de un `u8` o un `i16`, siempre cabe; `nan` o un valor que no entra en `i32` es un panic |
+| `to_i64(x) -> i64` | de un `i32`, un `i16`, un `u8` o un `u32`, siempre cabe; de un `u64`, lo deja igual si cabe; de un `f64` o un `f32`, trunca hacia cero; `nan` o un valor que no entra es un panic |
+| `to_f64(n) -> f64` | convierte un `i32`, un `i64`, un `i16`, un `u8`, un `u32`, un `u64` o un `f32` a `f64` (un `i64` o un `u64` de más de 2^53 puede perder precisión) |
 | `to_f32(x) -> f32` | redondea un `f64` al `f32` más cercano (lo que no cabe es `inf`), o convierte un entero |
+| `to_u8(x) -> u8` | de un entero, lo deja igual si está entre 0 y 255; de un `f64` o un `f32`, trunca hacia cero (`99.9` → 99); lo que no cabe, o `nan`, es un panic |
+| `to_u32(x) -> u32` | lo mismo que `to_u8`, de 0 a 4.294.967.295 |
+| `to_u64(x) -> u64` | lo mismo que `to_u8`, de 0 a 18.446.744.073.709.551.615 |
+| `to_i16(x) -> i16` | lo mismo que `to_u8`, de -32.768 a 32.767 |
+| `suma_ciclica(a, b)`, `resta_ciclica(a, b)`, `mult_ciclica(a, b)` | la cuenta de dos enteros sin signo (`u8`, `u32` o `u64`; con dos de distinto tipo, el más ancho: un `u8` con un `u32` da `u32`) dando la vuelta en vez del panic de desborde: en `u8`, `suma_ciclica(200, 100)` es 44 y `resta_ciclica(3, 5)` es 254 |
 | `rand() -> f64` | número al azar en [0, 1), el mismo generador en los dos backends |
 | `seed(n: i32)` | fija la semilla de `rand()` de la tarea actual (las tareas que cree después derivan la suya de esta) |
 
@@ -61,7 +66,7 @@ Todas siguen las reglas de `f64` (IEEE 754): un resultado fuera de rango es
 | Función | Qué hace |
 |---|---|
 | `len(s: str) -> i32` | cantidad de caracteres (no de bytes): `len("ñandú")` es 5 |
-| `a_texto(x) -> str` | un `i32`, `i64`, `f64`, `f32`, `bool` o `str` como texto, igual que lo imprime `print`: `a_texto(2.5)` es `"2.5"` |
+| `a_texto(x) -> str` | un `i32`, `i64`, `u8`, `u32`, `f64`, `f32`, `bool` o `str` como texto, igual que lo imprime `print`: `a_texto(2.5)` es `"2.5"` |
 | `chr(n: i32) -> str` | el carácter de código Unicode `n`: `chr(8364)` es `"€"` (§7.3) |
 | `ord(s: str) -> i32` | el código del primer carácter: `ord("€")` es 8364 |
 | `int(s: str) -> Result<i32>` | texto a entero: `Ok(42)`, o `Err(...)` si no es un número; acepta espacios al principio y al final y un signo; fuera de `i32` es `Err` |
@@ -98,6 +103,6 @@ conocidos se arma más corto con un literal: `[1, 2, 3]` (§6.1).
 |---|---|
 | `file_open(ruta: str, modo: str) -> Result<File>` | abre un archivo (§11.1) |
 | `tcp_connect(host: str, puerto: i32) -> Result<Socket>` | conexión TCP (§11.3) |
-| `tcp_listen(puerto: i32) -> Result<Listener>` | escucha en un puerto TCP (§11.3) |
+| `tcp_listen(puerto: i32) -> Result<Listener>` | escucha en un puerto TCP; con 0, en uno libre que elige el sistema, y `listener.puerto()` dice cuál (§11.3) |
 | `pipe_new() -> Pipe` | un pipe del sistema operativo, con un extremo para escribir y otro para leer |
 | `read_pipe(fd: i32) -> Result<str>` | lee de un pipe, con su propio límite de tiempo (§11.4); un descriptor que el programa no tiene es un panic |

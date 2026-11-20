@@ -20,6 +20,23 @@ from .comun import (
 )
 
 
+
+def _tarea_sin_nombre(ty):
+    """El tipo con cada Task<T, nombre> de adentro como Task<T>: el nombre de la
+    tarea no cambia nada en C (todo handle es un TaskHandle)."""
+    if not ty.args:
+        return ty
+    args = [_tarea_sin_nombre(a) for a in ty.args]
+    if ty.name == TASK_MARK:
+        args = args[:1]
+    if args == list(ty.args):
+        return ty
+    nuevo = TypeAnn(ty.name, args)
+    for k, v in vars(ty).items():
+        if k not in ("name", "args"):
+            setattr(nuevo, k, v)
+    return nuevo
+
 class TiposC:
     # ---- soporte de tipos ----
     def _canon(self, ty):
@@ -139,7 +156,7 @@ class TiposC:
                 or inner.name in (FILE_MARK, SOCKET_MARK, LISTENER_MARK, PIPE_MARK)
                 or (inner.name == FN_MARK and self._type_supported(inner))
                 # Vec<Task<T, t>> (los handles de varias tareas)
-                or (inner.name == TASK_MARK and len(inner.args) >= 2)
+                or (inner.name == TASK_MARK and len(inner.args) >= 1)
                 # Vec<Vec<T>>, a cualquier profundidad
                 or (inner.name == VEC_MARK and self._type_supported(inner))
                 # Vec<Option<T>> y Vec<Map<K,V>>
@@ -158,7 +175,7 @@ class TiposC:
                 # Map<K, Pipe>
                 or (val_ty.name in (VEC_MARK, MAP_MARK, "Option", "Result", FN_MARK) and self._type_supported(val_ty))
                 or val_ty.name == PIPE_MARK
-                or (val_ty.name == TASK_MARK and len(val_ty.args) >= 2)  # Map<K, Task<T, t>>
+                or (val_ty.name == TASK_MARK and len(val_ty.args) >= 1)  # Map<K, Task<T, t>>
             )
             return key_ty.name in C_TYPE and val_ok
         if ty.name == FN_MARK:
@@ -176,6 +193,10 @@ class TiposC:
         módulo)."""
         if ty.name in C_TYPE:
             return C_TYPE[ty.name]
+        # En C todo handle de tarea es igual: Option<Task<i32, a>> y
+        # Option<Task<i32, b>> son el mismo tipo de C, y se generan una vez
+        # (si no, el typedef Option_Task_i32 salía dos veces).
+        ty = _tarea_sin_nombre(ty)
         if ty.name in self.generic_structs:
             # struct genérico: c_type() solo ve su instancia concreta ('Caja_i32'),
             # que es un puntero como cualquier struct
@@ -238,10 +259,10 @@ class TiposC:
         if ty.name == FN_MARK:
             # por su firma (Fn_i32_i32), como el typedef de _fn_c_type
             return self._fn_c_type(ty)
-        if ty.name == TASK_MARK and len(ty.args) >= 2:
-            # Task<T, t>: dos tareas distintas son dos tipos distintos (el checker no
-            # mezcla Task<i32, a> con Task<i32, b>), así que el nombre lleva la tarea
-            return f"Task_{ty.args[1].name}"
+        if ty.name == TASK_MARK and ty.args:
+            # en C todo handle es un TaskHandle: el nombre va por la T (un
+            # Vec<Task<i32, a>> y un Vec<Task<i32>> son el mismo Vec de C)
+            return f"Task_{self._mangled_name(ty.args[0])}"
         return ty.name
 
     def _generic_c_type(self, ty: TypeAnn) -> str:
@@ -865,7 +886,7 @@ class TiposC:
         inner_is_handle = inner.name in (FILE_MARK, SOCKET_MARK, LISTENER_MARK, PIPE_MARK, FN_MARK)
         # Task<T, t>: el handle apunta al contexto de la tarea, que libera la
         # región madre (con o sin join)
-        if inner.name == TASK_MARK and len(inner.args) >= 2:
+        if inner.name == TASK_MARK and len(inner.args) >= 1:
             inner_is_handle = True
         # Vec<Vec<T>>: el de adentro va por valor en el arreglo y el de afuera es
         # su dueño (free lo libera, get() lo clona, pop()/replace() lo entregan,
@@ -1035,7 +1056,7 @@ class TiposC:
         val_opt_dueno = val_is_opt and self._campo_compuesto_con_dueno(val_ty)
         # una fn o un Pipe como valor (nada que liberar)
         val_es_handle = val_ty.name in (FN_MARK, PIPE_MARK) or (
-            val_ty.name == TASK_MARK and len(val_ty.args) >= 2)  # Map<K, Task<T, t>>
+            val_ty.name == TASK_MARK and len(val_ty.args) >= 1)  # Map<K, Task<T, t>>
         if (val_ty.name not in C_TYPE and not val_is_struct and not val_is_chan and not val_is_vec
                 and not val_is_map and not val_is_opt and not val_es_handle):
             raise CodegenError(
@@ -1063,6 +1084,10 @@ class TiposC:
         hash_fn = {
             "i32": "scar_hash_i32",
             "i64": "scar_hash_i64",
+            "u8": "scar_hash_i32",   # un u8 es exactamente un i32
+            "u32": "scar_hash_i64",  # un u32 es exactamente un i64 (no siempre un i32)
+            "i16": "scar_hash_i32",  # un i16 cabe entero en un i32
+            "u64": "scar_hash_i64",  # los mismos 64 bits (scar_hash_i64 los vuelve a uint64_t)
             "f64": "scar_hash_f64",
             "f32": "scar_hash_f64",  # un f32 es exactamente un f64
             "str": "scar_hash_str",

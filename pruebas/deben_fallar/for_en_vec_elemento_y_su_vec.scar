@@ -1,0 +1,13 @@
+# espera: no puede cambiar de largo mientras se recorre con 'for c in red'
+struct Capa {
+    pesos: Vec<f64>
+}
+fn crecer(c: Capa, red: Vec<Capa>) {
+    red.push(Capa { pesos: [c.pesos[0]] })
+}
+fn main() {
+    let red: Vec<Capa> = [Capa { pesos: [1.0, 2.0] }]
+    for c in red {
+        crecer(c, red)
+    }
+}

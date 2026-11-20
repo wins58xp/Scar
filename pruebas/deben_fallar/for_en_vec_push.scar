@@ -1,0 +1,7 @@
+# espera: no puede cambiar de largo mientras se recorre con 'for x in v'
+fn main() {
+    let mut v: Vec<i32> = [1, 2]
+    for x in v {
+        v.push(x)
+    }
+}

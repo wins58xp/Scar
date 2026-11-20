@@ -1,4 +1,11 @@
+// Un puerto TCP va de 0 a 65535 (0 en tcp_listen: que el sistema elija uno
+// libre; scar_listener_puerto dice cuál). Fuera de eso es un Err, igual que en
+// el intérprete (antes el (uint16_t) daba la vuelta: 70000 escuchaba en 4464).
+#define SCAR_PUERTO_FUERA "el puerto va de 0 a 65535"
+
 static Result_Socket scar_tcp_connect(const char* host, int32_t port) {
+    if (port < 0 || port > 65535)
+        return Result_Socket_Err(scar_aprintf("no se pudo conectar a %s:%d: " SCAR_PUERTO_FUERA, host, port));
     char __scar_port_buf[16];
     snprintf(__scar_port_buf, sizeof(__scar_port_buf), "%d", port);
     struct addrinfo __scar_hints, *__scar_res;
@@ -27,6 +34,8 @@ static Result_Socket scar_tcp_connect(const char* host, int32_t port) {
 }
 
 static Result_Listener scar_tcp_listen(int32_t port) {
+    if (port < 0 || port > 65535)
+        return Result_Listener_Err(scar_aprintf("no se pudo escuchar en el puerto %d: " SCAR_PUERTO_FUERA, port));
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         char* buf = scar_aprintf("no se pudo escuchar en el puerto %d: %s", port, strerror(errno));
@@ -75,4 +84,15 @@ static void scar_socket_close(ScarSocket __scar_h) {
 static void scar_listener_close(ScarListener __scar_h) {
     int sock;
     if (scar_h_soltar(__scar_h, NULL, &sock)) close(sock);
+}
+
+// l.puerto(): el puerto en que escucha (el que eligió el sistema con
+// tcp_listen(0)); -1 si ya se cerró
+static int32_t scar_listener_puerto(ScarListener __scar_h) {
+    int sock;
+    if (!scar_h_ver(__scar_h, NULL, &sock)) return -1;
+    struct sockaddr_in __scar_addr;
+    socklen_t __scar_largo = sizeof(__scar_addr);
+    if (getsockname(sock, (struct sockaddr*)&__scar_addr, &__scar_largo) != 0) return -1;
+    return (int32_t)ntohs(__scar_addr.sin_port);
 }

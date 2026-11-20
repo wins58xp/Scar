@@ -1,0 +1,13 @@
+# espera: 'saluda()' no devuelve nada: no se puede usar como valor
+fn saluda() {
+    print("hola")
+}
+
+fn dos_veces() {
+    saluda()
+    return saluda()
+}
+
+fn main() {
+    dos_veces()
+}

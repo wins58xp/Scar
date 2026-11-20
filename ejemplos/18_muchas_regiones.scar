@@ -57,7 +57,7 @@ fn main() {
     let pasos = 60
     let salida: Chan<Respuesta> = chan_new()
     let mut canales: Vec<Chan<Muestra>> = vec_new()
-    let mut tareas: Vec<Task<i32, region>> = vec_new()
+    let mut tareas: Vec<Task<i32>> = vec_new()
     for r in 0..regiones {
         let e: Chan<Muestra> = chan_new(2)
         tareas.push(spawn region(r, e, salida))

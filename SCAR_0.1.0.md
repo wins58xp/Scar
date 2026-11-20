@@ -7,11 +7,14 @@
 >   usa como lugar (`red[i].campo`, `m[i][j]`). `get(i)` sigue dando un `Option`.
 > - **"Bounds de tipo: el único es `Numeric` (`i32`, `i64`, `f64`)":** `Numeric`
 >   incluye también `f32`. Bounds propios, todavía no.
-> - **Una lista de tareas sigue llevando el nombre de la tarea en su tipo**, y
->   **`join()` sigue terminando en panic** si nada avanza en 8 segundos.
+> - **Una lista de tareas ya no lleva el nombre de la tarea en su tipo:**
+>   `Vec<Task<i32>>` acepta tareas de distintas clases. **`join()` sigue terminando en
+>   panic** si nada avanza en 8 segundos.
 > - **Desde la 0.2.0, cada tarea es liviana** (muchas en pocos hilos); en Windows cada
 >   tarea sigue siendo un hilo.
 > - **`f32` todavía no cruza a C** en una `extern fn`.
+> - **"Structs genéricos en el compilador: algunos tipos de campo no compilan a
+>   binario"**: ya compilan (`Vec<Hoja<T>>`, `Map<str, Vec<T>>`, `Option<T>`...).
 >
 > Lo que trae cada versión está en `CHANGELOG.md`.
 

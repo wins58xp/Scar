@@ -1,18 +1,18 @@
-static Result_i32 scar_socket_write_bytes(ScarSocket __scar_h, @@VEC@@ v) {
+static Result_i32 scar_socket_write_bytes@@SUF@@(ScarSocket __scar_h, @@VEC@@ v) {
     int sock;
     if (!scar_h_ver(__scar_h, NULL, &sock)) return Result_i32_Err(scar_aprintf("socket cerrado"));
-    unsigned char *b = scar_bytes_de_vec(v);
+    unsigned char *b = @@BYTES@@;
     size_t enviados = 0;
     while (enviados < (size_t)v.len) {
         ssize_t k = SCAR_BLOQUEANDO(send(sock, b + enviados, (size_t)v.len - enviados, MSG_NOSIGNAL));
         if (k < 0) {
-            free(b);
+            @@SOLTAR@@
             char* err = scar_aprintf("error de escritura: %s", strerror(errno));
             return Result_i32_Err(err);
         }
         enviados += (size_t)k;
     }
-    free(b);
+    @@SOLTAR@@
     return Result_i32_Ok(v.len);
 }
 

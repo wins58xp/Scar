@@ -1,0 +1,14 @@
+# espera: no se puede usar como valor
+struct Capa {
+    w: Vec<f64>
+    n: i32
+}
+fn capa(params: Vec<f64>, n: i32) -> Capa {
+    return Capa { w: params[0..n], n: n }
+}
+fn main() {
+    let p = [1.0, 2.0, 3.0]
+    let f = capa
+    let ch: Chan<Capa> = chan_new()
+    ch.send(capa(p, 1))
+}

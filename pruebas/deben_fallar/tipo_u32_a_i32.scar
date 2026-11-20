@@ -1,0 +1,7 @@
+# espera: convierte con to_i32(...), que es un panic si el valor no cabe
+# Un u32 no pasa solo a i32: podría no caber.
+fn main() {
+    let a: u32 = 3000000000
+    let n: i32 = a
+    print(n)
+}

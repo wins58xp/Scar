@@ -71,7 +71,7 @@ fn main() {
     let pasos = 60
     let salida: Chan<Respuesta> = chan_new()
     let mut canales: Vec<Chan<Muestra>> = vec_new()
-    let mut tareas: Vec<Task<i32, region>> = vec_new()
+    let mut tareas: Vec<Task<i32>> = vec_new()
     for r in 0..regiones {
         let e: Chan<Muestra> = chan_new(2)
         tareas.push(spawn region(r, e, salida))
@@ -179,13 +179,9 @@ que aprende:
 Antes de esas tres, la misma red de 256 x 256 tardaba 109 µs por muestra y cada región
 ocupaba 1,3 MB.
 
-Cada tarea viva ocupa dos zonas de memoria (su pila y una página de guarda), y
-Linux limita cuántas puede tener un programa con `vm.max_map_count`. Si una
-corrida grande termina con `no hay memoria para su pila`, súbelo:
-
-```
-sudo sysctl vm.max_map_count=1048576
-```
+Las pilas de las tareas se piden de a muchas juntas, así que 100.000 regiones
+vivas caben sin tocar nada del sistema: Linux las ve como unas pocas zonas de
+memoria, no como dos por tarea.
 
 ## 18.4 Tareas livianas o hilos
 

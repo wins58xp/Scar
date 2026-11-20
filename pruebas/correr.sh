@@ -20,6 +20,8 @@ raiz=$(dirname "$(dirname "$(readlink -f "$0")")")
 cd "$raiz" || exit 1
 filtro=${1:-}
 export SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy SCAR_SDL_MAX_FRAMES=10
+# sin D-Bus: SDL_Init no se conecta al escritorio (ver scripts/ci.py)
+export DBUS_SESSION_BUS_ADDRESS=disabled: DBUS_SYSTEM_BUS_ADDRESS=disabled:
 
 bien=0; mal=0; saltadas=0
 tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT

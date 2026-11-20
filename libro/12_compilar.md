@@ -93,7 +93,7 @@ Y estas se le dan al binario, al correrlo:
 |------------------------|----------|
 | `SCAR_TAREAS=hilos`    | cada tarea en su propio hilo del sistema, como antes de 0.2.0 |
 | `SCAR_TAREAS_HILOS=n`  | cuántos hilos se reparten las tareas (por omisión, uno por núcleo) |
-| `SCAR_PILA_TAREA_KB=n` | el tamaño de la pila de cada tarea, en kB |
+| `SCAR_PILA_KB=n`       | el tamaño de la pila de `main` y de cada tarea, en kB (por omisión 8 MB, o `ulimit -s` si es más) |
 
 ```
 SCAR_CC_NATIVE=0 scar build primos.scar -o primos

@@ -8,6 +8,8 @@ from parser import (marca_new_generico,
     StructLit, ArrayLit, TryExpr, OkExpr, ErrExpr, SomeExpr, NoneExpr, SpawnExpr,
     MethodCall, Parser,
 )
+from types_ import ENTEROS, ESCALARES, ESCALARES_STR, NUMERICOS  # familias de tipos (types_.py)
+from types_ import SIN_SIGNO, CON_SIGNO_CHICOS, INT_BITS, se_amplia  # tareas 3.3 a 3.6
 from types_ import (
     TypeAnn, T_I32, T_I64, T_F32, T_F64, T_STR, T_BOOL, T_VOID, int_literal_type,
     numeric_result,
@@ -19,8 +21,13 @@ from .comun import (
     _SIGUE,
     BIN_OPS, BITS_OPS, BOOL_OPS, BUILTIN_SIGS, C_BOOL_OP, CHAN_MARK, CodegenError,
     COMPARISON_OPS, FILE_MARK, FN_MARK, _LIBM_C, LISTENER_MARK, literal_c, MAP_MARK,
-    PIPE_MARK, SOCKET_MARK, TASK_MARK, VEC_MARK,
+    PIPE_MARK, SOCKET_MARK, TASK_MARK, VEC_MARK, C_TYPE,
 )
+
+# to_u8, to_u32: la conversión a cada entero sin signo
+_A_SIN_SIGNO = {f"to_{t}": t for t in SIN_SIGNO + CON_SIGNO_CHICOS}  # (y to_i16)
+# todas las conversiones entre números (to_i32, to_i64, to_u8, ...)
+_CONVERSIONES_C = {f"to_{t}" for t in NUMERICOS}
 
 
 class Expresiones:
@@ -122,6 +129,8 @@ class Expresiones:
             return T_F32  # un literal que el checker marcó como f32
         if isinstance(expr.value, float):
             return T_F64
+        if expr.tipo_int in SIN_SIGNO + CON_SIGNO_CHICOS:
+            return TypeAnn(expr.tipo_int)  # `let b: u8 = 200`: el checker lo marcó u8
         return int_literal_type(expr.value) or T_I64
 
     def _infer_str_lit(self, expr, env, expected_ty):
@@ -177,6 +186,8 @@ class Expresiones:
         if expr.lit_f32 is not None:
             return T_F32
         if expr.literal_plegado is not None:
+            if expr.tipo_int in SIN_SIGNO + CON_SIGNO_CHICOS:
+                return TypeAnn(expr.tipo_int)
             return int_literal_type(expr.literal_plegado) or T_I64
         ty = self.infer(expr.expr, env)
         if expr.op == "not":
@@ -221,6 +232,10 @@ class Expresiones:
             if expr.callee.name == "abs":
                 return tys[0]
             return numeric_result(tys[0], tys[1]) or T_F64
+        if isinstance(expr.callee, Ident) and expr.callee.name in ("suma_ciclica", "resta_ciclica", "mult_ciclica") \
+                and getattr(expr, "tipo_int", None):
+            # el tipo sin signo de la cuenta lo anotó el checker (u8, u32...)
+            return TypeAnn(expr.tipo_int)
         if isinstance(expr.callee, Ident) and expr.callee.name in BUILTIN_SIGS:
             return BUILTIN_SIGS[expr.callee.name][1]
         if isinstance(expr.callee, Ident) and expr.callee.name in self.extern_sigs:
@@ -236,7 +251,8 @@ class Expresiones:
         return self.fn_sigs[expr.callee.name][1]
 
     def _infer_array_lit(self, expr, env, expected_ty):
-        return TypeAnn(VEC_MARK, [expr.tipo_elem])
+        # adentro de una fn genérica, el tipo de los elementos puede nombrar su T
+        return TypeAnn(VEC_MARK, [self._canon(expr.tipo_elem)])
 
     def _infer_struct_lit(self, expr, env, expected_ty):
         if expr.name in self.generic_structs:
@@ -320,8 +336,9 @@ class Expresiones:
         if obj_ty.name == FILE_MARK:
             if expr.method == "read_all":
                 return TypeAnn("Result", [T_STR])
-            if expr.method == "read_bytes":
-                return TypeAnn("Result", [TypeAnn(VEC_MARK, [T_I32])])
+            if expr.method in ("read_bytes", "read_u8"):
+                elem = "u8" if expr.method == "read_u8" else "i32"
+                return TypeAnn("Result", [TypeAnn(VEC_MARK, [TypeAnn(elem)])])
             if expr.method in ("write", "write_bytes"):
                 return TypeAnn("Result", [T_I32])
             if expr.method == "close":
@@ -330,8 +347,9 @@ class Expresiones:
         if obj_ty.name == SOCKET_MARK:
             if expr.method == "read":
                 return TypeAnn("Result", [T_STR])
-            if expr.method == "read_bytes":
-                return TypeAnn("Result", [TypeAnn(VEC_MARK, [T_I32])])
+            if expr.method in ("read_bytes", "read_u8"):
+                elem = "u8" if expr.method == "read_u8" else "i32"
+                return TypeAnn("Result", [TypeAnn(VEC_MARK, [TypeAnn(elem)])])
             if expr.method in ("write", "write_bytes"):
                 return TypeAnn("Result", [T_I32])
             if expr.method == "close":
@@ -342,6 +360,8 @@ class Expresiones:
                 return TypeAnn("Result", [TypeAnn(SOCKET_MARK)])
             if expr.method == "close":
                 return T_VOID
+            if expr.method == "puerto":
+                return T_I32
             raise CodegenError(f"Listener no tiene método '.{expr.method}()' en el backend de C")
         if obj_ty.name in ("Result", "Option"):
             if expr.method in ("is_ok", "is_err", "is_some", "is_none"):
@@ -394,6 +414,8 @@ class Expresiones:
             return T_I64
         if expr.promover_f64:
             return T_F64
+        if expr.promover_a is not None:
+            return TypeAnn(expr.promover_a)   # u8 -> i32/i64/f32/f64
         return self.infer(expr, env, expected_ty=expected_ty)
 
     @staticmethod
@@ -403,7 +425,8 @@ class Expresiones:
         return f"({v.hex()}f)"
 
     def _literal_entero_c(self, v):
-        """Un literal entero de C con el tipo de SCAR (i32 si cabe, si no i64). Los
+        """Un literal entero de C con el tipo de SCAR (i32 si cabe, si no i64, y si
+        tampoco, u64). Los
         mínimos se escriben con la macro: `-2147483648` en C es el long
         2147483648 negado."""
         if v == -2147483648:
@@ -412,6 +435,10 @@ class Expresiones:
             return "INT64_MIN"
         if int_literal_type(v) == T_I32:
             return repr(v)
+        if v > 9223372036854775807:
+            # un u64 que no cabe en un i64 (tarea 3.5): sin el sufijo, gcc avisa
+            # que el número es tan grande que queda sin signo
+            return f"UINT64_C({v})"
         return f"INT64_C({v})"
 
     def _gen_bits_i64(self, expr, l, r):
@@ -427,6 +454,23 @@ class Expresiones:
                 return f"((int64_t)((uint64_t)({l}) << {k}))"
             return f"scar_lsar_k({l}, {k})"
         return f"{'scar_lshl' if expr.op == '<<' else 'scar_lshr'}({l}, {r})"
+
+    def _gen_bits_sin_signo(self, expr, l, r, tipo):
+        """Operadores de bits con resultado sin signo (u8, u32): & | ^ de dos del
+        mismo tipo quedan en rango; `<<` descarta los bits que salen por arriba y
+        `>>` rellena con ceros; un corrimiento fuera de 0..bits-1 es un panic (con
+        un literal en rango, sin chequeo)."""
+        ct = C_TYPE[tipo]
+        if expr.op in ("&", "|", "^"):
+            return f"(({ct})(({l}) {expr.op} ({r})))"
+        k = expr.right.value if isinstance(expr.right, NumLit) else None
+        if isinstance(k, int) and not isinstance(k, bool) and 0 <= k < INT_BITS[tipo]:
+            # u8 se corre en unsigned (32 bits) y u32 en uint64_t, así los bits que
+            # salen por arriba se descartan al volver al tipo, sin desbordar
+            ancho = "unsigned" if tipo == "u8" else "uint64_t"
+            return f"(({ct})(({ancho})({l}) {expr.op} {k}))"
+        self.sin_signo_usados.add(tipo)
+        return f"scar_{tipo}{'shl' if expr.op == '<<' else 'shr'}({l}, {r})"
 
     def _gen_bits(self, expr, l, r):
         """Operadores de bits sobre i32, como el intérprete (_bits): 32 bits en
@@ -612,11 +656,14 @@ class Expresiones:
         code = self.gen_expr(expr.expr, env, out, pad)
         if expr.op == "-" and not isinstance(expr.expr, NumLit):
             neg_ty = self.infer(expr.expr, env).name
-            if neg_ty in ("i32", "i64"):
+            if neg_ty in ENTEROS:
                 # -INT32_MIN no entra en un i32 (UB en C), ni -INT64_MIN en un i64: panic
                 if neg_ty == "i64":
                     self.needs_i64 = True
                     return f"scar_lneg({code})"
+                if neg_ty in CON_SIGNO_CHICOS:
+                    self.con_signo_usados.add(neg_ty)
+                    return f"scar_{neg_ty}neg({code})"
                 self.needs_iarith = True
                 return f"scar_ineg({code})"
         c_op = "!" if expr.op == "not" else expr.op
@@ -696,6 +743,16 @@ class Expresiones:
         if expr.op in BITS_OPS:
             if self.infer(expr, env).name == "i64":
                 return self._gen_bits_i64(expr, l, r)
+            if self.infer(expr, env).name in SIN_SIGNO:
+                return self._gen_bits_sin_signo(expr, l, r, self.infer(expr, env).name)
+            if self.infer(expr, env).name in CON_SIGNO_CHICOS:
+                # i16: & | ^ de dos i16 quedan en rango; los corrimientos, con su
+                # helper (<< descarta los bits de arriba, >> conserva el signo)
+                tipo = self.infer(expr, env).name
+                if expr.op in ("&", "|", "^"):
+                    return f"(({C_TYPE[tipo]})(({l}) {expr.op} ({r})))"
+                self.con_signo_usados.add(tipo)
+                return f"scar_{tipo}{'shl' if expr.op == '<<' else 'shr'}({l}, {r})"
             return self._gen_bits(expr, l, r)
         if expr.op == "+" and self.infer(expr, env).name == "str":
             # `+` de str: scar_str_concat() reserva un texto nuevo (en C, l + r
@@ -724,6 +781,18 @@ class Expresiones:
             fn = {"+": "scar_ladd", "-": "scar_lsub", "*": "scar_lmul",
                   "/": "scar_ldiv", "%": "scar_lmod"}[expr.op]
             return f"{fn}({l}, {r})"
+        if int_kind in SIN_SIGNO:
+            # u8 (0..255), u32: panic al desbordar, también al restar de más, y al
+            # dividir por cero; un operando de otro tipo llega ya ampliado (u8 + u32
+            # es u32, con el u8 marcado promover_a)
+            self.sin_signo_usados.add(int_kind)
+            fn = {"+": "add", "-": "sub", "*": "mul", "/": "div", "%": "mod"}[expr.op]
+            return f"scar_{int_kind}{fn}({l}, {r})"
+        if int_kind in CON_SIGNO_CHICOS:
+            # i16 (tarea 3.6): las reglas de i32 en su rango (también el mínimo / -1)
+            self.con_signo_usados.add(int_kind)
+            fn = {"+": "add", "-": "sub", "*": "mul", "/": "div", "%": "mod"}[expr.op]
+            return f"scar_{int_kind}{fn}({l}, {r})"
         if expr.op in ("+", "-", "*") and int_kind == "i32":
             # el overflow de i32 es un panic en los dos backends; en C sería
             # comportamiento indefinido
@@ -808,6 +877,11 @@ class Expresiones:
                 # BUILTIN_SIGS: con un f64, el temporal de un argumento i64 que se
                 # adelanta perdía dígitos (fuzzer)
                 param_tys = [self.infer(expr, env)] * len(expr.args)
+            elif name in ("suma_ciclica", "resta_ciclica", "mult_ciclica") or name in _CONVERSIONES_C:
+                # lo mismo con las cíclicas (su firma dice u8 y pueden ser de u32)
+                # y con las conversiones (su firma dice f64): el temporal de un
+                # argumento es de su propio tipo, que es lo que llega a la cuenta
+                param_tys = [self.infer(a, env) for a in expr.args]
             elif name in BUILTIN_SIGS:
                 param_tys = BUILTIN_SIGS[name][0]
             elif name in self.generic_fns:
@@ -934,7 +1008,7 @@ class Expresiones:
         if tarde:
             self._prestar_tarde[id(expr)] = tarde
         if name not in self.extern_sigs or all(
-                t.name in ("i32", "i64", "f64", "bool", "str") for t in self.extern_sigs[name][0]):
+                t.name in ESCALARES_STR for t in self.extern_sigs[name][0]):
             # el tipo del temporal es el del parámetro (un `None` o un literal no
             # dicen el suyo: `f(None, None)` con Option<str>)
             args_code = self._secuenciar(expr.args, args_code, env, out, pad,
@@ -959,6 +1033,14 @@ class Expresiones:
             self.needs_abs_min_max = True
             if ty == "f32":
                 self.needs_min_max_f32 = True
+            if ty in SIN_SIGNO:
+                self.min_max_sin_signo.add(ty)
+            if ty in CON_SIGNO_CHICOS:
+                # el abs (panic con el mínimo) viene con la plantilla de i16
+                if name == "abs":
+                    self.con_signo_usados.add(ty)
+                else:
+                    self.min_max_con_signo.add(ty)
             if name == "abs":
                 return f"scar_abs_{ty}({args_code[0]})"
             return f"scar_{name}_{ty}({args_code[0]}, {args_code[1]})"
@@ -977,10 +1059,12 @@ class Expresiones:
                 self.needs_fmt_f32 = True
                 return f"scar_fmt_f32({args_code[0]})"
             self.needs_str_concat = True
-            if t == "i32":
+            if t in ("i32", "u8", "i16"):
                 return f'scar_aprintf("%d", (int)({args_code[0]}))'
-            if t == "i64":
+            if t in ("i64", "u32"):
                 return f'scar_aprintf("%lld", (long long)({args_code[0]}))'
+            if t == "u64":
+                return f'scar_aprintf("%llu", (unsigned long long)({args_code[0]}))'
             if t == "bool":
                 return f'scar_str_concat(({args_code[0]}) ? "true" : "false", "")'
             return f'scar_str_concat({args_code[0]}, "")'
@@ -997,15 +1081,48 @@ class Expresiones:
             if name == "to_i32":
                 if origen == "i32":
                     return f"({args_code[0]})"
-                if origen == "i64":
+                if origen in ("u8", "i16"):
+                    return f"((int32_t)({args_code[0]}))"
+                if origen == "u64":
+                    # sin pasar por int64_t, donde un u64 grande sería negativo
+                    self.sin_signo_usados.add("u64")
+                    return f"scar_u64_a_i32({args_code[0]})"
+                if origen in ("i64", "u32"):
+                    # un u32 puede no caber en un i32: mismo chequeo que un i64
                     self.needs_i64 = True
-                    return f"scar_i32_desde_i64({args_code[0]})"
+                    return f"scar_i32_desde_i64((int64_t)({args_code[0]}))" if origen == "u32" \
+                        else f"scar_i32_desde_i64({args_code[0]})"
                 self.needs_to_i32 = True
                 return f"scar_to_i32({args_code[0]})"
-            if origen in ("i32", "i64"):
+            if origen == "u64":
+                # el único entero que puede no caber en un i64 (tarea 3.5)
+                self.sin_signo_usados.add("u64")
+                return f"scar_u64_a_i64({args_code[0]})"
+            if origen in ENTEROS:
                 return f"((int64_t)({args_code[0]}))"
             self.needs_i64 = True
             return f"scar_to_i64({args_code[0]})"
+        if name in _A_SIN_SIGNO:
+            # to_u8 / to_u32 / to_u64 / to_i16: de un entero que no cabe, o un decimal NaN o fuera de
+            # rango (trunca hacia cero), un panic
+            destino = _A_SIN_SIGNO[name]
+            origen = self.infer(expr.args[0], env).name
+            if origen == destino or se_amplia(origen, destino):
+                return f"(({C_TYPE[destino]})({args_code[0]}))"
+            (self.con_signo_usados if destino in CON_SIGNO_CHICOS else self.sin_signo_usados).add(destino)
+            if origen == "u64":
+                # de un u64 a uno más angosto: sin pasar por int64_t
+                return f"scar_{destino}_desde_u64({args_code[0]})"
+            if origen in ENTEROS:
+                return f"scar_{destino}_desde_i64((int64_t)({args_code[0]}))"
+            return f"scar_to_{destino}((double)({args_code[0]}))"
+        if name in ("suma_ciclica", "resta_ciclica", "mult_ciclica"):
+            # la cuenta en uint64_t (donde no desborda con dos u32 ni con dos u8;
+            # restar da la vuelta módulo 2^64), llevada al tipo dando la vuelta:
+            # pasar a uintN_t en C es el resto módulo 2^N
+            op = {"suma_ciclica": "+", "resta_ciclica": "-", "mult_ciclica": "*"}[name]
+            ct = C_TYPE[expr.tipo_int]
+            return f"(({ct})((uint64_t)({args_code[0]}) {op} (uint64_t)({args_code[1]})))"
         if name == "to_f64":
             return f"((double)({args_code[0]}))"
         if name == "to_f32":
@@ -1263,7 +1380,7 @@ class Expresiones:
                     campo_ty = self.infer(expr, env)
                 except CodegenError:
                     campo_ty = None
-                if campo_ty is not None and campo_ty.name in ("i32", "i64", "f32", "f64", "bool"):
+                if campo_ty is not None and campo_ty.name in ESCALARES:
                     raiz_code = self.gen_expr(raiz, env, out, pad)
                     raiz_code = self._capture_fresh_struct_temp(raiz, raiz_code, env, out, pad)
                     return raiz_code + "".join(f"->{c}" for c in reversed(camino))
@@ -1276,7 +1393,7 @@ class Expresiones:
                 campo_ty = self.infer(expr, env)
             except CodegenError:
                 campo_ty = None
-            if campo_ty is not None and campo_ty.name in ("i32", "i64", "f32", "f64", "bool"):
+            if campo_ty is not None and campo_ty.name in ESCALARES:
                 obj_code = self._capture_fresh_struct_temp(expr.obj, obj_code, env, out, pad)
         return f"{obj_code}->{expr.field}"
 
@@ -1290,7 +1407,7 @@ class Expresiones:
             obj_code = self.gen_expr(expr.obj, env, out, pad)
             idx_code = self.gen_expr(expr.index, env, out, pad)
             np = self._mangled_name(elem)
-            if elem.name in ("i32", "i64", "f64", "f32", "bool"):
+            if elem.name in ESCALARES:
                 return f"scar_vec_en_{np}({obj_code}, {idx_code})"
             # un elemento con dueño es un lugar (el checker no deja otra cosa):
             # un struct es un puntero al elemento, como cualquier struct del C
@@ -1323,7 +1440,7 @@ class Expresiones:
         desde = self.gen_expr(expr.desde, env, out, pad)
         hasta = self.gen_expr(expr.hasta, env, out, pad)
         np = self._mangled_name(elem)
-        if elem.name not in ("i32", "i64", "f64", "f32") and np not in self.vec_trozo_defs:
+        if elem.name not in NUMERICOS and np not in self.vec_trozo_defs:
             self.vec_trozo_defs[np] = self._vec_c_trozo(np, self.c_type(obj_ty))
         return f"scar_vec_trozo_{np}({obj_code}, {desde}, {hasta})"
 
@@ -1399,10 +1516,11 @@ class Expresiones:
         """[a, b, c]: un Vec nuevo en un temporal y un push por elemento, por el
         mismo camino que v.push(x). El temporal queda sin dueña, como el de
         vec_new(): quien lo use lo trata como fresco."""
-        ty = TypeAnn(VEC_MARK, [expr.tipo_elem])
+        elem = self._canon(expr.tipo_elem)   # el T de la instancia, si es genérica
+        ty = TypeAnn(VEC_MARK, [elem])
         c_ty = self.c_type(ty)
         tmp = self._new_tmp()
-        nombre = self._mangled_name(expr.tipo_elem)
+        nombre = self._mangled_name(elem)
         out.append(f"{pad}{c_ty} {tmp} = scar_vec_new_{nombre}({len(expr.elems)});")
         if not expr.elems:
             return tmp

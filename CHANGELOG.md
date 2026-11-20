@@ -1,5 +1,156 @@
 # Cambios
 
+## 0.4.0
+
+Los números de todos los tamaños, los pedazos que se guardan, se devuelven y se
+recorren, y tareas más livianas: 100.000 vivas a la vez sin tocar la configuración
+del sistema. Todo programa que corría en 0.3.0 sigue corriendo e imprimiendo lo
+mismo; lo único que deja de compilar es usar como valor algo que no devuelve nada
+(abajo, en Arreglos), que antes daba un binario que no compilaba. La variable para el tamaño de las
+pilas ahora es `SCAR_PILA_KB` (antes `SCAR_PILA_TAREA_KB`).
+
+### Números
+
+- **Nuevo: `u8`**, un entero de 0 a 255 para bytes crudos (archivos binarios, red,
+  píxeles). Un `Vec<u8>` ocupa un byte por elemento. Un número escrito toma el tipo
+  `u8` donde se espera uno (`let b: u8 = 200`, `b + 55`) y tiene que caber; un `u8`
+  pasa solo a `i32`, `i64`, `f32` y `f64`, y al revés se pide con `to_u8(x)`.
+  Pasarse de 255 o bajar de 0 es un panic, igual en los dos backends; para dar la
+  vuelta están `suma_ciclica`, `resta_ciclica` y `mult_ciclica`. Cruza a C como
+  `uint8_t`, también un `Vec<u8>` como `uint8_t*` + largo.
+- **Nuevo: `u32`**, un entero de 0 a 4.294.967.295 para colores ARGB, hashes, CRC
+  y números al azar, en los dos backends y por la FFI (`uint32_t`). Las reglas de
+  `u8`: un número escrito toma el tipo, desbordar es un panic, las cíclicas dan la
+  vuelta y hay `to_u32(x)`. Un `u8` pasa solo a `u32`, y un `u32` a `i64` y `f64`,
+  pero no a `i32` ni a `f32`, donde puede no caber.
+- **Nuevo: `u64`**, un entero de 0 a 18.446.744.073.709.551.615 para hashes de
+  64 bits, identificadores, tamaños de archivo y generadores como splitmix64, en
+  los dos backends y por la FFI (`uint64_t`, también por el worker aislado y en
+  una `export fn`). Las reglas de `u8` y `u32`: desbordar es un panic, las
+  cíclicas dan la vuelta y hay `to_u64(x)`. Un `u8` y un `u32` pasan solos a
+  `u64`; un `u64` no pasa solo a nada (ni a `i64` ni a `f64`), y con un `i32` o un
+  `i64` en la misma cuenta es un error que propone convertir uno al otro.
+- **Nuevo: `i16`**, un entero de -32.768 a 32.767 para muestras de audio (un WAV
+  de 16 bits) y datos de sensores, en los dos backends y por la FFI (`int16_t`,
+  también por el worker aislado y en una `export fn`). Las reglas de `i32` en un
+  rango más chico: desbordar es un panic, también negar el mínimo, dividirlo por
+  -1 o pedir su `abs`; `>>` conserva el signo y hay `to_i16(x)`. Un `u8` pasa solo
+  a `i16`, e `i16` pasa solo a `i32`, `i64`, `f32` y `f64`. `Vec<i16>` tiene
+  `suma`, `punto`, `acumular` y pedazos. El editor lo colorea como tipo.
+- **Nuevo: números en hexadecimal**, `0xFF` y `0xEDB88320`, con cifras 0-9 y
+  a-f. Valen lo mismo que el decimal y siguen sus reglas: el tipo sale de dónde
+  van, y si no caben es un error. El editor los colorea como números.
+- **Un número escrito que no cabe en un `i64` es `u64`** (como uno que no cabe en
+  un `i32` es `i64`), y se puede escribir hasta 18446744073709551615 o
+  0xFFFFFFFFFFFFFFFF. `let x: i64 = 9223372036854775808` dice que el tipo sería
+  `u64`.
+- **Las cíclicas aceptan un `u8` con un `u32`** (da `u32`, como una suma).
+- **`a.punto(b)` de dos `Vec<u64>`** revisa que la suma quepa en 128 bits, como
+  en `i64` (el producto de dos `u64` no cabe en un `__int128` con signo).
+- **Nuevo: `f32` cruza a C.** Un `f32` va y vuelve en una `extern fn` como
+  `float`, un `Vec<f32>` como `float*` + largo, y también en los campos de un
+  struct por valor, en los callbacks y en una `export fn`; con la librería en el
+  proceso y en el worker aislado.
+- **El editor colorea `u8`, `u32` y `f32` como tipos.**
+- **El editor colorea `u64` como tipo.**
+
+### Pedazos y recorrer
+
+- **Nuevo: `for x in v`.** `x` es `v[i]`: un valor si la lista es de números o
+  `bool`, y un lugar si es de structs o de listas (`x.campo = 1.0` cambia la
+  lista). Mientras dura el bucle, `v` no cambia de largo; el compilador dice qué
+  `push` lo impide y dónde. Un elemento struct (`red[i]`, `x`) se presta a una fn
+  que no se lo queda.
+- **Un pedazo se reasigna:** `let mut p = v[a..b]` y después `p = w[c..d]`. El
+  compilador sigue a cuáles listas puede estar mirando.
+- **Una fn devuelve un pedazo de un parámetro** (`fn mitad(w: Vec<f32>) ->
+  Vec<f32> { return w[0..w.len() / 2] }`): el compilador deduce de cuál, y
+  `let p = mitad(w)` es un pedazo de `w`, sin copiar.
+- **Un pedazo se guarda adentro de un struct o de un `Vec`**
+  (`Capa { w: params[a..b] }`): esa variable sigue las reglas del pedazo. Una fn
+  puede devolver algo que guarda pedazos de sus parámetros (una capa, la red
+  entera), y lo que devuelve una fn de pedazos se usa directo (`print(mitad(w))`).
+
+### Tipos y tareas
+
+- **Nuevo: `Task<T>` es cualquier tarea que da `T`.** Una lista `Vec<Task<i32>>`
+  guarda tareas de distintas clases, y el handle de `spawn` (`Task<i32, a>`) pasa
+  solo a `Task<i32>`. `inject_chan` sobre un handle sin nombre revisa al correr si
+  la tarea acepta ese canal, y si no, da `Err` (el mismo texto que el intérprete);
+  con el nombre, se sigue revisando al compilar. Todo programa que compilaba sigue
+  compilando.
+- **Arreglo: un struct genérico armado con `vec_new()`, `map_new()`, `None` o `[]`**
+  adentro de una fn genérica (`Caja { x: x, items: vec_new() }`) ya no da "T
+  inconsistente": esos campos toman su tipo de los demás campos o del tipo anotado
+  (`let s: Solo<f32> = Solo { items: vec_new() }`). Y `[]` adentro de una fn
+  genérica compila a binario.
+
+### Tareas livianas y memoria
+
+- **Mejora: cada tarea ya no ocupa dos zonas de memoria del sistema.** Las pilas se
+  piden de a muchas juntas y sin página de guarda, así que 100.000 tareas vivas
+  caben sin subir `vm.max_map_count` (con 2.000 tareas, de unas 4.000 zonas a 65).
+  En su lugar, cada función revisa al entrar cuánta pila le queda; en las mediciones
+  no se nota. Una recursión sin fin da el mismo panic de siempre, ahora también en
+  una librería (`scar build --lib`), donde vuelve como error en vez de tirar al
+  programa que la cargó.
+- **Cambio: la pila de cada tarea es como la de `main`**, 8 MB (o `ulimit -s` si es
+  más), en vez de 1 MB: aguanta recursiones más hondas. Es memoria reservada, no
+  usada. La variable para cambiarla es `SCAR_PILA_KB` (antes `SCAR_PILA_TAREA_KB`,
+  solo para las tareas) y vale para todas.
+- **Mejora: una `extern fn` corre en una pila de C aparte**, así que una librería
+  de C que usa mucha pila no se come la de una tarea.
+
+### Archivos y red
+
+- **Nuevo: `.read_u8(n)` en `File` y `Socket`**, que lee bytes directo en un
+  `Vec<u8>`; `.read_bytes(n)` sigue igual, con su `Vec<i32>`. `.write_bytes(v)`
+  acepta también un `Vec<u8>`.
+- **Nuevo: `tcp_listen(0)` y `listener.puerto()`.** Con 0 el sistema elige un
+  puerto libre y `.puerto()` dice cuál (-1 si el Listener ya se cerró). Los
+  programas de prueba que abrían un servidor y un cliente usaban números fijos,
+  y en la CI otra conexión podía tener justo ese número como su puerto de
+  salida; ahora usan el 0.
+- **Arreglo: un puerto fuera de 0..65535** en `tcp_listen` o `tcp_connect` es un
+  `Err` en los dos backends. Antes el intérprete se caía con un error de Python
+  y el binario daba la vuelta (70000 escuchaba en 4464).
+
+### Intérprete y herramientas
+
+- **El intérprete es un tercio más rápido** (129,8 s → 87,6 s de CPU en diez
+  programas pesados), sin cambiar ninguna salida: resuelve una sola vez por nodo
+  lo que antes revisaba en cada evaluación.
+- **Las pruebas de GUI ya no se conectan al escritorio.** `SDL_Init` se
+  conectaba a D-Bus (los buses de sesión y del sistema) aunque no hubiera
+  pantalla; ahora la CI y los scripts de prueba corren sin buses.
+- **La tabla de `native/runtime/LEEME.md` se revisa en la CI** (`test_runtime_c`):
+  las líneas y las marcas de cada archivo. Estaban desviadas en 53 filas y
+  faltaban 5 archivos.
+
+### Arreglos
+
+- **Arreglo: usar como valor algo que no devuelve nada** (`print(v.push(1.0))`,
+  `let x = saluda()` con una fn sin `->`, `return saluda()`) ya no pasa el chequeo:
+  el compilador dice que eso va solo, en su propia línea. Antes el intérprete
+  imprimía `None` y el binario no compilaba.
+- **Arreglo: una lista ligada con `Some(f)`** (un `Option` de un `Vec`) era en el
+  binario una copia de la cabecera de la lista: si después un `push` la agrandaba,
+  se soltaba memoria ya suelta. Ahora `f` es esa misma lista.
+- **Arreglo: un número escrito que no entra en un `i32`** (`let a: i32 =
+  3000000000`) decía que el valor era `i64` y sugería `to_i32(...)`, que con ese
+  número es un panic; ahora dice que no entra y cuál es el rango.
+- **El runtime de los sin signo revisa el desborde con `__builtin_add_overflow`**
+  y los demás (con `u64` no hay un tipo de C más ancho donde hacer la cuenta).
+  `to_i32`, `to_i64`, `to_u8` y `to_u32` de un `u64` lo revisan sin pasar por
+  `int64_t`, y los mensajes de panic de los sin signo se imprimen sin signo.
+  Para `u8` y `u32` el resultado y los mensajes son los mismos de antes.
+- **Arreglo:** el temporal de un argumento de una cíclica o de una conversión
+  tomaba el tipo de la firma fija del builtin (lo encontró el fuzzer con `u32`).
+- **Los mensajes que nombran tipos** (`suma`, `acumular`, `llenar`, `export fn`,
+  conversiones) salen de las familias; varios ya no nombraban `u8`.
+- **Arreglo: los mensajes que nombran tipos** (los de los bits y el de un `Vec` que
+  cruza a C) salen ahora de las familias de tipos, así que no se quedan viejos.
+
 ## 0.3.0
 
 El lenguaje para IA: `f32`, `v[i]`, sumas y productos punto con SIMD, pedazos de

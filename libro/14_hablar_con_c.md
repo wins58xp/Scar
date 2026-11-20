@@ -32,10 +32,14 @@ no está: getenv devolvió NULL
   `-lm`). Sin `from`, la función es de la librería estándar de C, que siempre
   está.
 - Los tipos que cruzan son los números (`i32` como `int32_t`, `i64` como
-  `int64_t`, `f64` como `double`), `bool`, `str` (como `const char*`), un struct
-  de SCAR con campos numéricos (por valor) y, como parámetro, un `Vec` de
-  números. `f32` todavía no cruza: el compilador lo rechaza con un mensaje
-  claro (está en el plan, como `float`).
+  `int64_t`, `u8` como `uint8_t`, `u32` como `uint32_t`, `u64` como `uint64_t`, `i16` como `int16_t`, `f32` como `float`, `f64`
+  como `double`), `bool`, `str` (como
+  `const char*`), un struct de SCAR con campos numéricos (por valor) y, como
+  parámetro, un `Vec` de números. Un `f32` cruza tal cual, sin redondeo: es
+  exactamente un `float` de C, así que una librería de IA o de gráficos que
+  trabaja en `float` ve los mismos bits que el programa.
+  Un `Vec<u8>` llega como `uint8_t*` + largo: el buffer de bytes de
+  siempre en C (una imagen, un paquete, un archivo leído).
 - Un `str` que devuelve C se copia: el programa tiene su propia copia, y C
   sigue siendo dueño del original.
 - Si la función puede devolver `NULL`, se declara con `Result<str>`: el `NULL`
@@ -78,7 +82,7 @@ cerrado ni de cerrarlo dos veces.
 
 ## 14.3 Un `Vec` hacia C
 
-Un `Vec<i32>`, `Vec<i64>`, `Vec<f64>` o `Vec<bool>` como parámetro llega a C
+Un `Vec<i32>`, `Vec<i64>`, `Vec<u8>`, `Vec<u32>`, `Vec<u64>`, `Vec<i16>`, `Vec<f32>`, `Vec<f64>` o `Vec<bool>` como parámetro llega a C
 como **dos** parámetros: un puntero a los elementos y la cantidad. C lo recibe
 prestado durante la llamada, y lo que cambie en los elementos vuelve al `Vec`:
 

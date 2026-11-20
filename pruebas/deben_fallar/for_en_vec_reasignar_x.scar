@@ -1,0 +1,7 @@
+# espera: es cada elemento que recorre el 'for' y no se reasigna
+fn main() {
+    let v: Vec<i32> = [1, 2]
+    for x in v {
+        x = 3
+    }
+}

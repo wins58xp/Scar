@@ -1,0 +1,12 @@
+# espera: devuelve un pedazo de 'v' y además se queda con 'v'
+fn guarda(v: Vec<f64>, lista: Vec<Vec<f64>>) -> Vec<f64> {
+    let p = v[0..1]
+    lista.push(v)
+    return p
+}
+fn main() {
+    let w = [1.0, 2.0]
+    let lista: Vec<Vec<f64>> = vec_new()
+    let p = guarda(w, lista)
+    print(p)
+}

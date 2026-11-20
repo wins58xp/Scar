@@ -1,0 +1,17 @@
+# espera: como en una fn recursiva
+struct Nodo {
+    w: Vec<f64>
+    sub: Vec<Nodo>
+}
+fn hondo(c: Nodo, n: i32) -> Vec<f64> {
+    if n == 0 {
+        return c.w[0..1]
+    }
+    return hondo(c.sub[0], n - 1)
+}
+fn main() {
+    let hoja = Nodo { w: [1.0, 2.0], sub: [] }
+    let raiz = Nodo { w: [3.0], sub: [hoja] }
+    let p = hondo(raiz, 1)
+    print(p)
+}

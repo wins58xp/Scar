@@ -1,0 +1,7 @@
+# espera: convierte con to_u8(...), que es un panic si el valor no está entre 0 y 255
+# Un i16 no pasa solo a un sin signo: podría ser negativo.
+fn main() {
+    let a: i16 = -5
+    let b: u8 = a
+    print(b)
+}

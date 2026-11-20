@@ -29,8 +29,9 @@ task servidor_eco(escucha: Listener, mensajes: i32) -> i32 {
     return mensajes
 }
 
-fn conversar(puerto: i32) -> Result<i32> {
-    let escucha = tcp_listen(puerto)?
+fn conversar() -> Result<i32> {
+    let escucha = tcp_listen(0)?          # 0: que el sistema elija un puerto libre
+    let puerto = escucha.puerto()         # y este es el que eligió
     let servidor = spawn servidor_eco(escucha, 3)
 
     let c = tcp_connect("127.0.0.1", puerto)?
@@ -52,7 +53,7 @@ fn conversar(puerto: i32) -> Result<i32> {
 }
 
 fn main() -> Result<i32> {
-    let atendidos = conversar(19291)?
+    let atendidos = conversar()?
     print("el servidor atendió", atendidos, "mensajes")
 
     let f = file_open("/tmp/scar_eco.txt", "r")?

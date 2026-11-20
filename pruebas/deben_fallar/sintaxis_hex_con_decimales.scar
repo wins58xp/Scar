@@ -1,0 +1,5 @@
+# espera: un hexadecimal es siempre entero
+fn main() {
+    let a = 0x1.5
+    print(a)
+}

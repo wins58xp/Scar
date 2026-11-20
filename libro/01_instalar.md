@@ -28,7 +28,7 @@ scar --version
 ```
 
 ```
-scar 0.3.0
+scar 0.4.0
 ```
 
 Las interfaces gráficas (capítulo 15) necesitan además SDL2, y las conexiones

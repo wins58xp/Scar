@@ -53,6 +53,7 @@ from parser import (
     ArrayLit,
     UnaryOp, WhileLetStmt, WhileStmt, hijos, Node,
 )
+from types_ import ESCALARES  # familias de tipos (types_.py)
 
 FRESH = "F"
 # El `x` de `while let Some(x) = v.pop()` (también .get() y
@@ -265,7 +266,7 @@ class _Analyzer:
             if p is not None and p and p <= _FRESH_ATOMS:
                 return frozenset([FRESH])
         if (type(expr).__name__ == "FieldAccess"
-                and ret_ty is not None and ret_ty.name not in ("i32", "i64", "f32", "f64", "bool")):
+                and ret_ty is not None and ret_ty.name not in ESCALARES):
             # El campo de un temporal fresco
             # (`mk().dato`, `F { .. }.e`) lo saca el codegen del temporal
             # (Codegen._sacar_campo_de_temporal): es propio.

@@ -23,7 +23,7 @@ task trabajar(id: i32, entrada: Chan<i32>) -> Resultado {
 fn main() {
     let trabajo: Chan<i32> = chan_new(100)    # con capacidad: send espera si está lleno
 
-    let equipo: Vec<Task<Resultado, trabajar>> = vec_new()
+    let equipo: Vec<Task<Resultado>> = vec_new()
     for id in 1..4 {
         equipo.push(spawn trabajar(id, trabajo))
     }

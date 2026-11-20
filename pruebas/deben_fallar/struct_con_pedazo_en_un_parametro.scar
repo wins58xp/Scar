@@ -1,0 +1,13 @@
+# espera: un pedazo se guarda solo adentro de una variable de esta fn
+struct Capa {
+    w: Vec<f64>
+    n: i32
+}
+fn guardar(lista: Vec<Capa>, params: Vec<f64>) {
+    lista.push(Capa { w: params[0..2], n: 1 })
+}
+fn main() {
+    let params = [1.0, 2.0, 3.0]
+    let lista: Vec<Capa> = vec_new()
+    guardar(lista, params)
+}

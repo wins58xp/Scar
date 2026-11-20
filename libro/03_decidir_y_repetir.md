@@ -121,6 +121,9 @@ fn main() {
 (`a_texto` convierte un número en texto; el capítulo 7 lo cuenta todo sobre
 los textos.)
 
+`for` también recorre una lista, elemento por elemento: `for x in v`. Está en el
+capítulo 6, junto con las listas.
+
 ## 3.5 Salir antes: `break`
 
 `break` termina el loop más interno y sigue con lo que viene después:

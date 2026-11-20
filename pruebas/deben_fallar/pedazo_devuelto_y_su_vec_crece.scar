@@ -1,0 +1,10 @@
+# espera: 'w' no puede cambiar de largo mientras se usa el pedazo 'p'
+fn mitad(v: Vec<f64>) -> Vec<f64> {
+    return v[0..v.len() / 2]
+}
+fn main() {
+    let w = [1.0, 2.0]
+    let p = mitad(w)
+    w.push(3.0)
+    print(p)
+}

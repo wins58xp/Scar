@@ -1,0 +1,5 @@
+# espera: un u8 no tiene signo
+fn main() {
+    let b: u8 = 5
+    print(-b)
+}

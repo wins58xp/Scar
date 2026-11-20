@@ -1,0 +1,14 @@
+# espera: no puede cambiar de largo mientras se usa 'c', que guarda un pedazo de él
+struct Capa {
+    w: Vec<f64>
+    n: i32
+}
+fn capa(params: Vec<f64>, n: i32) -> Capa {
+    return Capa { w: params[0..n], n: n }
+}
+fn main() {
+    let p = [1.0, 2.0, 3.0]
+    let c = capa(p, 2)
+    p.push(4.0)
+    print(c.w)
+}

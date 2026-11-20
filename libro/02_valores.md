@@ -56,6 +56,10 @@ necesitas cambiar uno, cópialo primero a una variable tuya (`let mut k = n`).
 | `i64`  | `3000000000`          | entero de 64 bits, para lo que no cabe en un `i32` |
 | `f64`  | `3.14`, `1e-5`        | número real (punto flotante de 64 bits)      |
 | `f32`  | `let x: f32 = 0.5`    | número real de 32 bits: la mitad de memoria, unas 7 cifras |
+| `u8`   | `let b: u8 = 200`     | un byte: entero de 0 a 255, sin signo        |
+| `u32`  | `let c: u32 = 4000000000` | entero de 0 a 4.294.967.295, sin signo   |
+| `u64`  | `let t: u64 = 5000000000` | entero de 0 a 18.446.744.073.709.551.615, sin signo |
+| `i16`  | `let m: i16 = -12000`     | entero de -32.768 a 32.767               |
 | `bool` | `true`, `false`       | verdadero o falso                            |
 | `str`  | `"hola"`              | texto (capítulo 7)                           |
 
@@ -227,7 +231,7 @@ Cada cuenta se redondea a 32 bits, igual en el intérprete y en el binario, y
 `print` muestra las cifras que tiene un `f32`: `0.1`, no
 `0.10000000149011612`. Un `f32` va en todo lo que guarda números: campos de
 un struct, `Vec<f32>`, `Map`, `Option`, `Result`, canales y funciones
-genéricas con `Numeric` (capítulo 13). Todavía no cruza a C en una
+genéricas con `Numeric` (capítulo 13), y cruza a C como `float` en una
 `extern fn` (capítulo 14).
 
 Si te equivocas, el compilador te dice qué conversión escribir:
@@ -238,10 +242,191 @@ fn main() {
 }
 ```
 
+### `u8`: bytes
+
+Un archivo binario, un paquete de red o un píxel (3 o 4 bytes: rojo, verde,
+azul y transparencia) son bytes: números de 0 a 255. Para eso está `u8`, un
+entero sin signo de un byte. Un `Vec<u8>` ocupa un byte por elemento, la cuarta
+parte que un `Vec<i32>`.
+
+```scar
+fn main() {
+    let rojo: u8 = 200
+    print(rojo + 55, rojo / 3, rojo >> 4, rojo & 15)
+    let total: i32 = rojo               # un u8 pasa solo a i32
+    print(total * 1000)
+    print(to_u8(65), to_u8(99.9))
+    print(suma_ciclica(rojo, 100), resta_ciclica(to_u8(3), 5))
+    let pixel: Vec<u8> = [255, 128, 0, 255]
+    print(pixel, pixel.len())
+}
+```
+
+```
+255 66 12 8
+200000
+65 99
+44 254
+[255, 128, 0, 255] 4
+```
+
+Las reglas son las de los otros enteros:
+
+- Un número escrito toma el tipo que se espera (`let rojo: u8 = 200`) o el del
+  `u8` que tiene al lado (`rojo + 55`). Tiene que caber: `let b: u8 = 300` es un
+  error del compilador.
+- Una cuenta entre dos `u8` da `u8`. Pasarse de 255, o bajar de 0 al restar, es
+  un **panic**, igual que pasarse del máximo de un `i32`. Cuando lo que quieres
+  es dar la vuelta (un contador de un byte, un hash), se pide con
+  `suma_ciclica`, `resta_ciclica` y `mult_ciclica`: `suma_ciclica(200, 100)` es
+  44 y `resta_ciclica(3, 5)` es 254.
+- Un `u8` pasa solo a `i32`, `i64`, `f32` y `f64`, porque siempre cabe. Al revés
+  hay que pedirlo: `to_u8(x)` deja igual un entero de 0 a 255, trunca un
+  decimal hacia cero, y es un panic si no cabe.
+- Los bits: `&`, `|` y `^` como siempre; `<<` descarta lo que sale por arriba
+  (`200 << 1` es 144) y `>>` rellena con ceros.
+- Un `u8` no tiene signo, así que `-b` es un error. Para el negativo se
+  convierte antes: `-to_i32(b)`.
+
+Un `u8` va en todo lo que guarda números (structs, `Vec<u8>`, `Map`, `Option`,
+`Result`, canales, funciones genéricas con `Numeric`) y cruza a C como
+`uint8_t` (capítulo 14). Los bytes de un archivo o de una conexión se leen
+directo en un `Vec<u8>` con `.read_u8(n)` (capítulo 11).
+
+Un `i32` no pasa solo a `u8`, porque podría no caber; el compilador lo dice y
+sugiere `to_u8`:
+
+```scar-error
+fn main() {
+    let n = 300
+    let b: u8 = n
+}
+```
+
+### `u32`: colores, hashes y números al azar
+
+Un color ARGB (alfa, rojo, verde, azul: un byte cada uno), un CRC, un hash o el
+estado de un generador de números al azar son 32 bits sin signo: `u32`, de 0 a
+4.294.967.295. Las reglas son las de `u8`:
+
+- Un número escrito toma el tipo `u32` donde se espera uno o al lado de uno, y
+  tiene que caber.
+- Pasarse del máximo, o bajar de 0, es un panic. Las cíclicas dan la vuelta, que
+  es justo lo que necesita un hash.
+- Un `u8` pasa solo a `u32`, y un `u32` pasa solo a `i64` y a `f64`. **No** pasa
+  solo a `i32` (de 2.147.483.648 para arriba no cabe) ni a `f32` (perdería
+  cifras): se convierte con `to_i32(x)` o `to_f32(x)`. Al revés, `to_u32(x)`.
+- Un `u32` con un `i32` en la misma cuenta es un error: ninguno cabe entero en el
+  otro. El compilador propone pasar los dos a `i64`.
+- Los bits: `<<` descarta lo que sale por arriba y `>>` rellena con ceros, de 0 a
+  31 lugares.
+
+```scar
+fn main() {
+    let color: u32 = 4294934528            # 0xFFFF8000: alfa 255, naranja
+    let rojo = (color >> 16) & 255
+    print(color, rojo, color & 16777215)
+    let grande: i64 = color                # un u32 pasa solo a i64 y a f64
+    print(grande * 2)
+    let mut h: u32 = 2166136261            # el hash FNV-1a de "hola"
+    let texto: Vec<u8> = [104, 111, 108, 97]
+    for b in texto {
+        h = mult_ciclica(h ^ b, 16777619)
+    }
+    print(h)
+}
+```
+
+```
+4294934528 255 16744448
+8589869056
+2999341463
+```
+
+### `u64`: hashes de 64 bits, identificadores y tamaños de archivo
+
+Un hash de 64 bits, un identificador, el tamaño de un archivo grande o el
+estado de un generador como splitmix64 son 64 bits sin signo: `u64`, de 0 a
+18.446.744.073.709.551.615. Las reglas son las de `u8` y `u32`, con una
+diferencia: no hay un entero más ancho donde quepa entero.
+
+- Un número escrito toma el tipo `u64` donde se espera uno o al lado de uno. Uno
+  que no cabe en un `i64` (de 9.223.372.036.854.775.808 para arriba) ya es `u64`
+  sin anotarlo.
+- Pasarse del máximo, o bajar de 0, es un panic. Las cíclicas dan la vuelta.
+- Un `u8` y un `u32` pasan solos a `u64`. Un `u64` **no** pasa solo a nada: ni a
+  `i64` (la mitad de arriba no cabe) ni a `f64` (guarda enteros exactos solo hasta
+  2^53). Se convierte con `to_i64(x)` o `to_f64(x)`; al revés, `to_u64(x)`.
+- Un `u64` con un `i32` o un `i64` en la misma cuenta es un error, y no hay un
+  tipo donde quepan los dos: el compilador propone pasar uno al tipo del otro.
+- Los bits: `<<` descarta lo que sale por arriba y `>>` rellena con ceros, de 0 a
+  63 lugares.
+
+```scar
+fn main() {
+    let tope: u64 = 18446744073709551615   # el máximo: 0xFFFFFFFFFFFFFFFF
+    let mitad = 9223372036854775808        # no cabe en un i64: ya es u64
+    print(tope - mitad, mitad >> 62)
+    let tamano: u64 = 5000000000           # un archivo de 5 GB
+    let bloques: u32 = 4096
+    print(tamano / bloques)                # un u32 pasa solo a u64
+    let mut h: u64 = 14695981039346656037  # el hash FNV-1a de 64 bits de "hola"
+    let texto: Vec<u8> = [104, 111, 108, 97]
+    for b in texto {
+        h = mult_ciclica(h ^ b, 1099511628211)
+    }
+    print(h)
+    print(to_i64(tamano) * -1)             # a un i64, revisado: es un panic si no cabe
+}
+```
+
+```
+9223372036854775807 2
+1220703
+4623503348185510199
+-5000000000
+```
+
+### `i16`: muestras de audio y sensores
+
+Una muestra de un WAV normal es un entero de 16 bits con signo, y muchos
+sensores entregan lo mismo: `i16`, de -32.768 a 32.767. Las reglas son las de
+`i32` en un rango más chico.
+
+- Un número escrito toma el tipo `i16` donde se espera uno o al lado de uno.
+- Pasarse del rango es un panic, también negar el mínimo (`-x` con x = -32768)
+  o dividirlo por -1, que no tienen un `i16` positivo, y `abs` del mínimo.
+- Un `u8` pasa solo a `i16`, e `i16` pasa solo a `i32`, `i64`, `f32` y `f64`.
+  Al revés, `to_i16(x)`. Un `i16` no pasa solo a un sin signo (podría ser
+  negativo): `to_u8(x)`, que revisa.
+- Los bits: `<<` descarta lo que sale por arriba (puede cambiar el signo) y `>>`
+  conserva el signo, de 0 a 15 lugares.
+- No hay cíclicas: son para los sin signo. Para una cuenta que puede pasarse del
+  rango (sumar muchas muestras, una ganancia), se pasa a `i32` antes.
+
+```scar
+fn main() {
+    let muestra: i16 = -32768              # el mínimo: el pico negativo de un WAV
+    let byte: u8 = 200
+    let x: i16 = byte                      # un u8 pasa solo a i16
+    print(muestra + 1, x * -100, muestra >> 8)
+    let suma: i32 = to_i32(muestra) * 2    # para pasarse del rango, a i32 antes
+    print(suma, abs(to_i16(-300)), to_i16(1234.9))
+    let onda: Vec<i16> = [1000, -2000, 3000, -4000]
+    print(onda.suma(), onda.len(), onda[1..3].suma())
+}
+```
+
+```
+-32767 -20000 -128
+-65536 300 1234
+-2000 4 1000
+```
+
 ## 2.5 Cuando un número no cabe
 
 SCAR no deja que un número se dé vuelta en silencio. Pasarse del máximo de un
-`i32` o de un `i64`, dividir un entero por cero, o `to_i32` de un valor que no
+`i32`, de un `i64`, de un `i16`, de un `u8`, de un `u32` o de un `u64`, dividir un entero por cero, o `to_i32` de un valor que no
 cabe, es un **panic**: el programa se detiene y dice dónde y por qué (el
 capítulo 5 lo explica). Un número escrito que no cabe en ningún entero ni en
 un `f64` es un error del compilador, no un número cortado.
@@ -251,9 +436,30 @@ binario: `1.0 / 0.0` es `inf`, `0.0 / 0.0` es `nan`, `sqrt(-1.0)` es `nan`.
 
 ## 2.6 Cómo se escriben los números
 
-- Sin punto: un entero. Es `i32` si cabe y si no, `i64`.
+- Sin punto: un entero. Es `i32` si cabe; si no, `i64`; y si tampoco (de
+  9.223.372.036.854.775.808 a 18.446.744.073.709.551.615), `u64`.
 - Con punto o con exponente: `f64`. El exponente es como en Python o C:
   `1e-5`, `2.5E3`, `6.02e+23`.
+- En hexadecimal, con `0x` adelante: `0xFF`, `0xEDB88320`. Las cifras son 0-9 y
+  las letras a-f, en mayúscula o minúscula. Vale lo mismo que el decimal y sigue
+  sus reglas: el tipo sale de dónde va, y si no cabe es un error
+  (`let a: i32 = 0xFFFFFFFF` no se vuelve -1). Es lo natural para máscaras de
+  bits, colores y las constantes de un hash o un CRC.
+
+```scar
+fn main() {
+    print(0xFF, 0x1A, 0xff == 255)
+    let color: u32 = 0xFFFF8000
+    print(color & 0x00FFFFFF)
+}
+```
+
+```
+255 26 true
+16744448
+```
+
+Un hexadecimal se imprime en decimal, como cualquier número.
 
 ```scar
 fn main() {

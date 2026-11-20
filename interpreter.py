@@ -38,6 +38,7 @@ import ctypes  # noqa: E402
 import ctypes.util  # noqa: E402
 import librerias_nativas  # noqa: E402
 import math
+import operator
 import random
 import re
 import select
@@ -52,7 +53,9 @@ import time
 
 import ffi_worker as _ffi_worker_mod  # noqa: E402
 from ffi_worker import FfiWorkerPool, ScarFfiWorkerError
-from types_ import FN_MARK, mensaje_movida, redondear_f32, fmt_f32
+from types_ import ENTEROS, NUMERICOS, ESCALARES_STR, se_amplia  # familias de tipos (types_.py)
+from types_ import FN_MARK, mensaje_movida, redondear_f32, fmt_f32, INT_RANGES, INT_BITS, SIN_SIGNO, envolver_ciclico
+from types_ import CON_SIGNO_CHICOS
 
 from parser import (
     Program, StructDecl, FnDecl, ExternFnDecl, ExternTypeDecl, ExternLibDecl, Block, LetStmt, ReturnStmt, BreakStmt, ExprStmt, IfStmt,
@@ -518,20 +521,19 @@ class ScarFile:
         except OSError as e:
             return Err(f"error de lectura: {e.strerror or str(e)}")
 
-    def read_bytes(self, n):
-        """Hasta n bytes crudos (0..255) en un Vec<i32>;
-        vacío en el fin de archivo. Mismo contrato que scar_file_read_bytes."""
+    def read_bytes(self, n, metodo="read_bytes"):
+        """Hasta n bytes crudos (0..255) en un Vec<i32> (read_bytes) o en un
+        Vec<u8> (read_u8); vacío en el fin de archivo. Mismo contrato que
+        scar_file_read_bytes / scar_file_read_u8."""
         if n < 0:
-            raise ScarRuntimeError(f"read_bytes: cantidad negativa ({n})")
+            raise ScarRuntimeError(f"{metodo}: cantidad negativa ({n})")
         if self.cerrado:
             return Err("archivo cerrado")
         try:
             data = self.handle.buffer.read(n)
         except OSError as e:
             return Err(f"error de lectura: {e.strerror or str(e)}")
-        v = ScarVec(len(data))
-        v.items = list(data)
-        return Ok(v)
+        return Ok(_vec_de_bytes(data, metodo))
 
     def write(self, s):
         if self.cerrado:
@@ -557,9 +559,17 @@ class ScarFile:
         self.handle.close()
 
 
+def _vec_de_bytes(data, metodo):
+    """Los bytes leídos como Vec: de i32 con read_bytes, de u8 con read_u8."""
+    v = ScarVec(len(data))
+    v.items = [U8(b) for b in data] if metodo == "read_u8" else list(data)
+    return v
+
+
 def _bytes_de_vec(v):
-    """Los valores de un Vec<i32> como bytes; uno
-    fuera de 0..255 es un panic (igual que scar_bytes_de_vec en el nativo)."""
+    """Los valores de un Vec<i32> o un Vec<u8> como bytes; uno fuera de 0..255
+    (solo puede pasar en un Vec<i32>) es un panic (igual que scar_bytes_de_vec
+    en el nativo)."""
     for x in v.items:
         if not 0 <= x <= 255:
             raise ScarRuntimeError(f"write_bytes: {x} no es un byte (0..255)")
@@ -920,6 +930,8 @@ _MOVIDA = _Movida()
 
 
 class Environment:
+    __slots__ = ("vars", "parent")
+
     def __init__(self, parent=None):
         self.vars = {}
         self.parent = parent
@@ -1319,7 +1331,7 @@ class Interpreter:
             args = [
                 ctypes.string_at(a).decode("utf-8", errors="replace")
                 if t.name == "str" and a is not None else
-                ("" if t.name == "str" else a)
+                ("" if t.name == "str" else _ffi_de_c(a, t.name))
                 for a, t in zip(c_args, params)
             ]
             try:
@@ -1446,15 +1458,35 @@ class Interpreter:
         # costo de revisar una bandera en cada statement una vez que esto compile
         # a código nativo en vez de interpretarse.
         _PROGRESO[0] += 1
-        self.cancel_check()
+        if self._local.ctx.cancel_event.is_set():   # cancel_check(), sin sus dos llamadas
+            raise CancelledError()
         for stmt in block.stmts:
-            self.exec_stmt(stmt, env)
+            # exec_stmt, llamando directo a la función ya resuelta de la sentencia
+            f = stmt._ev
+            if f is None:
+                f = self._resolver_stmt(stmt)
+            f(self, stmt, env)
 
     def exec_stmt(self, stmt, env: Environment):
-        handler = self._STMT_DISPATCH.get(type(stmt))
-        if handler is None:
+        f = stmt._ev
+        if f is None:
+            f = self._resolver_stmt(stmt)
+        f(self, stmt, env)
+
+    def _resolver_stmt(self, stmt):
+        """La función que ejecuta `stmt` (su manejador), guardada en stmt._ev."""
+        f = self._STMT_DISPATCH.get(type(stmt))
+        if f is None:
             raise ScarRuntimeError(f"statement no soportado: {type(stmt).__name__}")
-        handler(self, stmt, env)
+        if type(stmt) is LetStmt and not _let_especial(stmt):
+            # el caso común de un let: evaluar y definir, sin revisar en cada
+            # vuelta lo de accept_chan ni lo del f64 (ver _exec_LetStmt)
+            nombre, E = stmt.name, stmt.expr
+
+            def f(interp, st, env):
+                env.vars[nombre] = (E._ev or interp._resolver_eval(E))(interp, E, env)
+        stmt._ev = f
+        return f
 
     def _exec_LetStmt(self, stmt, env: Environment):
         if (
@@ -1471,7 +1503,7 @@ class Interpreter:
             expected_ty = stmt.declared_type.args[0]
             value = self._accept_chan(expected_ty)
         else:
-            value = self.eval(stmt.expr, env)
+            value = (stmt.expr._ev or self._resolver_eval(stmt.expr))(self, stmt.expr, env)
         # 'let z: f64 = 5; let m = z / 2' da 2.5: el intérprete es dinámico
         # y, sin esto, una anotación 'f64' sobre un valor que evalúa a un
         # int de Python (literal i32, u otro entero) dejaría 'z' guardado
@@ -1492,33 +1524,33 @@ class Interpreter:
         env.define(stmt.name, value)
 
     def _exec_ReturnStmt(self, stmt, env: Environment):
-        value = self.eval(stmt.expr, env) if stmt.expr is not None else None
+        value = (stmt.expr._ev or self._resolver_eval(stmt.expr))(self, stmt.expr, env) if stmt.expr is not None else None
         raise ReturnSignal(value)
 
     def _exec_BreakStmt(self, stmt, env: Environment):
         raise BreakSignal()
 
     def _exec_ExprStmt(self, stmt, env: Environment):
-        self.eval(stmt.expr, env)
+        (stmt.expr._ev or self._resolver_eval(stmt.expr))(self, stmt.expr, env)
 
     def _exec_AssignStmt(self, stmt, env: Environment):
-        value = self.eval(stmt.expr, env)
+        value = (stmt.expr._ev or self._resolver_eval(stmt.expr))(self, stmt.expr, env)
         if isinstance(stmt.target, Ident):
             env.set(stmt.target.name, value)
         elif isinstance(stmt.target, FieldAccess):
-            obj = self.eval(stmt.target.obj, env)
+            obj = (stmt.target.obj._ev or self._resolver_eval(stmt.target.obj))(self, stmt.target.obj, env)
             obj.fields[stmt.target.field] = value
         else:
             raise ScarRuntimeError("destino de asignación inválido")
 
     def _exec_IfStmt(self, stmt, env: Environment):
-        if truthy(self.eval(stmt.cond, env)):
+        if truthy((stmt.cond._ev or self._resolver_eval(stmt.cond))(self, stmt.cond, env)):
             self.exec_block(stmt.then_block, Environment(env))
         elif stmt.else_block is not None:
             self.exec_block(stmt.else_block, Environment(env))
 
     def _exec_WhileStmt(self, stmt, env: Environment):
-        while truthy(self.eval(stmt.cond, env)):
+        while truthy((stmt.cond._ev or self._resolver_eval(stmt.cond))(self, stmt.cond, env)):
             # exec_block() revisa cancelación al entrar; no hace falta
             # duplicarlo acá (ver comentario en exec_block).
             try:
@@ -1528,7 +1560,7 @@ class Interpreter:
 
     def _exec_WhileLetStmt(self, stmt, env: Environment):
         while True:
-            val = self.eval(stmt.expr, env)
+            val = (stmt.expr._ev or self._resolver_eval(stmt.expr))(self, stmt.expr, env)
             # el match sobre un Result se baja a un while let Ok(x)
             if isinstance(val, Ok if getattr(stmt, "patron", "Some") == "Ok" else SomeVal):
                 inner_env = Environment(env)
@@ -1557,23 +1589,53 @@ class Interpreter:
 
     # ---- evaluación de expresiones ----
     def eval(self, expr, env: Environment):
+        # La función de cada nodo se resuelve la primera vez y queda en el nodo
+        # (Node._ev): el despacho por tipo y las marcas de ampliación no se
+        # revisan en cada una de las millones de evaluaciones de un programa.
+        f = expr._ev
+        if f is None:
+            f = self._resolver_eval(expr)
+        return f(self, expr, env)
+
+    def _resolver_eval(self, expr):
+        """La función que evalúa `expr`: su manejador, envuelto en la ampliación
+        de tipo que marcó el checker si hay una. Queda guardada en expr._ev."""
         handler = self._EVAL_DISPATCH.get(type(expr))
         if handler is None:
             raise ScarRuntimeError(f"expresión no soportada: {type(expr).__name__}")
+        if type(expr) is BinOp:
+            handler = _binop_resuelta(expr)
         if expr.promover_f64:
             # i32 donde se espera f64 (ver Node.promover_f64), igual
             # que la conversión implícita de C en el nativo.
-            return float(handler(self, expr, env))
-        if expr.promover_i64:
+            def f(interp, e, env):
+                return float(handler(interp, e, env))
+        elif expr.promover_i64:
             # i32 donde se espera i64 (ver Node.promover_i64).
-            return I64(handler(self, expr, env))
-        return handler(self, expr, env)
+            def f(interp, e, env):
+                return I64(handler(interp, e, env))
+        elif expr.promover_a is not None:
+            # una ampliación sin pérdida (u8 -> i32, i64, u32, f32, f64; Node.promover_a)
+            a = expr.promover_a
+            if a == "f64":
+                def f(interp, e, env):
+                    return float(handler(interp, e, env))
+            elif a == "f32":
+                def f(interp, e, env):
+                    return F32(float(handler(interp, e, env)))   # un u8 cabe exacto en un f32
+            else:
+                def f(interp, e, env):
+                    return _como_entero(a, handler(interp, e, env))
+        else:
+            f = handler
+        expr._ev = f
+        return f
 
     def _eval_NumLit(self, expr, env: Environment):
         if expr.lit_f32 is not None:
             return F32(expr.lit_f32)
-        if expr.tipo_int == "i64":
-            return I64(expr.value)
+        if expr.tipo_int in _CLASE_ENTERO:
+            return _como_entero(expr.tipo_int, expr.value)
         return expr.value
 
     def _eval_StrLit(self, expr, env: Environment):
@@ -1583,8 +1645,16 @@ class Interpreter:
         return expr.value
 
     def _eval_Ident(self, expr, env: Environment):
+        # env.lookup(), sin su llamada: es la lectura de cada variable
         _missing = _MISSING
-        value = env.lookup(expr.name, _missing)
+        name = expr.name
+        e = env
+        value = _missing
+        while e is not None:
+            value = e.vars.get(name, _missing)
+            if value is not _missing:
+                break
+            e = e.parent
         if value is not _missing:
             if value is _MOVIDA:
                 # solo llega acá un uso que el checker marcó
@@ -1603,13 +1673,13 @@ class Interpreter:
         return NoneVal()
 
     def _eval_SomeExpr(self, expr, env: Environment):
-        return SomeVal(self.eval(expr.expr, env))
+        return SomeVal((expr.expr._ev or self._resolver_eval(expr.expr))(self, expr.expr, env))
 
     def _eval_OkExpr(self, expr, env: Environment):
-        return Ok(self.eval(expr.expr, env))
+        return Ok((expr.expr._ev or self._resolver_eval(expr.expr))(self, expr.expr, env))
 
     def _eval_ErrExpr(self, expr, env: Environment):
-        return Err(self.eval(expr.expr, env))
+        return Err((expr.expr._ev or self._resolver_eval(expr.expr))(self, expr.expr, env))
 
     def _eval_UnaryOp(self, expr, env: Environment):
         if expr.lit_f32 is not None:
@@ -1617,14 +1687,15 @@ class Interpreter:
         if expr.literal_plegado is not None:
             # `-N` con N literal es un literal negativo con su tipo.
             v = expr.literal_plegado
-            return I64(v) if expr.tipo_int == "i64" else v
-        v = self.eval(expr.expr, env)
+            return _como_entero(expr.tipo_int, v)
+        v = (expr.expr._ev or self._resolver_eval(expr.expr))(self, expr.expr, env)
         if expr.op == "-":
             if _es_i32(v):
                 kind = expr.tipo_int or _tipo_entero(v)
-                if -v < (I64_MIN if kind == "i64" else I32_MIN) or -v > (I64_MAX if kind == "i64" else I32_MAX):
+                lo, hi = INT_RANGES[kind]
+                if -v < lo or -v > hi:
                     raise ScarRuntimeError(f"desbordamiento de {kind}: 0 - {v}")
-                return I64(-v) if kind == "i64" else -v
+                return _como_entero(kind, -v)
             return F32(-v) if isinstance(v, F32) else -v
         if expr.op == "not":
             return not truthy(v)
@@ -1643,7 +1714,7 @@ class Interpreter:
         return apply_binop(expr.op, l, r, expr.tipo_int)
 
     def _eval_TryExpr(self, expr, env: Environment):
-        val = self.eval(expr.expr, env)
+        val = (expr.expr._ev or self._resolver_eval(expr.expr))(self, expr.expr, env)
         if isinstance(val, Ok):
             return val.value
         if isinstance(val, Err):
@@ -1664,7 +1735,7 @@ class Interpreter:
         return StructInstance(expr.name, fields, getattr(decl, "enum_variantes", None))
 
     def _eval_FieldAccess(self, expr, env: Environment):
-        obj = self.eval(expr.obj, env)
+        obj = (expr.obj._ev or self._resolver_eval(expr.obj))(self, expr.obj, env)
         if isinstance(obj, StructInstance):
             return obj.fields[expr.field]
         raise ScarRuntimeError(f"acceso a campo inválido: {expr.field}")
@@ -1673,7 +1744,7 @@ class Interpreter:
         # v[a..b]: el checker solo lo deja como lado de suma/punto,
         # que solo leen: basta una lista con los mismos elementos. Mismo panic
         # que el nativo (scar_vec_trozo_*).
-        obj = self.eval(expr.obj, env)
+        obj = (expr.obj._ev or self._resolver_eval(expr.obj))(self, expr.obj, env)
         a = self.eval(expr.desde, env)
         b = self.eval(expr.hasta, env)
         n = len(obj.items)
@@ -1696,8 +1767,8 @@ class Interpreter:
         # Fuera de rango es panic (ver docstring de IndexExpr en parser.py:
         # misma familia que un acceso a campo inexistente, no un caso
         # "esperable" que el programa deba manejar con Option/Result).
-        obj = self.eval(expr.obj, env)
-        idx = self.eval(expr.index, env)
+        obj = (expr.obj._ev or self._resolver_eval(expr.obj))(self, expr.obj, env)
+        idx = (expr.index._ev or self._resolver_eval(expr.index))(self, expr.index, env)
         if isinstance(obj, ScarVec):
             # v[i] de un Vec de números o bool (el checker no deja otro): el
             # elemento, que es un valor inmutable; panic fuera de rango, con el
@@ -1741,6 +1812,10 @@ class Interpreter:
         if isinstance(expr.callee, Ident):
             fname = expr.callee.name
             arg_values = [self.eval(a, env) for a in expr.args]
+            if fname not in _LLAMADAS_ESPECIALES:
+                # lo de siempre al final de esta función, sin comparar el nombre
+                # con cada uno de los especiales de abajo
+                return self._llamar_por_nombre(fname, arg_values, env, expr)
             if fname == "sleep":
                 self._interruptible_sleep(arg_values[0])
                 return None
@@ -1774,20 +1849,27 @@ class Interpreter:
                 return self._builtin_arg(arg_values[0])
             if fname in ("abs", "min", "max"):
                 return _abs_min_max(fname, arg_values, expr.tipo_int)
-            if fname in BUILTINS:
-                return BUILTINS[fname](*arg_values)
-            if fname in self.extern_functions:
-                return self.extern_functions[fname](*arg_values)
-            # Llamada a través de una variable/parámetro que guarda un
-            # valor función ('return f(x)' con 'f: fn(i32) -> i32'). Se
-            # consulta antes que self.functions para respetar el shadowing
-            # (un parámetro 'f' tapa a una fn top-level 'f', igual que en
-            # el checker y en el C generado).
-            local = env.lookup(fname, _MISSING)
-            if isinstance(local, FnValue):
-                return self.call_function(local.name, arg_values)
-            if fname in self.functions:
-                return self.call_function(fname, arg_values)
+            if fname in ("suma_ciclica", "resta_ciclica", "mult_ciclica"):
+                return _ciclica(fname, arg_values[0], arg_values[1], expr.tipo_int)
+            return self._llamar_por_nombre(fname, arg_values, env, expr)
+        raise ScarRuntimeError(f"llamada inválida a {expr.callee}")
+
+    def _llamar_por_nombre(self, fname, arg_values, env, expr):
+        """Un builtin común, una extern fn, un valor fn o una fn del programa."""
+        if fname in BUILTINS:
+            return BUILTINS[fname](*arg_values)
+        if fname in self.extern_functions:
+            return self.extern_functions[fname](*arg_values)
+        # Llamada a través de una variable/parámetro que guarda un
+        # valor función ('return f(x)' con 'f: fn(i32) -> i32'). Se
+        # consulta antes que self.functions para respetar el shadowing
+        # (un parámetro 'f' tapa a una fn top-level 'f', igual que en
+        # el checker y en el C generado).
+        local = env.lookup(fname, _MISSING)
+        if isinstance(local, FnValue):
+            return self.call_function(local.name, arg_values)
+        if fname in self.functions:
+            return self.call_function(fname, arg_values)
         raise ScarRuntimeError(f"llamada inválida a {expr.callee}")
 
     def _lado_vivo(self, expr, env):
@@ -1795,7 +1877,7 @@ class Interpreter:
         acumular escribe y lee en la lista misma, en el mismo orden que el C
         (un pedazo que se pisa con otro del mismo Vec da lo mismo)."""
         if isinstance(expr, SliceExpr):
-            v = self.eval(expr.obj, env)
+            v = (expr.obj._ev or self._resolver_eval(expr.obj))(self, expr.obj, env)
             a = self.eval(expr.desde, env)
             b = self.eval(expr.hasta, env)
             n = len(v.items)
@@ -1810,7 +1892,7 @@ class Interpreter:
         return v.items, 0, len(v.items)
 
     def _eval_MethodCall(self, expr, env: Environment):
-        if expr.method == "acumular" and getattr(expr, "tipo_reduccion", None) in ("f32", "f64", "i32", "i64"):
+        if expr.method == "acumular" and getattr(expr, "tipo_reduccion", None) in NUMERICOS:
             # a.acumular(b, k): a[i] = a[i] + k * b[i]; en f32, cada
             # producto y cada suma redondeados a 32 bits, como el nativo
             xs, xa, xn = self._lado_vivo(expr.obj, env)
@@ -1828,7 +1910,7 @@ class Interpreter:
             for i in range(xa, xa + xn):
                 xs[i] = x
             return None
-        obj = self.eval(expr.obj, env)
+        obj = (expr.obj._ev or self._resolver_eval(expr.obj))(self, expr.obj, env)
         arg_values = [self.eval(a, env) for a in expr.args]
         if expr.method in ("suma", "punto") and isinstance(obj, ScarVec):
             # el tipo del elemento lo anotó el checker (el cero de un Vec vacío)
@@ -1919,7 +2001,7 @@ class Interpreter:
                     return Err("EOF")
                 return Ok(data.decode("utf-8", errors="replace"))
 
-    def _interruptible_socket_read_bytes(self, sock, n, step=0.02):
+    def _interruptible_socket_read_bytes(self, sock, n, step=0.02, metodo="read_bytes"):
         """EXACTAMENTE n bytes crudos (0..255) en un
         Vec<i32> -- lo que necesita un protocolo binario (un registro SeedLink
         mide 520). Err("EOF") si la otra punta cierra antes; Err("timeout") si
@@ -1927,7 +2009,7 @@ class Interpreter:
         que hace panic: un programa que corre 24/7 tiene que poder
         reconectarse). Mismo contrato que scar_socket_read_bytes."""
         if n < 0:
-            raise ScarRuntimeError(f"read_bytes: cantidad negativa ({n})")
+            raise ScarRuntimeError(f"{metodo}: cantidad negativa ({n})")
         wait = _read_io_timeout_env()
         out = bytearray()
         end = time.time() + wait
@@ -1946,9 +2028,7 @@ class Interpreter:
                     return Err("EOF")
                 out += data
                 end = time.time() + wait  # el timeout cuenta desde el último byte
-        v = ScarVec(n)
-        v.items = list(out)
-        return Ok(v)
+        return Ok(_vec_de_bytes(out, metodo))
 
     def _interruptible_accept(self, listener_sock, timeout=None, step=0.02):
         """Espera una conexión entrante de forma bloqueante-pero-cancelable.
@@ -1972,6 +2052,43 @@ class Interpreter:
                 return Ok(ScarSocket(conn))
 
     def call_method(self, obj, method, args):
+        # Vec, str y Map primero: son casi todas las llamadas a métodos. Ningún
+        # tipo de estos hereda de otro, así que el orden no cambia qué rama toma
+        # cada objeto: solo cuántos isinstance hace antes de llegar.
+        if isinstance(obj, ScarVec):
+            if method == "push":
+                obj.push(args[0])
+                return None
+            if method == "get":
+                return obj.get(args[0])
+            if method == "pop":
+                return obj.pop()
+            if method == "set":
+                obj.set(args[0], args[1])
+                return None
+            if method == "replace":
+                return obj.replace(args[0], args[1])
+            if method == "len":
+                return len(obj)
+        if isinstance(obj, str):
+            if method == "len":
+                return len(obj)
+            if method == "contains":
+                return args[0] in obj
+            if method == "starts_with":
+                return obj.startswith(args[0])
+            if method == "ends_with":
+                return obj.endswith(args[0])
+        if isinstance(obj, ScarMap):
+            if method == "set":
+                obj.set(args[0], args[1])
+                return None
+            if method == "get":
+                return obj.get(args[0])
+            if method == "remove":
+                return obj.remove(args[0])
+            if method == "len":
+                return len(obj)
         if isinstance(obj, TaskHandle):
             if method == "join":
                 return self.join_task(obj)
@@ -1998,8 +2115,8 @@ class Interpreter:
         if isinstance(obj, ScarFile):
             if method == "read_all":
                 return obj.read_all()
-            if method == "read_bytes":
-                return obj.read_bytes(args[0])
+            if method in ("read_bytes", "read_u8"):
+                return obj.read_bytes(args[0], method)
             if method == "write":
                 return obj.write(args[0])
             if method == "write_bytes":
@@ -2012,12 +2129,12 @@ class Interpreter:
                 if obj.cerrado:
                     return Err("socket cerrado")
                 return self._interruptible_socket_read(obj.sock)
-            if method == "read_bytes":
+            if method in ("read_bytes", "read_u8"):
                 if args[0] < 0:
-                    raise ScarRuntimeError(f"read_bytes: cantidad negativa ({args[0]})")
+                    raise ScarRuntimeError(f"{method}: cantidad negativa ({args[0]})")
                 if obj.cerrado:
                     return Err("socket cerrado")
-                return self._interruptible_socket_read_bytes(obj.sock, args[0])
+                return self._interruptible_socket_read_bytes(obj.sock, args[0], metodo=method)
             if method == "write":
                 return obj.write(args[0])
             if method == "write_bytes":
@@ -2043,40 +2160,8 @@ class Interpreter:
             if method == "close":
                 obj.close()
                 return None
-        if isinstance(obj, ScarVec):
-            if method == "push":
-                obj.push(args[0])
-                return None
-            if method == "get":
-                return obj.get(args[0])
-            if method == "pop":
-                return obj.pop()
-            if method == "set":
-                obj.set(args[0], args[1])
-                return None
-            if method == "replace":
-                return obj.replace(args[0], args[1])
-            if method == "len":
-                return len(obj)
-        if isinstance(obj, ScarMap):
-            if method == "set":
-                obj.set(args[0], args[1])
-                return None
-            if method == "get":
-                return obj.get(args[0])
-            if method == "remove":
-                return obj.remove(args[0])
-            if method == "len":
-                return len(obj)
-        if isinstance(obj, str):
-            if method == "len":
-                return len(obj)
-            if method == "contains":
-                return args[0] in obj
-            if method == "starts_with":
-                return obj.startswith(args[0])
-            if method == "ends_with":
-                return obj.endswith(args[0])
+            if method == "puerto":
+                return -1 if obj.cerrado else obj.sock.getsockname()[1]
         raise ScarRuntimeError(f"método no soportado: .{method}() sobre {type(obj).__name__}")
 
 
@@ -2144,6 +2229,43 @@ class I64(int):
 
 
 _ffi_worker_mod._VEC_CONV["vec_i64"] = I64  # un i64 que vuelve de C
+_ffi_worker_mod._VAL_CONV["i64"] = I64
+
+
+class U8(int):
+    """Un entero de SCAR de tipo u8 (0 a 255, tarea 3.3). Como I64: un int de
+    Python que lleva su tipo, así una cuenta en la que entra desborda con el
+    rango de u8 y da otro U8."""
+    __slots__ = ()
+
+
+class U32(int):
+    """Un entero de SCAR de tipo u32 (0 a 4.294.967.295, tarea 3.4), como U8."""
+    __slots__ = ()
+
+
+# La clase de cada tipo entero en el intérprete (un int pelado es un i32)
+class U64(int):
+    """Un entero de SCAR de tipo u64 (0 a 18.446.744.073.709.551.615, tarea
+    3.5), como U8 y U32."""
+    __slots__ = ()
+
+
+class I16(int):
+    """Un entero de SCAR de tipo i16 (-32.768 a 32.767, tarea 3.6), como I64."""
+    __slots__ = ()
+
+
+_CLASE_ENTERO = {"i64": I64, "u8": U8, "u32": U32, "u64": U64, "i16": I16}
+_TIPO_DE_CLASE = {c: t for t, c in _CLASE_ENTERO.items()}
+for _t, _c in _CLASE_ENTERO.items():
+    _ffi_worker_mod._VEC_CONV[f"vec_{_t}"] = _c   # un entero que vuelve de C
+    _ffi_worker_mod._VAL_CONV[_t] = _c
+
+
+def _como_entero(kind, v):
+    """El int `v` con la clase del tipo entero `kind` (sin revisar el rango)."""
+    return _CLASE_ENTERO.get(kind, int)(v)
 
 
 class F32(float):
@@ -2159,6 +2281,9 @@ class F32(float):
 
     __str__ = __repr__
 
+
+_ffi_worker_mod._VEC_CONV["vec_f32"] = F32  # un f32 que vuelve de C
+_ffi_worker_mod._VAL_CONV["f32"] = F32
 
 def _entero_a_f32(n):
     """to_f32 de un entero: el f32 más cercano, redondeando UNA vez (pasar por
@@ -2179,7 +2304,7 @@ def _builtin_to_f32(x):
     return F32(redondear_f32(float(x)))
 
 
-_LIMITES_ENTEROS = {"i32": (-2**31, 2**31 - 1), "i64": (-2**63, 2**63 - 1)}
+_LIMITES_ENTEROS = INT_RANGES
 
 
 def _acumular(xs, xa, ys, ya, n, k, tipo):
@@ -2188,14 +2313,14 @@ def _acumular(xs, xa, ys, ya, n, k, tipo):
     redondeados a 32 bits, como scar_vec_acumular_* del nativo. Con enteros la
     cuenta de cada elemento es exacta, y el primero que no cabe en el tipo es un
     panic (los anteriores ya quedaron escritos, igual que en el nativo)."""
-    if tipo in ("i32", "i64"):
+    if tipo in ENTEROS:
         lo, hi = _LIMITES_ENTEROS[tipo]
         k = int(k)
         for i in range(n):
             r = int(xs[xa + i]) + k * int(ys[ya + i])
             if not (lo <= r <= hi):
                 raise ScarRuntimeError(f"acumular: el resultado no cabe en {tipo} (posición {i})")
-            xs[xa + i] = I64(r) if tipo == "i64" else r
+            xs[xa + i] = _como_entero(tipo, r)
     elif tipo == "f32":
         k = redondear_f32(float(k))
         for i in range(n):
@@ -2212,23 +2337,25 @@ def _reduccion(metodo, a, b, tipo):
     elemento i va al carril i % 16, cada carril suma en orden y al final se juntan
     de a pares (k + 8, k + 4, k + 2, k + 1); en f32 cada producto y cada suma se
     redondea a 32 bits. Enteros: la suma exacta, panic si no cabe en el tipo (en
-    i64.punto, también si una suma parcial pasa de 128 bits, como en el nativo)."""
+    i64.punto y u64.punto, también si una suma parcial pasa de 128 bits, como en
+    el nativo)."""
     xs = a.items
     if metodo == "punto":
         ys = b.items
         if len(xs) != len(ys):
             raise ScarRuntimeError(f"punto: los Vec tienen largos distintos ({len(xs)} y {len(ys)})")
-    if tipo in ("i32", "i64"):
+    if tipo in ENTEROS:
         s = 0
         lim128 = (-2**127, 2**127 - 1)
         for i in range(len(xs)):
             s += xs[i] if metodo == "suma" else xs[i] * ys[i]
-            if tipo == "i64" and metodo == "punto" and not (lim128[0] <= s <= lim128[1]):
+            # i64 y u64 (un producto de dos u64 llega a 2**128 - 2**65 + 1, tarea 3.5)
+            if tipo in ("i64", "u64") and metodo == "punto" and not (lim128[0] <= s <= lim128[1]):
                 raise ScarRuntimeError("punto: la suma no cabe en 128 bits")
         lo, hi = _LIMITES_ENTEROS[tipo]
         if not (lo <= s <= hi):
             raise ScarRuntimeError(f"{metodo}: el resultado no cabe en {tipo}")
-        return I64(s) if tipo == "i64" else s
+        return _como_entero(tipo, s)
     es32 = tipo == "f32"
     red = redondear_f32 if es32 else (lambda x: x)
     s = [0.0] * 16
@@ -2245,16 +2372,29 @@ def _reduccion(metodo, a, b, tipo):
 
 
 def _tipo_entero(v):
-    return "i64" if isinstance(v, I64) else "i32"
+    return _TIPO_DE_CLASE.get(type(v), "i32")
+
+
+def _tipo_de_dos(l, r):
+    """El tipo entero de una cuenta entre dos valores (sin anotar, en el cuerpo
+    de una fn genérica): el que contiene al otro (types_.AMPLIA: u8 < i32 <
+    i64, u8 < u32 < i64). Si ninguno contiene al otro (u32 con i32, que el
+    checker no deja mezclar), i64."""
+    a, b = _tipo_entero(l), _tipo_entero(r)
+    if a == b or se_amplia(b, a):
+        return a
+    if se_amplia(a, b):
+        return b
+    return "i64"
 
 
 def _entero(kind, v, l, op, r):
     """El resultado `v` de `l op r` como entero de tipo `kind`, con el panic
     de desborde de ese tipo (mismo texto que el nativo)."""
-    lo, hi = (I64_MIN, I64_MAX) if kind == "i64" else (I32_MIN, I32_MAX)
+    lo, hi = INT_RANGES[kind]
     if v < lo or v > hi:
         raise ScarRuntimeError(f"desbordamiento de {kind}: {l} {op} {r}")
-    return I64(v) if kind == "i64" else int(v)
+    return _como_entero(kind, v)
 
 
 def _es_i32(v):
@@ -2296,16 +2436,112 @@ def _bits(op, l, r, kind=None):
         if op in ("<<", ">>"):
             kind = _tipo_entero(l)
         else:
-            kind = "i64" if "i64" in (_tipo_entero(l), _tipo_entero(r)) else "i32"
-    envolver = I64 if kind == "i64" else int
-    if op == "&": return envolver(l & r)
-    if op == "|": return envolver(l | r)
-    if op == "^": return envolver(l ^ r)
-    bits = 64 if kind == "i64" else 32
+            kind = _tipo_de_dos(l, r)
+    if op == "&": return _como_entero(kind, l & r)
+    if op == "|": return _como_entero(kind, l | r)
+    if op == "^": return _como_entero(kind, l ^ r)
+    bits = INT_BITS[kind]
     if not 0 <= r < bits:
         raise ScarRuntimeError(f"corrimiento fuera de rango ({l} {op} {r})")
-    if op == "<<": return envolver(_a_i64(l << r) if kind == "i64" else _a_i32(l << r))
-    return envolver(l >> r)
+    if op == "<<":
+        if kind in SIN_SIGNO:
+            # sin signo: los bits que salen por arriba se descartan, sin signo que cambiar
+            return _como_entero(kind, (l << r) & ((1 << bits) - 1))
+        if kind in CON_SIGNO_CHICOS:
+            # i16: los bits bajos, leídos en complemento a dos (puede cambiar el signo)
+            x = (l << r) & ((1 << bits) - 1)
+            return _como_entero(kind, x - (1 << bits) if x >> (bits - 1) else x)
+        return _como_entero(kind, _a_i64(l << r) if kind == "i64" else _a_i32(l << r))
+    return _como_entero(kind, l >> r)   # sin signo, nunca negativo: rellena con ceros
+
+
+# Los nombres que _eval_Call trata aparte antes de buscar un builtin común o una
+# fn del programa (tienen que ser exactamente los de sus `if fname == ...`).
+_LLAMADAS_ESPECIALES = frozenset(("sleep", "panic", "read_pipe", "inject_chan", "accept_chan", "rand",
+                                  "seed", "arg", "abs", "min", "max",
+                                  "suma_ciclica", "resta_ciclica", "mult_ciclica"))
+
+_COMPARAR = {"==": operator.eq, "!=": operator.ne, "<": operator.lt, ">": operator.gt,
+             "<=": operator.le, ">=": operator.ge}
+
+
+def _let_especial(stmt):
+    """Un let que necesita lo de _exec_LetStmt: `let c: Option<Chan<T>> =
+    accept_chan()`, o uno anotado f64 (un entero que llega se guarda como f64)."""
+    e = stmt.expr
+    if isinstance(e, Call) and isinstance(e.callee, Ident) and e.callee.name == "accept_chan":
+        return True
+    return stmt.declared_type is not None and stmt.declared_type.name == "f64"
+
+
+def _binop_resuelta(expr):
+    """La función que evalúa un BinOp, armada una sola vez según su operador y el
+    tipo que anotó el checker (Interpreter._resolver_eval). Va directo a lo que
+    haría apply_binop con esos valores: una comparación, `and`/`or`, una cuenta de
+    dos i32 (los dos `int` pelados, con el mismo panic de desborde) o de dos f64
+    (los dos `float` pelados). Cualquier otro caso (f32, i64, u8, u32, bits, el
+    cuerpo de una fn genérica) sigue por apply_binop, igual que antes. Los hijos se
+    evalúan llamando directo a su función (Node._ev), sin pasar por eval."""
+    op, kind, L, R = expr.op, expr.tipo_int, expr.left, expr.right
+
+    if op == "and":
+        def f(interp, e, env):
+            g = L._ev or interp._resolver_eval(L)
+            if not truthy(g(interp, L, env)):
+                return False
+            g = R._ev or interp._resolver_eval(R)
+            return truthy(g(interp, R, env))
+        return f
+    if op == "or":
+        def f(interp, e, env):
+            g = L._ev or interp._resolver_eval(L)
+            if truthy(g(interp, L, env)):
+                return True
+            g = R._ev or interp._resolver_eval(R)
+            return truthy(g(interp, R, env))
+        return f
+    cmp = _COMPARAR.get(op)
+    if cmp is not None:
+        def f(interp, e, env):
+            g = L._ev or interp._resolver_eval(L)
+            l = g(interp, L, env)
+            g = R._ev or interp._resolver_eval(R)
+            return cmp(l, g(interp, R, env))
+        return f
+    if kind == "i32" and op in ("+", "-", "*"):
+        cuenta = {"+": operator.add, "-": operator.sub, "*": operator.mul}[op]
+
+        def f(interp, e, env):
+            g = L._ev or interp._resolver_eval(L)
+            l = g(interp, L, env)
+            g = R._ev or interp._resolver_eval(R)
+            r = g(interp, R, env)
+            if type(l) is int and type(r) is int:
+                v = cuenta(l, r)
+                if v < I32_MIN or v > I32_MAX:
+                    raise ScarRuntimeError(f"desbordamiento de i32: {l} {op} {r}")
+                return v
+            return apply_binop(op, l, r, kind)
+        return f
+    if kind is None and op in ("+", "-", "*", "/"):
+        cuenta = {"+": operator.add, "-": operator.sub, "*": operator.mul, "/": _f64_div}[op]
+
+        def f(interp, e, env):
+            g = L._ev or interp._resolver_eval(L)
+            l = g(interp, L, env)
+            g = R._ev or interp._resolver_eval(R)
+            r = g(interp, R, env)
+            if type(l) is float and type(r) is float:
+                return cuenta(l, r)
+            return apply_binop(op, l, r, kind)
+        return f
+
+    def f(interp, e, env):
+        g = L._ev or interp._resolver_eval(L)
+        l = g(interp, L, env)
+        g = R._ev or interp._resolver_eval(R)
+        return apply_binop(op, l, g(interp, R, env), kind)
+    return f
 
 
 def apply_binop(op, l, r, kind=None):
@@ -2322,7 +2558,7 @@ def apply_binop(op, l, r, kind=None):
         return F32(_scar_mod(float(l), float(r)))  # el resto de dos f32 es un f32 exacto
     if op in ("+", "-", "*", "/", "%") and _es_i32(l) and _es_i32(r):
         if kind is None:
-            kind = "i64" if "i64" in (_tipo_entero(l), _tipo_entero(r)) else "i32"
+            kind = _tipo_de_dos(l, r)
         if op == "+": return _entero(kind, l + r, l, op, r)
         if op == "-": return _entero(kind, l - r, l, op, r)
         if op == "*": return _entero(kind, l * r, l, op, r)
@@ -2450,6 +2686,8 @@ def _builtin_tcp_connect(host, port):
     # cancelable: es una operación que termina sola (conecta, falla, o
     # expira), no una espera potencialmente indefinida por datos externos
     # como sí lo es .read()/.accept() después de establecida la conexión.
+    if not 0 <= port <= 65535:
+        return Err(f"no se pudo conectar a {host}:{port}: {PUERTO_FUERA}")
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(_read_io_timeout_env())
     try:
@@ -2461,7 +2699,16 @@ def _builtin_tcp_connect(host, port):
     return Ok(ScarSocket(s))
 
 
+# Un puerto TCP va de 0 a 65535 (0 en tcp_listen: que el sistema elija uno
+# libre, y l.puerto() dice cuál). Fuera de eso es un Err, igual en el nativo
+# (antes el intérprete se caía con el OverflowError de Python y el binario
+# daba la vuelta: 70000 escuchaba en 4464).
+PUERTO_FUERA = "el puerto va de 0 a 65535"
+
+
 def _builtin_tcp_listen(port):
+    if not 0 <= port <= 65535:
+        return Err(f"no se pudo escuchar en el puerto {port}: {PUERTO_FUERA}")
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -2547,21 +2794,53 @@ def _abs_min_max(fname, args, kind):
         if kind is None:
             r = BUILTINS["abs"](x)
             return F32(r) if isinstance(x, F32) else r
-        lo, hi = (I64_MIN, I64_MAX) if kind == "i64" else (I32_MIN, I32_MAX)
-        if x == lo:
+        lo, hi = INT_RANGES[kind]
+        if x == lo and lo < 0:
             raise ScarRuntimeError(f"abs: {x} no tiene valor absoluto en {kind}")
-        return I64(abs(x)) if kind == "i64" else abs(int(x))
+        return _como_entero(kind, abs(int(x)))
     a, b = args
     r = b if (b < a if fname == "min" else b > a) else a
-    if kind == "i64":
-        return I64(r)
+    if kind is not None:
+        return _como_entero(kind, r)
     return r
 
 
+def _ciclica(fname, a, b, kind):
+    """suma_ciclica / resta_ciclica / mult_ciclica: la cuenta de dos enteros
+    sin signo dando la vuelta (los bits bajos), igual que el nativo."""
+    v = {"suma_ciclica": a + b, "resta_ciclica": a - b, "mult_ciclica": a * b}[fname]
+    return _como_entero(kind, envolver_ciclico(v, kind))
+
+
+def _a_sin_signo(tipo):
+    """to_u8 / to_u32 / to_u64 / to_i16: de un entero, lo deja igual si cabe en el rango del
+    tipo; de un decimal trunca hacia cero. Lo que no cabe (o NaN) es un panic,
+    como scar_to_u8 ... scar_to_i16 en el nativo (mismos mensajes)."""
+    lo, hi = INT_RANGES[tipo]
+    clase = _CLASE_ENTERO[tipo]
+
+    def convertir(x):
+        if isinstance(x, int):
+            if not lo <= x <= hi:
+                raise ScarRuntimeError(f"to_{tipo}: {x} esta fuera del rango de {tipo}")
+            return clase(x)
+        x = float(x)
+        if not (lo - 1.0 < x < hi + 1.0):  # NaN también cae acá (son exactos en un f64)
+            raise ScarRuntimeError(f"to_{tipo}: NaN o fuera del rango de {tipo}")
+        return clase(int(x))
+    return convertir
+
+
+_builtin_to_u8 = _a_sin_signo("u8")
+
+
 def _builtin_to_i64(x):
-    """to_i64(x): un entero siempre cabe; un f64 se trunca hacia
-    cero, y NaN o fuera de rango es un panic (como scar_to_i64 en el nativo)."""
+    """to_i64(x): un entero con signo siempre cabe, y un u64 si no pasa de
+    I64_MAX (tarea 3.5); un f64 se trunca hacia cero, y NaN o fuera de rango
+    es un panic (como scar_to_i64 en el nativo)."""
     if isinstance(x, int):
+        if x > I64_MAX:
+            raise ScarRuntimeError(f"to_i64: {x} esta fuera del rango de i64")
         return I64(x)
     x = float(x)
     if not (-9223372036854775808.0 <= x < 9223372036854775808.0):
@@ -2588,6 +2867,12 @@ BUILTINS = {
     "max": lambda a, b: _abs_min_max("max", (a, b), None),
     "to_i32": _builtin_to_i32,
     "to_i64": _builtin_to_i64,
+    **{f"to_{t}": _a_sin_signo(t) for t in SIN_SIGNO + CON_SIGNO_CHICOS},
+    # las cíclicas no pasan por acá (ver _ciclica, con el tipo que anotó el
+    # checker); están para la lista de builtins que comparan los tests
+    "suma_ciclica": lambda a, b: _ciclica("suma_ciclica", a, b, "u8"),
+    "resta_ciclica": lambda a, b: _ciclica("resta_ciclica", a, b, "u8"),
+    "mult_ciclica": lambda a, b: _ciclica("mult_ciclica", a, b, "u8"),
     "chr": _builtin_chr,
     "a_texto": lambda v: scar_str(v),  # el mismo texto que print
     "ord": _builtin_ord,
@@ -2626,6 +2911,11 @@ BUILTINS = {
 CTYPES_MAP = {
     "i32": ctypes.c_int32,
     "i64": ctypes.c_int64,
+    "f32": ctypes.c_float,  # un F32 vale exactamente un float: cruza sin redondeo (3.2b)
+    "u8": ctypes.c_uint8,
+    "u32": ctypes.c_uint32,
+    "u64": ctypes.c_uint64,
+    "i16": ctypes.c_int16,
     "f64": ctypes.c_double,
     "bool": ctypes.c_bool,
     "str": ctypes.c_char_p,
@@ -2662,13 +2952,18 @@ def _ctype_for(type_name, extern_types):
 _CB_CTYPES = {
     "i32": ctypes.c_int32,
     "i64": ctypes.c_int64,  # El checker y el binario ya lo aceptaban
+    "f32": ctypes.c_float,
+    "u8": ctypes.c_uint8,
+    "u32": ctypes.c_uint32,
+    "u64": ctypes.c_uint64,
+    "i16": ctypes.c_int16,
     "f64": ctypes.c_double,
     "bool": ctypes.c_bool,
     # str de C a SCAR: char* prestado durante la llamada. Un callback que
     # devuelva str lo rechaza el checker (C no podría liberarlo).
     "str": ctypes.c_void_p,
 }
-_CB_DEFAULT = {"i32": 0, "i64": 0, "f64": 0.0, "bool": False, "str": None, "void": None}
+_CB_DEFAULT = {**{t: 0 for t in ENTEROS}, "f32": 0.0, "f64": 0.0, "bool": False, "str": None, "void": None}
 
 
 def _cfunctype_for(ann):
@@ -2677,7 +2972,7 @@ def _cfunctype_for(ann):
         if t.name not in _CB_CTYPES and t.name != "void":
             raise ScarRuntimeError(
                 f"extern: un callback fn(...) solo admite parámetros/retorno "
-                f"primitivos (i32/i64/f64/str/bool/void), se dio {t!r}"
+                f"primitivos ({'/'.join(ESCALARES_STR)}/void), se dio {t!r}"
             )
     restype = None if ret.name == "void" else _CB_CTYPES[ret.name]
     return ctypes.CFUNCTYPE(restype, *[_CB_CTYPES[t.name] for t in params])
@@ -2711,7 +3006,7 @@ def _libc_stdio():
 # ---- struct de usuario POR VALOR en la frontera FFI ----
 # El nativo pasa el mismo `struct` que genera gen_struct, por valor (ver
 # _ffi_c_type en codegen/); el checker solo admite structs no genéricos
-# con todos sus campos i32/i64/f64/bool (types_.ffi_tipo_ok). Acá se arma una vez por
+# con todos sus campos i32/i64/f32/f64/bool (types_.ffi_tipo_ok). Acá se arma una vez por
 # struct un ctypes.Structure con los mismos campos en el mismo orden -- el
 # mismo layout de C -- y se convierte en cada cruce.
 
@@ -2733,9 +3028,21 @@ def _ffi_struct_a_c(valor, decl):
 
 
 def _ffi_struct_de_c(c_valor, decl):
-    # un campo i64 que vuelve de C es un I64 (sigue contando en 64 bits)
-    return StructInstance(decl.name, {f: I64(getattr(c_valor, f)) if fty.name == "i64" else getattr(c_valor, f)
-                                      for f, fty in decl.fields})
+    # un campo i64 que vuelve de C es un I64 (sigue contando en 64 bits), y uno f32 un F32
+    return StructInstance(decl.name, {f: _ffi_de_c(getattr(c_valor, f), fty.name) for f, fty in decl.fields})
+
+
+def _ffi_de_c(valor, tipo):
+    """Un escalar que vuelve de C, con su tipo de SCAR: un i64 es un I64 y un f32
+    un F32 (los dos llevan su tipo en el intérprete). Un float de C ya es un f32
+    exacto: no hace falta redondear."""
+    if tipo == "i64":
+        return I64(valor)
+    if tipo == "f32":
+        return F32(valor)
+    if tipo in _CLASE_ENTERO:
+        return _como_entero(tipo, valor)
+    return valor
 
 
 class _FfiCbEstado:
@@ -2892,7 +3199,7 @@ def _bind_extern_fn(decl: "ExternFnDecl", extern_types, worker=None, interp=None
     # donde el valor de SCAR (str de Python) y el valor de ctypes (bytes,
     # porque c_char_p no acepta str en Python 3) no son el mismo objeto --
     # i32/f64/bool sí lo son, por eso solo 'str' necesita este wrapper.
-    if (worker is None and "str" not in param_types and ret_name not in ("str", "i64")
+    if (worker is None and "str" not in param_types and ret_name != "str" and ret_name != "f32" and ret_name not in _CLASE_ENTERO
             and not wraps_result and not has_cb and not struct_params and ret_struct is None
             and not vec_params):
         return call_raw
@@ -2936,8 +3243,7 @@ def _bind_extern_fn(decl: "ExternFnDecl", extern_types, worker=None, interp=None
     def _volver_vecs(arreglos):
         for vec, arr, elem in arreglos:
             n = len(vec.items)
-            conv = I64 if elem == "i64" else (lambda x: x)
-            vec.items[:] = [conv(arr[k]) for k in range(n)]
+            vec.items[:] = [_ffi_de_c(arr[k], elem) for k in range(n)]
 
     def _wrapper(*args):
         c_args = [
@@ -2981,9 +3287,9 @@ def _bind_extern_fn(decl: "ExternFnDecl", extern_types, worker=None, interp=None
                 return Err(f"{decl.name} devolvió NULL")
             if ret_name == "str":
                 return Ok(result.decode("utf-8", errors="replace"))
-            return Ok(I64(result) if ret_name == "i64" else result)
-        if ret_name == "i64":
-            return I64(result)  # el valor de C entra como i64
+            return Ok(_ffi_de_c(result, ret_name))
+        if ret_name in ("i64", "f32"):
+            return _ffi_de_c(result, ret_name)  # el valor de C entra con su tipo
         if ret_name != "str":
             return result
         # La regla de la frontera FFI ("ajeno a regiones hasta que se

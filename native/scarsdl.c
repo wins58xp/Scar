@@ -30,6 +30,10 @@
 // cambia por esto, todo se controla con variables de entorno:
 //   SDL_VIDEODRIVER=dummy  (de SDL) ventana sin pantalla; el renderer cae
 //                          al de software (ver scar_sdl_create_window).
+//   DBUS_SESSION_BUS_ADDRESS=disabled: y DBUS_SYSTEM_BUS_ADDRESS=disabled:
+//                          (de libdbus) SDL_Init no se conecta a los buses
+//                          del escritorio; las pruebas no hablan con nada de
+//                          afuera (ver scripts/ci.py).
 //   SCAR_SDL_MAX_FRAMES=N  después de N scar_sdl_present(), poll_event()
 //                          devuelve 2 (cierre de ventana) una vez por frame
 //                          y 0 hasta el próximo present: el programa termina

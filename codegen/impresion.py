@@ -4,6 +4,7 @@ helpers de C que lo escriben.
 """
 
 from parser import Ident, Call, PrintExpr, FieldAccess, OkExpr, SomeExpr, MethodCall, TryExpr, marca_new_generico
+from types_ import ENTEROS, ESCALARES_STR, FLOTANTES  # familias de tipos (types_.py)
 from types_ import TypeAnn, T_I32
 import lugares
 import nombres_c
@@ -17,11 +18,13 @@ from .comun import (
 class Impresion:
     # ---- formato de print(), igual que scar_str() del intérprete ----
     def print_fmt(self, ty: TypeAnn):
-        if ty.name == "i32":
-            return "%d"
-        if ty.name == "i64":
-            return "%lld"  # el argumento va como (long long), ver print_arg
-        if ty.name in ("f64", "f32"):
+        if ty.name in ("i32", "u8", "i16"):
+            return "%d"   # un u8 o un i16 llega a printf como int
+        if ty.name in ("i64", "u32"):
+            return "%lld"  # el argumento va como (long long), ver print_arg (un u32 cabe)
+        if ty.name == "u64":
+            return "%llu"  # un u64 no siempre cabe en un long long
+        if ty.name in FLOTANTES:
             return "%s"  # ver scar_fmt_f64: %g de C no agrega ".0" como Python
         if ty.name == "str":
             return "%s"
@@ -55,9 +58,13 @@ class Impresion:
         como argumento del snprintf."""
         if ty.name == "i32":
             return "%d", code
-        if ty.name == "i64":
+        if ty.name in ("u8", "i16"):
+            return "%d", f"(int)({code})"
+        if ty.name in ("i64", "u32"):
             return "%lld", f"(long long)({code})"
-        if ty.name in ("f64", "f32"):
+        if ty.name == "u64":
+            return "%llu", f"(unsigned long long)({code})"
+        if ty.name in FLOTANTES:
             setattr(self, f"needs_fmt_{ty.name}", True)
             tmp = self._new_tmp()
             pre.append(f"char* {tmp} = scar_fmt_{ty.name}({code});")
@@ -238,7 +245,7 @@ class Impresion:
         cuándo entró su clave (`orden`): actualizar una clave no la mueve, y
         sacarla y volver a ponerla la deja al final, como en un dict."""
         entry, suffix, key_ty, val_ty = self.map_nombres[c_name]
-        if val_ty.name not in ("i32", "i64", "f32", "f64", "str", "bool", CHAN_MARK, VEC_MARK, MAP_MARK, "Option", "Result",
+        if val_ty.name not in ESCALARES_STR + (CHAN_MARK, VEC_MARK, MAP_MARK, "Option", "Result",
                                PIPE_MARK, FN_MARK, TASK_MARK) and val_ty.name not in self.structs:
             raise CodegenError(f"print() todavía no soporta {ty!r} en el backend de C")
         pre, post = [], []
@@ -285,7 +292,7 @@ class Impresion:
         formateador recibe un puntero."""
         inner = ty.args[0] if ty.args else T_I32
         # también Vec<Vec<T>> (_value_fmt formatea el de adentro)
-        if inner.name not in ("i32", "i64", "f32", "f64", "str", "bool", CHAN_MARK, VEC_MARK, "Option", "Result", MAP_MARK,
+        if inner.name not in ESCALARES_STR + (CHAN_MARK, VEC_MARK, "Option", "Result", MAP_MARK,
                               PIPE_MARK, FN_MARK, TASK_MARK) and inner.name not in self.structs:
             raise CodegenError(f"print() todavía no soporta {ty!r} en el backend de C")
         elem = "&v.data[__scar_i]" if inner.name in self.structs else "v.data[__scar_i]"
@@ -320,11 +327,13 @@ class Impresion:
         acá para que gen_print pueda hacerle free() después del printf
         (si no, print() perdería ese buffer)."""
         code = self.gen_expr(expr, env, out, pad)
-        if ty.name == "i64":
+        if ty.name in ("i64", "u32"):
             return f"(long long)({code})", None
+        if ty.name == "u64":
+            return f"(unsigned long long)({code})", None
         if ty.name == "bool":
             return f'({code} ? "true" : "false")', None
-        if ty.name in ("f64", "f32"):
+        if ty.name in FLOTANTES:
             setattr(self, f"needs_fmt_{ty.name}", True)
             return self._malloc_fmt_tmp(f"scar_fmt_{ty.name}({code})", out, pad)
         if ty.name == "Option":
@@ -440,7 +449,7 @@ class Impresion:
         # printf: si a su izquierda hay una llamada, esa llamada va primero,
         # para que el valor formateado vea sus efectos.
         formato_despues = any(
-            not self._expr_simple(a) and any(t.name not in ("i32", "i64", "bool", "str")
+            not self._expr_simple(a) and any(t.name not in ENTEROS + ("bool", "str")
                                              for t in arg_tys[i + 1:])
             for i, a in enumerate(expr.args))
         if (sum(1 for a in expr.args if not self._expr_simple(a)) >= 2 or lugares or llamada_antes
@@ -460,7 +469,7 @@ class Impresion:
                     # tiene en su lugar. Si un argumento de la derecha se la lleva (un Vec
                     # que f consume), formatearla al final leía memoria liberada: se
                     # formatea ya.
-                    if (t.name not in ("i32", "i64", "f32", "f64", "bool", "str")
+                    if (t.name not in ESCALARES_STR
                             and any(not self._expr_simple(b) for b in expr.args[i + 1:])):
                         formateados[i] = self.print_arg(a, t, env, out, pad)
                     continue

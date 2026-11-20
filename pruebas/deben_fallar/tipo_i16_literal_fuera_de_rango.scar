@@ -1,0 +1,5 @@
+# espera: el número 32768 no entra en un i16 (va de -32768 a 32767)
+fn main() {
+    let a: i16 = 32768
+    print(a)
+}

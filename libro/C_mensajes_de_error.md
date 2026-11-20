@@ -100,6 +100,27 @@ Una función que devuelve algo tiene que devolverlo en **todos** los caminos.
 Agrega el `return` que falta, o un `else`. Si ese camino es imposible, di por
 qué con `panic(...)` (§5.6).
 
+### `'saluda()' no devuelve nada: no se puede usar como valor`
+
+```scar-error
+fn saluda(nombre: str) {
+    print("hola,", nombre)
+}
+
+fn main() {
+    let r = saluda("Ana")
+}
+```
+
+```
+ERROR DE TIPO: 'saluda()' no devuelve nada: no se puede usar como valor (va solo, en su propia línea) (línea 6)
+```
+
+Una función sin `->` no devuelve nada, y lo mismo los métodos que cambian algo
+en su lugar (`v.push(x)`, `a.acumular(b, k)`, `v.llenar(x)`). Se llaman solos,
+en su propia línea: `saluda("Ana")`. Si necesitas un valor, la función tiene que
+declararlo (`fn saluda(nombre: str) -> str`) y devolverlo con `return`.
+
 ### `el match no cubre todas las variantes`
 
 ```scar-error
@@ -184,20 +205,42 @@ Lo que da `get` sigue siendo de la lista: se puede mirar, pero no darlo a otro
 dueño. Para guardarlo en otro lado, sácalo del contenedor: de un `Vec` con `pop`
 o `replace`, de un `Map` con `remove` (§6.2 y §8.5).
 
-### `'for' recorre un rango de enteros`
+### `no puede cambiar de largo mientras se recorre con 'for x in v'`
 
 ```scar-error
 fn main() {
-    let v = [1, 2, 3]
+    let mut v = [1, 2, 3]
     for x in v {
-        print(x)
+        v.push(x)
     }
 }
 ```
 
-`for` solo recorre rangos (`for i in 0..n`). Una lista se recorre por sus
-índices, `for i in 0..v.len()` con `v.get(i)`, o se vacía con
-`while let Some(x) = v.pop()` (§6.2 y §6.3).
+Mientras un `for x in v` recorre la lista, no se le agregan ni se le sacan
+elementos, ni se reasigna, ni se pasa a una función que podría hacerlo. Haz el
+cambio después del `for`, o recorre los índices (`for i in 0..v.len()`), donde
+el largo se vuelve a mirar en cada vuelta (§6.2).
+
+### `es cada elemento de 'v' (Vec<...>): un lugar, no un valor`
+
+```scar-error
+struct P {
+    n: i32
+}
+
+fn main() {
+    let ps: Vec<P> = [P { n: 1 }]
+    let otra: Vec<P> = vec_new()
+    for p in ps {
+        otra.push(p)
+    }
+}
+```
+
+En una lista de structs o de listas, `x` es el elemento mismo, no una copia:
+se leen y escriben sus campos y se pasa a funciones que lo prestan, pero no se
+guarda en otro lado. Para una copia, recorre los índices y usa `v.get(i)`; para
+sacarlo de la lista, `v.replace(i, otro)` (§6.2).
 
 ### `en SCAR no se usa ';'`
 

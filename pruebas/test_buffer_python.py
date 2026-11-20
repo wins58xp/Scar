@@ -27,7 +27,7 @@ import tempfile
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CLAVES = set("fn task spawn let mut return if else while for in struct true false and or not Ok Err Result Chan Some None print extern from type own accepts break enum match use export continue".split())
-TIPOS = set("i32 i64 f64 str bool Vec Option Map Result Chan String".split())
+TIPOS = set("i32 i64 i16 u8 u32 u64 f32 f64 str bool Vec Option Map Result Chan String".split())
 
 
 def cps(s):
@@ -633,6 +633,14 @@ def clases_py(s):
             for k in range(i, j):
                 r[k] = cl
             i = j
+        elif ch == "0" and i + 1 < n and s[i + 1] in "xX":
+            # un hexadecimal (0xFF)
+            j = i + 2
+            while j < n and s[j] in "0123456789abcdefABCDEF":
+                j += 1
+            for k in range(i, j):
+                r[k] = 4
+            i = j
         elif ch in "0123456789":
             j = i
             while j < n and s[j] in "0123456789":
@@ -662,7 +670,8 @@ def clases_py(s):
 # ---------------------------------------------------------------------------------------------
 
 PALABRAS = ["fn", "main", "let", "x", "yy", "foo_bar", "return", "{", "}", "(", ")", "=", "+", "1", "42", "\"hola\"",
-            "#nota", "if", "else", "ñandú", "é", "α", "Vec", "i32", "->", "..", ";", ",", "  ", " ", "Á"]
+            "#nota", "if", "else", "ñandú", "é", "α", "Vec", "i32", "->", "..", ";", ",", "  ", " ", "Á",
+            "0xFF", "0x", "0Xab", "0x1g", "u32", "u64", "i16", "f32", "0", "x"]
 CARES = list("abcxyz ABCÁñé12_{}()=+-#\"") + ["α", "😀", " ", " "]
 
 

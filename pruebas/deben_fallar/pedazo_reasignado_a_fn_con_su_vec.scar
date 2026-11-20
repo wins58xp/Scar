@@ -1,0 +1,13 @@
+# espera: acá se le pasa a mezcla(), que puede cambiarle el largo
+fn mezcla(a: Vec<i32>, b: Vec<i32>) {
+    b.push(a[0])
+}
+fn main() {
+    let v = [1, 2, 3]
+    let w = [4, 5]
+    let mut p = v[0..2]
+    if v.len() > 1 {
+        p = w[0..1]
+    }
+    mezcla(p, w)
+}

@@ -16,6 +16,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 export SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy SCAR_SDL_MAX_FRAMES=3
+# sin D-Bus: SDL_Init no se conecta al escritorio (ver scripts/ci.py)
+export DBUS_SESSION_BUS_ADDRESS=disabled: DBUS_SYSTEM_BUS_ADDRESS=disabled:
 
 bien=0; mal=0; saltados=0
 for f in "$aca"/*.scar "$aca"/*/*.scar; do

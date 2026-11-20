@@ -1,0 +1,12 @@
+# espera: 'c.w' no puede cambiar de largo mientras se usa el pedazo 'q'
+struct Capa {
+    w: Vec<f64>
+    n: i32
+}
+fn main() {
+    let params = [1.0, 2.0, 3.0]
+    let c = Capa { w: [0.0, 0.5], n: 1 }
+    let q = c.w[0..1]
+    c.w = params[0..2]
+    print(q)
+}

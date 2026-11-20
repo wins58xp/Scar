@@ -1,0 +1,15 @@
+# espera: recibe un Vec que no está en ninguna variable
+struct Capa {
+    w: Vec<f64>
+    n: i32
+}
+fn capa(params: Vec<f64>, n: i32) -> Capa {
+    return Capa { w: params[0..n], n: n }
+}
+fn leer() -> Vec<f64> {
+    return [1.0, 2.0]
+}
+fn main() {
+    let c = capa(leer(), 2)
+    print(c.w)
+}

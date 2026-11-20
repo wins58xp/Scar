@@ -1,4 +1,4 @@
-# espera: '.acumular()' es para un Vec de números (i32, i64, f32 o f64)
+# espera: '.acumular()' es para un Vec de números (
 fn main() {
     let e: Vec<str> = ["a", "b"]
     e.acumular(e, 2)

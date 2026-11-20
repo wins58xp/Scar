@@ -1,0 +1,5 @@
+# espera: no entra en 64 bits (el máximo es 0xFFFFFFFFFFFFFFFF)
+fn main() {
+    let a = 0x10000000000000000
+    print(a)
+}

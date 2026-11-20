@@ -1,0 +1,9 @@
+# espera: 'w' no puede cambiar de largo mientras se usa el pedazo 'p'
+fn main() {
+    let v = [1, 2, 3]
+    let w = [4, 5]
+    let mut p = v[0..2]
+    p = w[0..1]
+    w.push(6)
+    print(p)
+}

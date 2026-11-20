@@ -36,11 +36,14 @@ SYMBOLS = [
 
 
 class Token:
-    def __init__(self, kind, value, line, col=None):
+    def __init__(self, kind, value, line, col=None, escrito=None):
         self.kind = kind    # 'kw' | 'id' | 'num' | 'str' | 'sym' | 'eof'
         self.value = value
         self.line = line
         self.col = col      # columna 1-based donde empieza el token (None si no se pudo derivar)
+        # cómo se escribió un número cuando no es su valor en decimal (0xFF):
+        # los mensajes de error lo citan así
+        self.escrito = escrito
 
     def __repr__(self):
         return f"Token({self.kind!r}, {self.value!r}, line={self.line}, col={self.col})"
@@ -57,6 +60,10 @@ def _es_digito(ch):
     """Un dígito 0-9. str.isdigit() también acepta '²' o '٣', y int('²')
     revienta con un ValueError de Python en vez de un error de SCAR."""
     return "0" <= ch <= "9"
+
+
+# las cifras de un número hexadecimal (0xFF): solo ASCII, como _es_digito
+_CIFRAS_HEX = "0123456789abcdefABCDEF"
 
 
 def _corto(texto):
@@ -124,6 +131,42 @@ def tokenize(src: str):
             tokens.append(Token(kind, word, line, start_col))
             continue
 
+        if c == "0" and i + 1 < n and src[i + 1] in "xX":
+            # Un entero en hexadecimal (17-11-2026): `0xFF`, `0xEDB88320`, con
+            # cifras 0-9 y a-f en mayúscula o minúscula, como en C, Python y
+            # Rust. Vale lo mismo que el decimal y sigue sus reglas: su tipo sale
+            # de dónde va (`let c: u32 = 0xFFFFFFFF`), y si no cabe es un error
+            # (0xFFFFFFFF no se vuelve -1 en un i32). Sin '_' ni decimales.
+            start = i
+            start_col = col_at(i)
+            i += 2
+            while i < n and src[i] in _CIFRAS_HEX:
+                i += 1
+            k = i
+            while k < n and (src[k].isalnum() or src[k] == "_"):
+                k += 1
+            if i == start + 2 or k > i:
+                raise LexError(
+                    f"número hexadecimal mal formado '{_corto(src[start:max(k, i)])}' en línea "
+                    f"{line}: después de '0x' van cifras 0-9 y letras a-f (por ejemplo "
+                    f"0xFF o 0xedb88320), sin nada más pegado",
+                    line, start_col)
+            if i + 1 < n and src[i] == "." and _es_digito(src[i + 1]):
+                raise LexError(
+                    f"número hexadecimal con decimales '{_corto(src[start:i + 2])}...' en línea "
+                    f"{line}: un hexadecimal es siempre entero",
+                    line, start_col)
+            cifras = src[start + 2:i].lstrip("0")
+            if len(cifras) > 16:
+                # como el límite de 20 cifras de un decimal: protege int() de
+                # Python; el rango del tipo lo revisa después el checker
+                raise LexError(
+                    f"literal entero demasiado grande '{_corto(src[start:i])}' en línea {line}: "
+                    f"no entra en 64 bits (el máximo es 0xFFFFFFFFFFFFFFFF)",
+                    line, start_col)
+            tokens.append(Token("num", int(src[start + 2:i], 16), line, start_col, escrito=src[start:i]))
+            continue
+
         if _es_digito(c):
             start = i
             start_col = col_at(i)
@@ -178,13 +221,15 @@ def tokenize(src: str):
                     f"multiplicar se escribe 3 * x; un exponente, 1e-5)",
                     line, start_col)
             text = src[start:i]
-            if not is_float and len(text.lstrip("0")) > 19:
+            if not is_float and len(text.lstrip("0")) > 20:
                 # Un entero de miles de dígitos
                 # hacía reventar int() de Python. Ningún entero de SCAR pasa
-                # de 19 dígitos (i64).
+                # de 20 dígitos (u64, tarea 3.5); el que tiene 20 y no cabe lo
+                # rechaza el checker con su mensaje.
                 raise LexError(
                     f"literal entero demasiado grande '{_corto(text)}' en línea {line}: "
-                    f"no entra en un i64 (el máximo es 9223372036854775807)",
+                    f"no entra en ningún entero (el más grande es el u64, hasta "
+                    f"18446744073709551615)",
                     line, start_col)
             value = float(text) if is_float else int(text)
             if is_float:

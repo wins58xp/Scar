@@ -1,0 +1,7 @@
+# espera: convierte con to_u8(...), que es un panic si el valor no está entre 0 y 255
+# Un i32 no pasa solo a u8: podría no caber, y eso se pide con to_u8.
+fn main() {
+    let n = 300
+    let b: u8 = n
+    print(b)
+}

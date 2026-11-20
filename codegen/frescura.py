@@ -64,9 +64,9 @@ class Frescura:
                 obj_ty = self.infer(expr.obj, env)
             except CodegenError:
                 return False
-            if obj_ty.name == FILE_MARK and expr.method in ("read_all", "read_bytes", "write", "write_bytes"):
+            if obj_ty.name == FILE_MARK and expr.method in ("read_all", "read_bytes", "read_u8", "write", "write_bytes"):
                 return True
-            if obj_ty.name == SOCKET_MARK and expr.method in ("read", "read_bytes", "write", "write_bytes"):
+            if obj_ty.name == SOCKET_MARK and expr.method in ("read", "read_bytes", "read_u8", "write", "write_bytes"):
                 return True
             if obj_ty.name == LISTENER_MARK and expr.method == "accept":
                 return True
@@ -113,9 +113,9 @@ class Frescura:
                 obj_ty = self.infer(inner.obj, env)
             except CodegenError:
                 return False
-            if obj_ty.name == SOCKET_MARK and inner.method in ("read", "read_bytes"):
+            if obj_ty.name == SOCKET_MARK and inner.method in ("read", "read_bytes", "read_u8"):
                 return True
-            if obj_ty.name == FILE_MARK and inner.method in ("read_all", "read_bytes"):
+            if obj_ty.name == FILE_MARK and inner.method in ("read_all", "read_bytes", "read_u8"):
                 return True
         return False
 
@@ -641,6 +641,11 @@ class Frescura:
         """El valor `inner` (struct, Vec o Map), ya generado como `code`,
         entregado a quien lo guarda como propio: fresco tal cual, de una dueña
         transferido, de un campo sacado, y lo prestado copiado."""
+        if getattr(inner, "_pedazo_ok", False) or getattr(inner, "_vista_ok", False):
+            # un pedazo (`v[a..b]`, o el que devuelve una fn) guardado adentro de otro
+            # Vec (2.5c): va tal cual, con cap = 0; no es dueño de nada y nadie lo
+            # suelta (pedazos.py cuida que el Vec que mira siga ahí)
+            return code
         if self._let_creates_fresh_owner(inner, marca_new_generico(inner), env):
             return code
         if isinstance(inner, Ident):

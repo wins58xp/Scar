@@ -11,7 +11,7 @@ cómo usarlos sin confundir a nadie.
 ## El proyecto oficial
 
 El único repositorio oficial de SCAR es
-[github.com/wins58xp/scar](https://github.com/wins58xp/scar). Las versiones
+[github.com/wins58xp/Scar](https://github.com/wins58xp/Scar). Las versiones
 oficiales son las que se publican ahí como *releases*.
 
 ## Lo que puedes hacer sin pedir permiso

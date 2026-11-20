@@ -898,7 +898,7 @@ class Propiedad:
     def _es_vec_prestado_actual(self, nombre) -> bool:
         """`nombre` es un parámetro Vec prestado de la fn que se está generando
         (en C, un puntero: se lee como `(*nombre)`)."""
-        return nombre in self._vecs_prestados_de.get(self.cur_fn_name, ())
+        return nombre in self._vecs_prestados_de.get(self.cur_fn_name, ()) or nombre in self._ligadas_ptr
 
     def _is_moved_container_type(self, ty) -> bool:
         """Vec, Map y Option de uno de ellos: los tipos que una fn o task recibe

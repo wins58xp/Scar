@@ -1,0 +1,11 @@
+# espera: recibe un Vec que no está en ninguna variable
+fn mitad(v: Vec<f64>) -> Vec<f64> {
+    return v[0..v.len() / 2]
+}
+fn leer() -> Vec<f64> {
+    return [1.0, 2.0]
+}
+fn main() {
+    let p = mitad(leer())
+    print(p)
+}

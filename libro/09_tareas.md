@@ -252,9 +252,9 @@ segundos sin que nada avance antes de darlo.
 
 ## 9.7 Guardar un handle para después
 
-El handle de `spawn` tiene tipo `Task<T, nombre_de_la_tarea>`. Se puede
-guardar en un `Option`, en un struct o en un `Vec`, para lanzar la tarea cuando
-haga falta y esperarla al final:
+Un handle de una tarea que da un `T` tiene tipo `Task<T>`. Se puede guardar en
+un `Option`, en un struct o en un `Vec`, para lanzar la tarea cuando haga falta
+y esperarla al final:
 
 ```scar
 task cuadrado(n: i32) -> i32 {
@@ -262,7 +262,7 @@ task cuadrado(n: i32) -> i32 {
 }
 
 fn main() {
-    let tareas: Vec<Task<i32, cuadrado>> = vec_new()
+    let tareas: Vec<Task<i32>> = vec_new()
     for i in 1..5 {
         tareas.push(spawn cuadrado(i))
     }
@@ -277,6 +277,11 @@ fn main() {
 ```
 1 + 4 + 9 + 16 = 30
 ```
+
+Una lista de `Task<i32>` acepta tareas de distintas clases, mientras todas den un
+`i32`. Si quieres decir cuál es la tarea, va su nombre: `Task<i32, cuadrado>`. Así
+`inject_chan` (capítulo 17) revisa al compilar que esa tarea acepte el canal; sobre
+un `Task<i32>` sin nombre lo revisa al correr, y si la tarea no lo acepta da `Err`.
 
 Lo que un handle no puede es **salir de la región que lanzó la tarea**: una
 tarea no devuelve un handle ni lo manda por un canal, porque esa región va a

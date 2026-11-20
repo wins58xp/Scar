@@ -2,7 +2,7 @@
 import math
 import struct
 
-PRIMITIVE_NAMES = {"i32", "i64", "f32", "f64", "str", "bool", "void"}
+PRIMITIVE_NAMES = {"i32", "i64", "i16", "u8", "u32", "u64", "f32", "f64", "str", "bool", "void"}
 
 # Marcas de los tipos del lenguaje que no son primitivos (TypeAnn.name). Viven
 # solo acá: type_checker.py y codegen/ las importan (paso C9).
@@ -21,7 +21,6 @@ FN_MARK = "__Fn"
 
 # Los tipos escalares que cruzan la frontera de una extern fn tal cual. Un str
 # cruza como const char*; quién libera lo que C reservó lo decide el backend.
-FFI_SUPPORTED_TYPES = {"i32", "i64", "f64", "bool", "str"}  # f32 todavía no cruza
 
 
 class TypeAnn:
@@ -56,7 +55,7 @@ class TypeAnn:
         return self.name in ("f32", "f64")
 
     def is_integer(self):
-        return self.name in ("i32", "i64")
+        return self.name in ENTEROS
 
     def is_primitive(self):
         return self.name in PRIMITIVE_NAMES
@@ -81,6 +80,10 @@ PARAMS_COPIA = set()
 # Tipos primitivos reutilizables
 T_I32 = TypeAnn("i32")
 T_I64 = TypeAnn("i64")
+T_U8 = TypeAnn("u8")
+T_U32 = TypeAnn("u32")
+T_U64 = TypeAnn("u64")
+T_I16 = TypeAnn("i16")
 T_F32 = TypeAnn("f32")
 T_F64 = TypeAnn("f64")
 T_STR = TypeAnn("str")
@@ -101,25 +104,92 @@ T_VOID = TypeAnn("void")
 # hacen panic si el valor no cabe: nunca truncan en silencio un entero.
 # Las reglas son las mismas para toda la familia de tipos numéricos.
 # ---------------------------------------------------------------------------
-NUMERICOS = ("i32", "i64", "f32", "f64")
+# Las familias de tipos, en un solo lugar: un tipo numérico nuevo se agrega acá
+# (y en INT_RANGES si es entero) y entra solo en cada regla que habla de "un
+# entero", "un número" o "un escalar" (checker, intérprete, generador de C, FFI).
+ENTEROS = ("i32", "i64", "i16", "u8", "u32", "u64")
+SIN_SIGNO = ("u8", "u32", "u64")      # enteros sin signo (tareas 3.3, 3.4 y 3.5)
+# los enteros con signo más angostos que i32 (i16, tarea 3.6): sus cuentas van con
+# la plantilla native/runtime/con_signo.c (i32 e i64 tienen su runtime propio)
+CON_SIGNO_CHICOS = ("i16",)
+FLOTANTES = ("f32", "f64")
+NUMERICOS = ENTEROS + FLOTANTES
+ESCALARES = NUMERICOS + ("bool",)      # se copian: sin dueño ni memoria aparte
+ESCALARES_STR = ESCALARES + ("str",)
+
+# Los tipos escalares que cruzan la frontera de una extern fn tal cual: todos
+# (f32 como float, u8 como uint8_t...). Un str cruza como const char*; quién
+# libera lo que C reservó lo decide el backend.
+FFI_SUPPORTED_TYPES = set(ESCALARES_STR)
 I32_MIN, I32_MAX = -2 ** 31, 2 ** 31 - 1
 I64_MIN, I64_MAX = -2 ** 63, 2 ** 63 - 1
-INT_RANGES = {"i32": (I32_MIN, I32_MAX), "i64": (I64_MIN, I64_MAX)}
+INT_RANGES = {"i32": (I32_MIN, I32_MAX), "i64": (I64_MIN, I64_MAX), "u8": (0, 255),
+              "u32": (0, 2 ** 32 - 1), "u64": (0, 2 ** 64 - 1), "i16": (-2 ** 15, 2 ** 15 - 1)}
+U64_MAX = 2 ** 64 - 1
+INT_BITS = {"i32": 32, "i64": 64, "u8": 8, "u32": 32, "u64": 64, "i16": 16}
+
+# A qué tipos pasa solo cada uno, porque todos sus valores caben exactos ahí.
+# Un entero con signo nunca pasa solo a uno sin
+# signo, ni un i32 a f32 (un f32 guarda enteros exactos solo hasta 2**24).
+AMPLIA = {
+    "u8": ("i16", "i32", "i64", "u32", "u64", "f32", "f64"),
+    "i16": ("i32", "i64", "f32", "f64"),
+    "u32": ("i64", "u64", "f64"),
+    "i32": ("i64", "f64"),
+    "f32": ("f64",),
+}
+
+
+def se_amplia(desde, hacia):
+    """True si un número de tipo `desde` pasa solo a `hacia` (nombres)."""
+    return hacia in AMPLIA.get(desde, ())
+
+
+# Los tipos donde un número escrito toma el tipo de lo que tiene al lado o de lo
+# que se espera, porque un i32 no pasa solo a ellos: `x * 0.5` con x: f32 es f32,
+# `b + 1` con b: u8 es u8. (Con i64 o f64 no hace falta: el i32 pasa solo.)
+LITERAL_SE_ADAPTA = ("f32", "u8", "u32", "u64", "i16")
+
+
+def literal_entero_cabe(v, tipo):
+    """True si el número escrito `v` (un int, ya con su signo) cabe en el tipo
+    entero `tipo`."""
+    lo, hi = INT_RANGES[tipo]
+    return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def envolver_ciclico(v, tipo):
+    """`v` dado la vuelta en el entero sin signo `tipo` (suma_ciclica y las
+    demás): los bits bajos, como en C con un unsigned."""
+    return v % (INT_RANGES[tipo][1] + 1)
 
 
 def int_literal_type(v):
-    """Tipo de un literal entero ya con su signo: i32 si cabe, si no i64; None
-    si no cabe en ninguno (error de compilación)."""
+    """Tipo de un literal entero ya con su signo: i32 si cabe, si no i64, y si
+    tampoco (un positivo de 2**63 a 2**64 - 1) u64 (tarea 3.5); None si no cabe
+    en ninguno (error de compilación)."""
     if I32_MIN <= v <= I32_MAX:
         return T_I32
     if I64_MIN <= v <= I64_MAX:
         return T_I64
+    if 0 <= v <= U64_MAX:
+        return T_U64
     return None
 
 
 def numeric_result(l, r):
-    """Tipo de `l op r` (+, -, *, /, %) para dos operandos numéricos concretos.
-    None si la mezcla no está permitida (i64 con f64; f32 con un entero)."""
+    """Tipo de `l op r` (+, -, *, /, %) para dos operandos numéricos concretos:
+    el mismo tipo, o el de uno de los dos si el otro pasa solo a él (AMPLIA).
+    None si la mezcla no está permitida (i64 con f64; f32 con un entero que no
+    sea u8; u8 con algo que no lo contiene)."""
+    if l.name in NUMERICOS and r.name in NUMERICOS:
+        if l.name == r.name:
+            return l
+        if se_amplia(l.name, r.name):
+            return r
+        if se_amplia(r.name, l.name):
+            return l
+        return None
     names = {l.name, r.name}
     if "f32" in names:
         if names == {"f32"}:
@@ -210,7 +280,7 @@ def ffi_tipo_ok(ty, structs, extern_types, excluidos=()):
     FFI_SUPPORTED_TYPES, un `extern type` (sin argumentos), una fn sin captura
     cuyos parámetros y retorno también crucen (el retorno puede ser void), o un
     struct no genérico con todos sus campos i32/i64/f64/bool, por valor (un str
-    o un struct anidado de campo no cruza). `structs`: nombre -> {campo: tipo};
+    o un struct anidado de campo no cruza; f32 sí, como float). `structs`: nombre -> {campo: tipo};
     `excluidos`: nombres de `structs` que no cruzan (genéricos, enums). La usan
     el checker y el backend (paso C9)."""
     if ty.name in FFI_SUPPORTED_TYPES:
@@ -221,5 +291,5 @@ def ffi_tipo_ok(ty, structs, extern_types, excluidos=()):
     if ty.name in structs and not ty.args:
         if ty.name in excluidos:
             return False
-        return all(fty.name in ("i32", "i64", "f64", "bool") for fty in structs[ty.name].values())
+        return all(fty.name in ESCALARES for fty in structs[ty.name].values())
     return ty.name in extern_types and not ty.args

@@ -1,0 +1,19 @@
+# espera: además se queda con 'p'
+struct Capa {
+    w: Vec<f64>
+    n: i32
+}
+fn capa(params: Vec<f64>, n: i32) -> Capa {
+    return Capa { w: params[0..n], n: n }
+}
+fn se_queda(p: Vec<f64>, lista: Vec<Vec<f64>>) -> Capa {
+    let c = Capa { w: p[0..1], n: 1 }
+    lista.push(p)
+    return c
+}
+fn main() {
+    let p = [1.0, 2.0, 3.0]
+    let lista: Vec<Vec<f64>> = vec_new()
+    let c = se_queda(p, lista)
+    print(c.w)
+}

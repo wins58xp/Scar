@@ -1,0 +1,7 @@
+# espera: todavía no recorre un Vec<str>
+fn main() {
+    let textos: Vec<str> = ["a"]
+    for t in textos {
+        print(t)
+    }
+}

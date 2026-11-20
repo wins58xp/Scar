@@ -1,0 +1,11 @@
+# espera: no se puede usar como valor
+fn mitad(v: Vec<f64>) -> Vec<f64> {
+    return v[0..v.len() / 2]
+}
+fn main() {
+    let w = [1.0, 2.0]
+    let lista: Vec<Vec<f64>> = vec_new()
+    print(mitad(w))
+    let f = mitad
+    print(lista)
+}

@@ -1,0 +1,6 @@
+# espera: es para enteros sin signo
+# Un i16 tiene signo: desbordarlo es un panic, no da la vuelta.
+fn main() {
+    let a: i16 = 30000
+    print(suma_ciclica(a, a))
+}

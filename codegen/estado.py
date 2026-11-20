@@ -108,6 +108,10 @@ class Estado:
         self.needs_imod = False  # módulo i32/i32: necesita scar_imod() con panic real
         self.needs_iarith = False  # +,-,* y negación de i32 con panic por overflow
         self.needs_i64 = False  # aritmética, bits y conversiones de i64 (_i64_helpers_c)
+        self.sin_signo_usados = set()  # los sin signo con cuentas, bits o conversiones (_sin_signo_helpers_c)
+        self.con_signo_usados = set()  # i16 con cuentas, bits, abs o conversiones (_con_signo_helpers_c)
+        self.min_max_con_signo = set()  # i16 en min/max (_abs_min_max_helpers_c)
+        self.min_max_sin_signo = set()  # los sin signo con abs/min/max (scar_abs_<T>, scar_min_<T>...)
         self.needs_abs_min_max = False  # abs/min/max (_abs_min_max_helpers_c)
         self.needs_str_concat = False  # str + str: necesita scar_str_concat() (malloc)
         self.needs_str_cmp = False  # str == str: necesita scar_str_cmp_own()
@@ -236,6 +240,9 @@ class Estado:
         # (fresh_owned.resolve_contenedores_prestados)
         self.contenedores_prestados = {}
         self._vecs_prestados_de = {}  # fn -> nombres de sus parámetros Vec prestados
+        # lo que liga un `match o { Some(f) => ... }` / `while let Some(f) = o` cuando
+        # es un Vec que sigue siendo de `o`: en C, un puntero al Vec de adentro de o
+        self._ligadas_ptr = set()
         self._prestar_tarde = {}  # id(Call) -> temporales de Vec/Map prestados sin sentencia que los suelte
         # nombre -> índices de params Option<Struct> cuyo contenido la fn puede
         # quedarse (fresh_owned.resolve_consumed_option_params)

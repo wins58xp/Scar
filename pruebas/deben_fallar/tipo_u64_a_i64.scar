@@ -1,0 +1,7 @@
+# espera: convierte con to_i64(...), que es un panic si el valor no cabe
+# Un u64 no pasa solo a i64: podría no caber.
+fn main() {
+    let a: u64 = 10000000000000000000
+    let n: i64 = a
+    print(n)
+}

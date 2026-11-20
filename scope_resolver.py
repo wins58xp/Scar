@@ -141,6 +141,10 @@ def _nested_scopes(stmt):
         # el T de expr, que es justo el trabajo que este módulo evita) --
         # None, no un TypeAnn inventado.
         return [(stmt.body, [Symbol(stmt.pattern, None, "while_let")])]
+    if isinstance(stmt, ForStmt) and getattr(stmt, "x_for", None):
+        # `for x in v { ... }` (parser._for_en_vec): lo visible es x, no el
+        # índice escondido. Su tipo lo completa _walk_block si v está a la vista.
+        return [(stmt.body, [Symbol(stmt.x_for, None, "for_var")])]
     if isinstance(stmt, ForStmt):
         # `for i in a..b { ... }`: i siempre es i32 -- el checker exige
         # rango i32..i32 (type_checker.py, _check_stmt/ForStmt), no hay
@@ -163,6 +167,8 @@ def _walk_block(stmts, line, col, outer_bound, visible, program):
 
         bound = _next_sibling_bound(stmts, i, outer_bound)
         for nested_block, extra in _nested_scopes(stmt):
+            if getattr(stmt, "x_for", None):
+                extra = [Symbol(stmt.x_for, _elemento_visible(stmt.texto_for, visible), "for_var")]
             if _block_could_contain(nested_block, line, bound):
                 return _walk_block(
                     nested_block.stmts, line, col, bound, visible + extra, program,
@@ -176,6 +182,18 @@ def _walk_block(stmts, line, col, outer_bound, visible, program):
             ]
 
     return visible
+
+
+def _elemento_visible(texto, visible):
+    """El tipo de los elementos de `v` en `for x in v`, si `v` es un nombre a
+    la vista con tipo Vec<T> conocido; si no, None."""
+    for sym in reversed(visible):
+        if sym.name == texto:
+            ty = sym.type_ann
+            if ty is not None and ty.name == "Vec" and ty.args:
+                return ty.args[0]
+            return None
+    return None
 
 
 def _infer_let_type(stmt, program):

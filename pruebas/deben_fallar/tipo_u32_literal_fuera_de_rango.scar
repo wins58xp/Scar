@@ -1,0 +1,5 @@
+# espera: el número 4294967296 no entra en un u32 (va de 0 a 4294967295)
+fn main() {
+    let b: u32 = 4294967296
+    print(b)
+}

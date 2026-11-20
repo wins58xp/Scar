@@ -31,6 +31,7 @@ from parser import (
     PrintExpr, ReturnStmt, StrLit, StructDecl, StructLit, WhileLetStmt, WhileStmt,
     es_panic, hijos,
 )
+from types_ import ENTEROS, FLOTANTES  # familias de tipos (types_.py)
 from types_ import TypeAnn, T_BOOL, T_VOID
 
 _POSICION = ("line", "col", "archivo")
@@ -120,9 +121,9 @@ class _Bajador:
         if prof > 8 or t is None:
             return None
         n = t.name
-        if n in ("i32", "i64"):
+        if n in ENTEROS:
             return _pos(NumLit(0), src)  # en un lugar i64, el checker lo amplía
-        if n in ("f64", "f32"):
+        if n in FLOTANTES:
             return _pos(NumLit(0.0), src)  # en un lugar f32, el checker lo marca f32
         if n == "bool":
             return _pos(BoolLit(False), src)

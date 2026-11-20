@@ -1,0 +1,7 @@
+# espera: convierte con to_i16(...), que es un panic si el valor no cabe
+# Un i32 no pasa solo a i16: podría no caber.
+fn main() {
+    let n: i32 = 40000
+    let a: i16 = n
+    print(a)
+}

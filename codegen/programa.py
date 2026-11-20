@@ -6,13 +6,14 @@ usuario, la detección de recursión y lo que necesita main.
 import os
 
 from parser import FnDecl, Ident, Call, Node, hijos
-from types_ import TypeAnn, T_I32, T_STR
+from types_ import TypeAnn, T_I32, T_STR, SIN_SIGNO, CON_SIGNO_CHICOS
 
 from . import runtime as runtime_c
+
 from .comun import (
     panic_c,
     _abs_min_max_helpers_c, _C_RESERVADOS_EXPORT, _chr_ord_helpers_c, CodegenError,
-    FN_MARK, _i64_helpers_c, MAP_MARK, _marcas_strc, _PANIC_MAIN_C, _rand_runtime_c,
+    FN_MARK, _i64_helpers_c, _sin_signo_helpers_c, _con_signo_helpers_c, MAP_MARK, _marcas_strc, _PANIC_MAIN_C, _rand_runtime_c,
     _RE_USA_POOL, _shift_helpers_c, _STRC_C, _TEXTO_SIN_TOPE_C, _tls_runtime_c, _to_i32_helper_c,
     VEC_MARK, _vivos_runtime_c,
 )
@@ -40,62 +41,6 @@ class Programa:
             _params, ret = self.task_sigs[item.name] if item.is_task else self.fn_sigs[item.name]
             if ret.name == "Result" and ret.args and ret.args[0].name == "str":
                 self.result_str_value_origin[item.name] = "plain"
-
-    # ---- recursión infinita en el nativo (R14) ----
-    #
-    # Cada función que puede recursar compara, al entrar, el puntero de
-    # pila con un límite del hilo (un margen antes del final de su pila); si
-    # lo pasa, es un panic (antes: segfault mudo). Solo pagan el chequeo las
-    # funciones de un ciclo de llamadas o que usan funciones como valor.
-    def _calcular_recursivas(self, decls):
-        nombres = {d.name for d in decls}
-        plantillas = set(getattr(self, "generic_fns", {}) or {})
-        llama = {d.name: set() for d in decls}
-        sospechosas = set()
-        for d in decls:
-            pila = [d.body]
-            while pila:
-                n = pila.pop()
-                if isinstance(n, Call):
-                    cal = n.callee
-                    if isinstance(cal, Ident):
-                        if cal.name in nombres:
-                            llama[d.name].add(cal.name)
-                        elif cal.name in plantillas:
-                            llama[d.name].update(x for x in nombres if x.startswith(cal.name + "_"))
-                    else:
-                        sospechosas.add(d.name)   # llamada a través de un valor
-                    for h in n.args:
-                        pila.append(h)
-                    if not isinstance(cal, Ident):
-                        pila.append(cal)
-                    continue
-                if isinstance(n, Ident) and n.name in nombres:
-                    # una función usada como valor: puede volver a llamarse por un callback
-                    # que no se ve acá
-                    sospechosas.add(n.name)
-                    sospechosas.add(d.name)
-                if isinstance(n, (Node, list, tuple, dict)):
-                    pila.extend(hijos(n))
-        # además, cualquier función que llama a un valor función (variable)
-        for d in decls:
-            for p in getattr(d, "params", []):
-                t = getattr(p, "type_ann", None)
-                if t is not None and getattr(t, "name", None) == FN_MARK:
-                    sospechosas.add(d.name)
-        recursivas = set()
-        for inicio in llama:
-            vistos, pila = set(), list(llama[inicio])
-            while pila:
-                x = pila.pop()
-                if x == inicio:
-                    recursivas.add(inicio)
-                    break
-                if x in vistos:
-                    continue
-                vistos.add(x)
-                pila.extend(llama.get(x, ()))
-        return {n for n in (recursivas | sospechosas) if n in nombres and n != "main"}
 
     def _runtime_pila(self):
         panic = panic_c(self.has_tasks)
@@ -396,8 +341,11 @@ class Programa:
         if self.libreria:
             self._validar_libreria(fns)
             fns = [d for d in fns if d.name != "main"]  # una librería no tiene main
-        # Qué funciones pueden recursar (R14).
-        self._fns_recursivas = self._calcular_recursivas(fns + tasks)
+        # Cada fn revisa la pila al entrar (pila.c, SCAR_PILA_REVISAR;
+        # ver pilas.c); en una librería también: cada export fn cambia
+        # a una pila de SCAR al entrar (scar_lib_en_pila, pilas.c).
+        # SCAR_REVISAR_PILA=no al compilar la saca (solo para medir lo que cuesta).
+        self._revisar_pila = os.environ.get("SCAR_REVISAR_PILA", "") != "no"
         return fns, tasks
 
     def _pasada_structs(self):
@@ -524,17 +472,34 @@ class Programa:
                 )
                 continue
 
+            # La llamada a C corre en una pila de C (scar_en_pila_c, pila_c.c;
+            # ver pilas.c): los argumentos y el resultado van en un
+            # struct, y un trampolín llama al símbolo desde la otra pila.
+            campos = [f"{self._ffi_c_type(t, param=True)} a{i};" for i, t in enumerate(params)]
+            if ret_c_type != "void":
+                campos.append(f"{ret_c_type} r;")
+            args_en_struct = guard_args_fwd.replace("__scar_gp", "a->a")
+            extern_guarded_wrappers.append(
+                f"typedef struct {{ {' '.join(campos) or 'char vacio;'} }} ScarExtA_{name};\n"
+                f"static void scar_ext_t_{name}(void *p) {{\n"
+                f"    ScarExtA_{name} *a = p;\n"
+                f"    (void)a;\n"
+                f"    {'a->r = ' if ret_c_type != 'void' else ''}{simbolo_c(name)}({args_en_struct});\n"
+                f"}}")
+            iniciar = ", ".join(f".a{i} = __scar_gp{i}" for i in range(len(params)))
+            llamar = (f"    ScarExtA_{name} __scar_ea = {{ {iniciar or '0'} }};\n"
+                      f"    scar_bloqueo_entrar(); scar_en_pila_c(scar_ext_t_{name}, &__scar_ea); scar_bloqueo_salir();\n")
             if ret_c_type == "void":
-                call_line = f"    scar_bloqueo_entrar(); {simbolo_c(name)}({guard_args_fwd}); scar_bloqueo_salir();\n"
+                call_line = llamar
                 crash_ret = ""
                 normal_ret = ""
             else:
                 if ret_for_decl.name == "str":
                     # C sigue siendo dueño de lo que devolvió: el programa se queda con
                     # una copia (ver scar_ffi_str_propia)
-                    call_line = f"    {ret_c_type} __scar_gr = scar_ffi_str_propia(SCAR_BLOQUEANDO({simbolo_c(name)}({guard_args_fwd})));\n"
+                    call_line = llamar + f"    {ret_c_type} __scar_gr = scar_ffi_str_propia(__scar_ea.r);\n"
                 else:
-                    call_line = f"    {ret_c_type} __scar_gr = SCAR_BLOQUEANDO({simbolo_c(name)}({guard_args_fwd}));\n"
+                    call_line = llamar + f"    {ret_c_type} __scar_gr = __scar_ea.r;\n"
                 # Este return no se ejecuta (scar_extern_report_crash() termina o
                 # salta), pero sin él gcc avisa "control reaches end". `(Tipo){0}`
                 # sirve para escalares y para un struct por valor.
@@ -545,6 +510,7 @@ class Programa:
                 f"    scar_extern_guard_fnname = \"{name}\";\n"
                 f"    scar_extern_guard_active = 1;\n"
                 f"    if (SCAR_SIGSETJMP(scar_extern_guard_env) != 0) {{\n"
+                f"        scar_pila_c_tras_caida();\n"
                 f"        scar_extern_report_crash(\"{name}\", scar_extern_guard_signum);\n"
                 f"{crash_ret}"
                 f"    }}\n"
@@ -586,7 +552,7 @@ class Programa:
             task_args_typedefs.append(typedef_args)
             task_thread_defs.append(def_wrapper)
 
-        if self._fns_recursivas:
+        if self._revisar_pila and (fns or tasks):
             decls.insert(0, self._runtime_pila())
         bodies = [self.gen_fn(decl) for decl in fns] + [self.gen_fn(decl) for decl in tasks]
 
@@ -861,6 +827,7 @@ class Programa:
             "extern_guard",
             FFI_STR_PROPIA=runtime_c.texto("ffi_str_propia") if self._extern_str_en_proceso() else '',
         )
+        extern_guard_helpers += runtime_c.texto("pila_c")
         if self.has_tasks:
             extern_guard_helpers += runtime_c.texto("extern_crash_tareas")
         else:
@@ -922,7 +889,7 @@ class Programa:
         needs_gnu_source = (
             needs_pthread or self.libreria or self.needs_read_pipe or self.needs_net_io
             or self.needs_now or self.needs_sleep or bool(self.extern_sigs)
-            or bool(getattr(self, "_fns_recursivas", None))   # Sigaction/sigaltstack
+            or not self.libreria   # pilas.c: madvise, pthread_attr_setstack
         )
         # Cada bloque de struct lleva un encabezado de 8 bytes antes del
         # puntero que dice de dónde salió (malloc o la arena de una task); 8 y
@@ -1049,6 +1016,7 @@ class Programa:
             parts.append(arena_support)
             # el planificador de tareas livianas y la condvar que lo conoce
             # (ScarCond), antes del contexto, que las usa
+            parts.append(runtime_c.texto("pilas"))
             parts.append(runtime_c.texto("planificador"))
             parts.append(runtime_c.texto("cond"))
             parts.append(task_context_struct)
@@ -1058,6 +1026,8 @@ class Programa:
             # y un único punto de panic que lo suelta antes de exit(1), gemelo de
             # scar_panic().
             parts.append(_vivos_runtime_c() + _PANIC_MAIN_C)
+            # scar_main_en_pila; en una librería, scar_lib_en_pila
+            parts.append(runtime_c.texto("pilas"))
             if self.uses_chan:
                 # un Chan sin tareas: ScarCond es la pthread_cond_t a secas
                 parts.append(runtime_c.texto("cond"))
@@ -1077,8 +1047,15 @@ class Programa:
             parts.append(_shift_helpers_c(self.needs_shift, self.has_tasks))
         if self.needs_i64:
             parts.append(_i64_helpers_c(self.has_tasks))
+        for t in SIN_SIGNO:   # en el orden de la familia, así el C no depende del set
+            if t in self.sin_signo_usados:
+                parts.append(_sin_signo_helpers_c(t, self.has_tasks))
+        for t in CON_SIGNO_CHICOS:
+            if t in self.con_signo_usados:
+                parts.append(_con_signo_helpers_c(t, self.has_tasks))
         if self.needs_abs_min_max:
-            parts.append(_abs_min_max_helpers_c(self.has_tasks, self.needs_min_max_f32))
+            parts.append(_abs_min_max_helpers_c(self.has_tasks, self.needs_min_max_f32, self.min_max_sin_signo,
+                                                self.min_max_con_signo))
         if self.needs_imod:
             parts.append(imod_helper)
         if self.needs_now:

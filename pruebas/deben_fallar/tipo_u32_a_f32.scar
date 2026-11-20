@@ -1,0 +1,6 @@
+# espera: un f32 guarda enteros exactos solo hasta 16777216
+fn main() {
+    let a: u32 = 16777217
+    let f: f32 = a
+    print(f)
+}

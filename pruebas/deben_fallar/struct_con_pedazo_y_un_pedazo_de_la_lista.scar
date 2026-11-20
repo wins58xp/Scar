@@ -1,0 +1,13 @@
+# espera: no puede cambiar de largo mientras se usa 'red', que guarda un pedazo de él
+struct Capa {
+    w: Vec<f64>
+    n: i32
+}
+fn main() {
+    let params = [1.0, 2.0, 3.0]
+    let red: Vec<Capa> = vec_new()
+    red.push(Capa { w: params[0..2], n: 1 })
+    let q = red[0..1]
+    params.push(9.0)
+    print(q[0].w)
+}

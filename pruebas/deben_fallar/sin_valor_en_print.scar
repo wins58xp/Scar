@@ -1,0 +1,5 @@
+# espera: '.push()' no devuelve nada: no se puede usar como valor
+fn main() {
+    let mut v: Vec<f32> = vec_new()
+    print(v.push(1.0))
+}

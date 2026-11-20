@@ -1,0 +1,5 @@
+# espera: número hexadecimal mal formado '0xFFz'
+fn main() {
+    let a = 0xFFz
+    print(a)
+}

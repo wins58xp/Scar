@@ -1,0 +1,8 @@
+# espera: acá no se puede usar directo
+fn mitad(v: Vec<f64>) -> Vec<f64> {
+    return v[0..v.len() / 2]
+}
+fn main() {
+    let w = [1.0, 2.0]
+    print(w.len() > 9 or mitad(w).len() == 0)
+}

@@ -1,0 +1,6 @@
+# espera: el número 256 no entra en un u8 (va de 0 a 255)
+# Un número escrito toma el tipo u8 si es lo que se espera, pero tiene que caber.
+fn main() {
+    let b: u8 = 256
+    print(b)
+}

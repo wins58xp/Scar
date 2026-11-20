@@ -1,0 +1,10 @@
+# espera: acá se le pasa a crece(), que puede cambiarle el largo
+fn crece(v: Vec<i32>) {
+    v.push(1)
+}
+fn main() {
+    let v: Vec<i32> = [1, 2]
+    for x in v {
+        crece(v)
+    }
+}

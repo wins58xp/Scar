@@ -6,14 +6,21 @@ de SCAR a C.
 from parser import (marca_new_generico, Parser,
     NumLit, StrLit, BoolLit, Ident, Call, FieldAccess, ArrayLit, MethodCall,
 )
+from types_ import ENTEROS  # familias de tipos (types_.py)
 from types_ import TypeAnn, T_I32, T_STR, T_VOID
 
 from . import runtime as runtime_c
 from .comun import (
-    panic_c,
+    panic_c, C_TYPE,
     CHAN_MARK, CodegenError, FILE_MARK, LISTENER_MARK, MAP_MARK, PIPE_MARK,
     SOCKET_MARK, TASK_MARK, VEC_MARK,
 )
+
+
+# Sufijo de los nombres de C de la lectura y escritura de bytes según el tipo
+# del elemento del Vec: las de i32 son las de siempre (scar_file_read_bytes);
+# las de u8, scar_file_read_u8 y scar_file_write_bytes_u8.
+_SUFIJO_BYTES = {"i32": "", "u8": "_u8"}
 
 
 class Metodos:
@@ -170,19 +177,22 @@ class Metodos:
         raise CodegenError(f"File no tiene método '.{expr.method}()' en el backend de C")
 
     def _metodo_de_bytes(self, expr, obj_code, env, out, pad, tipo, flag):
-        """.read_bytes(n), .write(s) y .write_bytes(v) de un File o un Socket
-        (`tipo` "file" o "socket"; `flag`, el needs_* de su runtime, que se emite
-        entero y también usa Result_str/_i32). None si es otro método. El str
-        armado de un write (`f.write(a + b)`) y el Vec de un write_bytes van a un
-        temporal."""
-        if expr.method == "read_bytes":
+        """.read_bytes(n), .read_u8(n), .write(s) y .write_bytes(v) de un File o
+        un Socket (`tipo` "file" o "socket"; `flag`, el needs_* de su runtime,
+        que se emite entero y también usa Result_str/_i32). None si es otro
+        método. El str armado de un write (`f.write(a + b)`) y el Vec de un
+        write_bytes van a un temporal. read_bytes da un Vec<i32> y read_u8 un
+        Vec<u8>; write_bytes escribe un Vec<i32> o un Vec<u8>. Cada uno usa las
+        funciones de su tipo de elemento (ver _read_bytes_helpers_c)."""
+        if expr.method in ("read_bytes", "read_u8"):
+            elem = "u8" if expr.method == "read_u8" else "i32"
             n_code = self.gen_expr(expr.args[0], env, out, pad)
             setattr(self, flag, True)
-            self._read_bytes_usados.add(tipo)
-            self.c_type(TypeAnn("Result", [TypeAnn(VEC_MARK, [T_I32])]))  # registra Vec_i32/Result
+            self._read_bytes_usados.add((tipo, elem))
+            self.c_type(TypeAnn("Result", [TypeAnn(VEC_MARK, [TypeAnn(elem)])]))  # registra Vec/Result
             self.c_type(TypeAnn("Result", [T_STR]))
             self.c_type(TypeAnn("Result", [T_I32]))
-            return f"scar_{tipo}_read_bytes({obj_code}, {n_code})"
+            return f"scar_{tipo}_{expr.method}({obj_code}, {n_code})"
         if expr.method == "write":
             arg_code = self.gen_expr(expr.args[0], env, out, pad)
             arg_code = self._capture_fresh_str_concat_arg(expr.args[0], arg_code, env, out, pad)
@@ -190,14 +200,15 @@ class Metodos:
             setattr(self, flag, True)
             return f"scar_{tipo}_write({obj_code}, {arg_code})"
         if expr.method == "write_bytes":
+            elem = self.infer(expr.args[0], env).args[0].name
             arg_code = self.gen_expr(expr.args[0], env, out, pad)
             arg_code = self._capture_fresh_owned_arg(expr.args[0], arg_code, env, out, pad)
             setattr(self, flag, True)
-            self._read_bytes_usados.add(tipo + "_w")
-            self.c_type(TypeAnn("Result", [TypeAnn(VEC_MARK, [T_I32])]))
+            self._read_bytes_usados.add((tipo + "_w", elem))
+            self.c_type(TypeAnn("Result", [TypeAnn(VEC_MARK, [TypeAnn(elem)])]))
             self.c_type(TypeAnn("Result", [T_STR]))
             self.c_type(TypeAnn("Result", [T_I32]))
-            return f"scar_{tipo}_write_bytes({obj_code}, {arg_code})"
+            return f"scar_{tipo}_write_bytes{_SUFIJO_BYTES[elem]}({obj_code}, {arg_code})"
         return None
 
     def _gen_socket_method(self, expr: "MethodCall", env, out, pad) -> str:
@@ -218,60 +229,62 @@ class Metodos:
         raise CodegenError(f"Socket no tiene método '.{expr.method}()' en el backend de C")
 
     def _read_bytes_helpers_c(self):
-        """Lectura binaria a un Vec<i32> de bytes 0..255, con el contrato del
-        intérprete (read_bytes). Mientras junta bytes, el Vec está en el registro
-        de dueñas vivas, para que una cancelación o un panic en la espera lo
-        suelte."""
-        vec = self.c_type(TypeAnn(VEC_MARK, [T_I32]))
-        res = self.c_type(TypeAnn("Result", [TypeAnn(VEC_MARK, [T_I32])]))
+        """Lectura y escritura binaria con el contrato del intérprete: a y de un
+        Vec<i32> de bytes 0..255 (read_bytes, de antes de u8) o un Vec<u8>
+        (read_u8). Las dos salen de las mismas plantillas de native/runtime/,
+        con el tipo del elemento; las de i32 conservan sus nombres de siempre y
+        las de u8 llevan "_u8". Marcas de las plantillas: METODO (read_bytes o
+        read_u8, nombre de la función y de sus mensajes), T y CT (el elemento:
+        i32/int32_t o u8/uint8_t), SUF ("" o "_u8"), y en la escritura BYTES y
+        SOLTAR (un Vec<i32> se pasa a bytes revisando cada valor y se libera esa
+        copia; los datos de un Vec<u8> ya son los bytes). Mientras junta bytes,
+        el Vec está en el registro de dueñas vivas, para que una cancelación o
+        un panic en la espera lo suelte."""
         panic = panic_c(self.has_tasks)
         ahora = "scar_monotonic_now()" if self.has_tasks else "__scar_io_monotonic_now()"
         cancel = "        scar_cancel_check();\n" if self.has_tasks else ""
-        c = (
-            f"static void scar_drop_bytes_tmp(void *slot) {{ scar_vec_free_i32(*({vec}*)slot); }}\n"
-            f"static {res} scar_bytes_err(const char *msg) {{\n"
-            f"    size_t n = strlen(msg);\n"
-            f"    char *e = scar_malloc(n + 1);\n"
-            f"    memcpy(e, msg, n + 1);\n"
-            f"    return {res}_Err(e);\n"
-            f"}}\n"
-        )
-        if "file_w" in self._read_bytes_usados or "socket_w" in self._read_bytes_usados:
-            c += runtime_c.texto(
-                "read_bytes_vec",
-                VEC=str(vec),
-                PANIC=str(panic),
+        usados = self._read_bytes_usados
+        c = ""
+        for elem in ("i32", "u8"):
+            if not any(e == elem for _, e in usados):
+                continue
+            suf = _SUFIJO_BYTES[elem]
+            vec = self.c_type(TypeAnn(VEC_MARK, [TypeAnn(elem)]))
+            res = self.c_type(TypeAnn("Result", [TypeAnn(VEC_MARK, [TypeAnn(elem)])]))
+            c += (
+                f"static void scar_drop_bytes_tmp{suf}(void *slot) {{ scar_vec_free_{elem}(*({vec}*)slot); }}\n"
+                f"static {res} scar_bytes_err{suf}(const char *msg) {{\n"
+                f"    size_t n = strlen(msg);\n"
+                f"    char *e = scar_malloc(n + 1);\n"
+                f"    memcpy(e, msg, n + 1);\n"
+                f"    return {res}_Err(e);\n"
+                f"}}\n"
             )
-        if "file_w" in self._read_bytes_usados:
-            c += runtime_c.texto(
-                "file_write_bytes",
-                VEC=str(vec),
-            )
-        if "socket_w" in self._read_bytes_usados:
-            c += runtime_c.texto(
-                "socket_write_bytes",
-                VEC=str(vec),
-            )
-        if "file" in self._read_bytes_usados:
-            c += runtime_c.texto(
-                "file_read_bytes",
-                RES=str(res),
-                PANIC=str(panic),
-                VEC=str(vec),
-            )
-        if "socket" in self._read_bytes_usados:
-            c += runtime_c.texto(
-                "socket_read_bytes",
-                RES=str(res),
-                PANIC=str(panic),
-                VEC=str(vec),
-                AHORA=str(ahora),
-                CANCEL=str(cancel),
-            )
+            # escribir: un Vec<i32> se pasa a bytes revisando cada valor
+            # (scar_bytes_de_vec); los datos de un Vec<u8> ya son los bytes
+            escribe = [t for t in ("file_w", "socket_w") if (t, elem) in usados]
+            if escribe and elem == "i32":
+                c += runtime_c.texto("read_bytes_vec", VEC=str(vec), PANIC=str(panic))
+            bytes_ = "scar_bytes_de_vec(v)" if elem == "i32" else "v.data"
+            soltar = "free(b);" if elem == "i32" else "(void)b;"
+            if "file_w" in escribe:
+                c += runtime_c.texto("file_write_bytes", VEC=str(vec), SUF=suf,
+                                     BYTES=bytes_, SOLTAR=soltar)
+            if "socket_w" in escribe:
+                c += runtime_c.texto("socket_write_bytes", VEC=str(vec), SUF=suf,
+                                     BYTES=bytes_, SOLTAR=soltar)
+            metodo = "read_bytes" if elem == "i32" else "read_u8"
+            if ("file", elem) in usados:
+                c += runtime_c.texto("file_read_bytes", RES=str(res), PANIC=str(panic), VEC=str(vec),
+                                     METODO=metodo, T=elem, CT=C_TYPE[elem], SUF=suf)
+            if ("socket", elem) in usados:
+                c += runtime_c.texto("socket_read_bytes", RES=str(res), PANIC=str(panic), VEC=str(vec),
+                                     METODO=metodo, T=elem, CT=C_TYPE[elem], SUF=suf,
+                                     AHORA=str(ahora), CANCEL=str(cancel))
         return c
 
     def _gen_listener_method(self, expr: "MethodCall", env, out, pad) -> str:
-        """.accept()/.close() de Listener -> scar_listener_*(). .accept() espera
+        """.accept()/.close()/.puerto() de Listener -> scar_listener_*(). .accept() espera
         con select(), timeout y cancelación, como scar_socket_read()."""
         obj_code = self.gen_expr(expr.obj, env, out, pad)
         if expr.method == "accept":
@@ -282,6 +295,9 @@ class Metodos:
             self.needs_net_io = True
             out.append(f"{pad}scar_listener_close({obj_code});")
             return "((void)0)"
+        if expr.method == "puerto":
+            self.needs_net_io = True
+            return f"scar_listener_puerto({obj_code})"
         raise CodegenError(f"Listener no tiene método '.{expr.method}()' en el backend de C")
 
     def _gen_vec_method(self, expr: "MethodCall", obj_ty, env, out, pad) -> str:
@@ -429,7 +445,7 @@ class Metodos:
             # el Vec (o el pedazo) va por valor: escribe por su puntero a los datos
             otro = self.gen_expr(expr.args[0], env, out, pad)
             k = self.gen_expr(expr.args[1], env, out, pad, expected_ty=inner)
-            if inner.name in ("i32", "i64") and ("acumular", name_part) not in self.vec_trozo_defs:
+            if inner.name in ENTEROS and ("acumular", name_part) not in self.vec_trozo_defs:
                 self.vec_trozo_defs[("acumular", name_part)] = \
                     self._vec_c_acumular_entero(name_part, self.c_type(obj_ty), inner)
             out.append(f"{pad}scar_vec_acumular_{name_part}({obj_code}, {otro}, {k});")

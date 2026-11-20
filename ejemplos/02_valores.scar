@@ -28,6 +28,25 @@ fn main() {
     let peso: f32 = 0.1
     print("f32:", peso + 0.2, "f64:", 0.1 + 0.2, "f32 a f64:", to_f64(peso))
 
+    # u8: un byte, de 0 a 255 (pasarse es un panic; dar la vuelta se pide)
+    let byte: u8 = 200
+    let ancho: i32 = byte
+    print("u8:", byte + 55, "como i32:", ancho * 1000, "dando la vuelta:", suma_ciclica(byte, 100))
+
+    # u32: de 0 a 4.294.967.295 (colores ARGB, hashes); pasa solo a i64 y f64
+    let color: u32 = 4294934528
+    let doble: i64 = color
+    print("u32:", color, "rojo:", (color >> 16) & 255, "como i64:", doble * 2)
+
+    # u64: de 0 a 18.446.744.073.709.551.615 (hashes de 64 bits, tamaños de
+    # archivo); no pasa solo a nada, se convierte con to_i64 o to_f64
+    let tamano: u64 = 18000000000000000000
+    print("u64:", tamano, "en KB:", tamano / 1024, "como f64:", to_f64(tamano))
+
+    # i16: de -32.768 a 32.767 (una muestra de audio); pasa solo a i32
+    let muestra: i16 = -12000
+    print("i16:", muestra, "a la mitad:", muestra / 2, "en i32:", to_i32(muestra) * 3)
+
     # bits: separar los tres bytes de un color 0xFF8800
     let color = 16746496
     print("rojo", (color >> 16) & 255, "verde", (color >> 8) & 255, "azul", color & 255)

@@ -57,12 +57,13 @@ from parser import (
     MatchArm, Patron, PrintExpr,
     ExternFnDecl, ExternTypeDecl, block_always_returns,
 )
+from types_ import ENTEROS, ESCALARES_STR, FLOTANTES  # familias de tipos (types_.py)
 from types_ import TypeAnn
 
 TAG = "tag"
 # los patrones de un match sobre Option o Result
 _PATRONES_OPCION = {"Some": "Option", "None": "Option", "Ok": "Result", "Err": "Result"}
-DATOS_OK = ("i32", "i64", "f32", "f64", "bool", "str")
+DATOS_OK = ESCALARES_STR
 _ATRIBUTOS_POSICION = ("line", "col", "archivo")
 
 
@@ -194,7 +195,7 @@ class _Bajada:
                 globales[nombre] = it
             if isinstance(it, StructDecl):
                 self.structs[it.name] = it
-        tipos_reservados = {"i32", "i64", "f32", "f64", "bool", "str", "void", "Vec", "Map", "Option",
+        tipos_reservados = set(ESCALARES_STR) | {"void", "Vec", "Map", "Option",
                             "Result", "Chan", "File", "Socket", "Listener", "Pipe"}
         for it in self.program.items:
             if not isinstance(it, EnumDecl):
@@ -261,9 +262,9 @@ class _Bajada:
         if prof > 8:
             return None
         n = t.name
-        if n in ("i32", "i64"):
+        if n in ENTEROS:
             return _pos(NumLit(0), src)  # en un lugar i64, el checker lo amplía
-        if n in ("f64", "f32"):
+        if n in FLOTANTES:
             return _pos(NumLit(0.0), src)  # en un lugar f32, el checker lo marca f32
         if n == "bool":
             return _pos(BoolLit(False), src)

@@ -182,7 +182,8 @@ def compile_file(path, out_binary, libreria=False):
         # una .so que otro proceso carga (ctypes, dlopen)
         cc_cmd = [f for f in cc_cmd if f not in ("-fPIE", "-pie")]
         cc_cmd[1:1] = ["-fPIC", "-shared"]
-    if codegen.has_tasks or codegen.uses_chan or libreria:
+    # sin tareas también: main corre en un hilo con una pila de SCAR (pilas.c)
+    if codegen.has_tasks or codegen.uses_chan or libreria or not ES_WINDOWS:
         cc_cmd.append("-lpthread")
     if codegen.has_tasks:
         # El mismo SCAR_JOIN_TIMEOUT que lee el intérprete pisa el valor por

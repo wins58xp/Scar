@@ -1,4 +1,4 @@
-# SCAR 0.1.0 (alfa): qué trae y qué no
+# SCAR 0.4.0 (alfa): qué trae y qué no
 
 > **Esto describe la 0.1.0.** Desde la 0.3.0, de los límites conocidos de abajo:
 >

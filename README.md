@@ -29,8 +29,7 @@ Cada programa corre de dos maneras, con la misma salida: con un intérprete
 (`scar run`) o compilado a C y a un binario nativo (`scar build`).
 
 > **Esto es un alfa (0.4.0).** El lenguaje funciona y está probado, pero
-> todavía puede cambiar. Qué trajo la primera versión: [`SCAR_0.1.0.md`](SCAR_0.1.0.md);
-> lo que cambió después: [`CHANGELOG.md`](CHANGELOG.md).
+> todavía puede cambiar. Lo que trae cada versión está en [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Instalar
 
